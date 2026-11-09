@@ -1,0 +1,43 @@
+"""比較結果の保存と読み込み(ADR-0017)。入口は build_record と save を呼ぶだけで、保存の処理は持たない。"""
+
+from driftpilot.storage.record import (
+    CONVERSATION_KEY,
+    DEFAULT_LABEL,
+    JOB_KEY,
+    RECORD_KEYS,
+    StorageError,
+    StorageFormatError,
+    StoredRecord,
+    UnsupportedSchemaVersion,
+    build_record,
+    conversation_plain,
+    default_filename,
+    from_record,
+    load,
+    load_raw,
+    resaved_record,
+    rules_fingerprint,
+    save,
+    to_plain,
+)
+
+__all__ = [
+    "CONVERSATION_KEY",
+    "DEFAULT_LABEL",
+    "JOB_KEY",
+    "RECORD_KEYS",
+    "StorageError",
+    "StorageFormatError",
+    "StoredRecord",
+    "UnsupportedSchemaVersion",
+    "build_record",
+    "conversation_plain",
+    "default_filename",
+    "from_record",
+    "load",
+    "load_raw",
+    "resaved_record",
+    "rules_fingerprint",
+    "save",
+    "to_plain",
+]

@@ -1,0 +1,21 @@
+# パッケージに同梱する機種の正規化ルール(ADR-0025 決定5、REQ-22 §3b)。--rules を省いたときに使う。
+# リポジトリ直下の normalization_rules.yaml の platform 付きの項目と同じ内容にする(テストで固定している)。
+# platform の付いたルールは、config の機種(--platform)が一致したときだけ対象になり、default_enabled が効く。
+# raw と structured の両方に、行数を変えずに当てる。
+# 既定を外すには、これを含まない(または default_enabled: false にした)自分のルールファイルを --rules で渡す。
+rules:
+  - id: fortigate-enc-value
+    description: FortiGate の ENC が付く値(表示のたびに再暗号化される)を固定値にする。比較対象外として件数を結果に出す
+    pattern: '^(\s*set \S+ ENC )\S+\s*$'
+    replacement: '\1<encrypted>'
+    scope: config
+    default_enabled: true
+    platform: fortinet
+    exclusion_reason: reencrypted_value
+  - id: fortigate-conf-file-ver
+    description: FortiGate の "#conf_file_ver=" 行を空にする(segmentation が前置き行として外すため、core を通る比較では当たらない)
+    pattern: '^#conf_file_ver=.*$'
+    replacement: ''
+    scope: config
+    default_enabled: true
+    platform: fortinet

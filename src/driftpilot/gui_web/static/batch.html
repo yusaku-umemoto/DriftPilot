@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DriftPilot</title>
+  <link rel="stylesheet" href="pilot.css">
+  <script type="module" src="js/batch.js"></script>
+</head>
+<!--
+  一括比較の画面（REQ-106。REQ-211 / ADR-0153 決定1〜3 で組の一覧と結果を 1 つの表にした）。
+  上から ①入力（変更前・変更後のフォルダと入れ替え、組のファイルを開く行と「組を作り直す」） ②帯 ③進み具合（実行中だけ）
+  ④1 つの表（タブ2枚と、組の設定・全部の組の設定・組を解除） ⑤片方だけのファイル（組にする・hostname の候補）
+  ⑥AI の場所（選んだ組の答えと、AI で解析する行。REQ-213 / ADR-0153 決定9・10） ⑦操作 ⑧ステータス。
+  組を直す・外す・組にする・機種を選ぶのは REQ-212 / ADR-0153 決定4〜8。
+  文は書かず、data-text・data-label（title と aria-label）の鍵で messages.py の文を取る。半角の括弧を含む文と選択肢・タブの題は、
+  Python が返す状態から描く。状態は Python（gui_web/batch_api.py）が返す JSON を js/batch.js が描く。
+  窓の中身は縦にスクロールさせず、表の面が残りの高さを使う。片方だけのファイルは窓の 3 割まで。操作の行とステータスの行は固定。
+  パスの欄とセルは後ろ（ファイル名の側）を見せる（js/path_tail.js。direction は使わない）
+-->
+<body class="pilot-window">
+  <main class="pilot-body">
+    <!-- ①入力。枠の見出し（batch.source）は画面に出さず、枠の aria-label に入れる -->
+    <section class="pilot-group pilot-compare-top" id="inputs">
+      <div class="pilot-input-swap">
+        <div class="pilot-input-grid pilot-input-grid--pick">
+          <label for="before-dir" data-text="batch.before_dir"></label>
+          <input id="before-dir" class="pilot-input" type="text" autocomplete="off" spellcheck="false">
+          <button type="button" class="pilot-button pilot-button--secondary" id="before-pick" data-text="batch.button.pick"></button>
+          <label for="after-dir" data-text="batch.after_dir"></label>
+          <input id="after-dir" class="pilot-input" type="text" autocomplete="off" spellcheck="false">
+          <button type="button" class="pilot-button pilot-button--secondary" id="after-pick" data-text="batch.button.pick"></button>
+        </div>
+        <!-- 変更前と変更後のフォルダを入れ替えて組を作り直す（比較はしない）。2行にまたがるアイコンのボタン -->
+        <button type="button" class="pilot-button pilot-button--secondary pilot-swap" id="swap" data-text="batch.button.swap_icon" data-label="batch.button.swap"></button>
+      </div>
+      <div class="pilot-row pilot-settings-line">
+        <label for="manifest" data-text="batch.open_manifest"></label>
+        <button type="button" class="pilot-button pilot-button--secondary" id="manifest-pick" data-text="batch.button.open"></button>
+        <!-- 組のファイルを開いているときだけ、そのパスを出す -->
+        <input id="manifest" class="pilot-input pilot-grow" type="text" autocomplete="off" spellcheck="false" hidden>
+        <span class="pilot-spacer"></span>
+        <span class="pilot-note" data-text="batch.drop_guide"></span>
+        <!-- 組を作り直す（全部の設定は既定に戻る。直した組があるときは先に確かめる。REQ-212 §2） -->
+        <button type="button" class="pilot-button pilot-button--secondary" id="rebuild" data-text="batch.button.rebuild"></button>
+      </div>
+    </section>
+
+    <!-- ②実行の前の確認（ADR-0020）。組があるときだけ。実行を始めたら隠し、組を作り直すとまた出る -->
+    <div class="pilot-band pilot-band--info" id="banner" role="status" hidden><span class="pilot-lines" id="banner-text"></span></div>
+
+    <!-- ③進み具合。実行中だけ出す -->
+    <div class="pilot-row" id="progress-row" hidden>
+      <!-- 一括比較の実行中の絵（ADR-0174 決定2）。キャラクターがオンのときだけ、進み具合の棒の左に出す（行が出ている間だけ見える） -->
+      <img src="character/batch-progress.png" alt="" aria-hidden="true" class="pilot-character pilot-character--motion" id="character-batch-progress" hidden>
+      <img src="character/batch-progress-still.png" alt="" aria-hidden="true" class="pilot-character pilot-character--still" id="character-batch-progress-still" hidden>
+      <progress class="pilot-progress pilot-grow" id="progress" max="1" value="0"></progress>
+      <span class="pilot-grow" id="progress-text"></span>
+    </div>
+    <p class="pilot-note" id="cancel-note" data-text="batch.cancel_note" hidden></p>
+
+    <!-- ④1 つの表。タブの題は Python が返す。「差分がある組」では差分の無い行を隠すだけ。
+         タブの行の右に「組の設定…」（選んだ行）・「全部の組の設定…」・「組を解除」（REQ-212 §3・§6。どれも主ボタンにしない） -->
+    <div class="pilot-fill">
+      <div class="pilot-row pilot-table-tools">
+        <div class="pilot-tabs" role="tablist">
+          <button type="button" class="pilot-tab" role="tab" id="tab-all" aria-controls="table-wrap" aria-selected="true"></button>
+          <button type="button" class="pilot-tab" role="tab" id="tab-diff" aria-controls="table-wrap" aria-selected="false"></button>
+        </div>
+        <span class="pilot-spacer"></span>
+        <button type="button" class="pilot-button pilot-button--secondary" id="pair-settings" data-text="batch.button.pair_settings"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="all-settings" data-text="batch.button.all_settings"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="unpair" data-text="batch.button.unpair"></button>
+      </div>
+      <!-- 表の枠は最低でも見出しと 5 行の高さ（pilot-table-wrap--rows5。REQ-224 / ADR-0163） -->
+      <div class="pilot-table-wrap pilot-table-wrap--rows5" id="table-wrap" role="tabpanel" tabindex="0">
+        <!-- 行は ⌘（Windows は Ctrl）・Shift を押しながらのクリックで複数選べる（ADR-0176 決定2） -->
+        <table class="pilot-table pilot-table--fixed pilot-table--wrap-head" id="result-table" aria-multiselectable="true">
+          <colgroup></colgroup>
+          <thead>
+            <tr>
+              <!-- 先頭のチェック（外した組は実行しない・保存に書かない。REQ-212 §4）。読み上げの名前は batch.js が入れる。
+                   見出しのチェックは今のタブで見えている行の全部を付け外しする（ADR-0176 決定3） -->
+              <th scope="col" class="pilot-col-check" id="col-included"><input type="checkbox" class="pilot-check" id="included-all"></th>
+              <th scope="col" data-col="label" data-text="batch.col.label" hidden></th>
+              <th scope="col" data-col="before" data-text="batch.col.before"></th>
+              <th scope="col" data-col="after" data-text="batch.col.after"></th>
+              <th scope="col" data-col="platform" data-text="batch.col.platform"></th>
+              <th scope="col" data-col="status" data-text="batch.col.status"></th>
+              <th scope="col" class="pilot-num" data-col="structured" data-text="batch.col.structured"></th>
+              <th scope="col" class="pilot-num" data-col="raw" data-text="batch.col.raw"></th>
+              <th scope="col" data-col="unparsed" data-text="batch.col.unparsed"></th>
+              <th scope="col" data-col="ai_point" data-text="batch.col.ai_point"></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ⑤片方だけのファイル。見出しは 0 件でも出す（ADR-0020）。高さは窓の 3 割まで。
+         行のチェックで変更前だけ 1 つと変更後だけ 1 つを選んで組にする（REQ-233 からは行のドラッグでも組にできる）。hostname の候補は読むだけで、確定するまで組にしない（REQ-212 §6・§7）。
+         AI の案（REQ-219）も同じ候補の表に足すだけで、確定するまで組にしない。
+         片方だけのファイルと候補は折りたたみ（details）。見出しは閉じても見える。開け閉めの初めの値は Python の folds（REQ-224 §5）。
+         ボタンは summary の外に置く（押したときに開け閉めが起きないように） -->
+    <section class="pilot-unpaired" aria-labelledby="unpaired-title">
+      <details class="pilot-details pilot-details--list" id="unpaired-fold">
+        <summary><h2 class="pilot-group-title" id="unpaired-title"></h2></summary>
+        <div class="pilot-row">
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="suggest" data-text="batch.button.suggest"></button>
+          <!-- ファイル名だけを、送る全文の確認の後に AI に送り、案を候補に足す（REQ-219 / ADR-0159。主ボタンにしない） -->
+          <button type="button" class="pilot-button pilot-button--secondary" id="ask-pair-ai" data-text="batch.button.ask_pair_ai"></button>
+          <button type="button" class="pilot-button pilot-button--secondary" id="pair-files" data-text="batch.button.pair_files"></button>
+        </div>
+        <!-- 左右 2 列（左が変更前、右が変更後。幅が狭いときは上下。REQ-233 / ADR-0171 決定1）。列の見出しは Python の unpaired_titles。
+             行を反対側の列の行へドラッグしても組にできる（js/pair_drag.js。pointer の事象だけを使い、HTML5 のドラッグは使わない） -->
+        <p class="pilot-note" data-text="batch.unpaired.drag_note"></p>
+        <div class="pilot-unpaired-columns">
+          <div class="pilot-unpaired-list" data-side="before">
+            <h3 class="pilot-group-title" id="unpaired-before-title"></h3>
+            <div class="pilot-table-wrap" tabindex="0">
+              <table class="pilot-table pilot-table--fixed" id="unpaired-before-table" aria-labelledby="unpaired-before-title">
+                <colgroup><col class="pilot-col-check"><col></colgroup>
+                <thead><tr><th scope="col" id="col-pair-check-before"></th><th scope="col" data-text="batch.col.name"></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="pilot-unpaired-list" data-side="after">
+            <h3 class="pilot-group-title" id="unpaired-after-title"></h3>
+            <div class="pilot-table-wrap" tabindex="0">
+              <table class="pilot-table pilot-table--fixed" id="unpaired-after-table" aria-labelledby="unpaired-after-title">
+                <colgroup><col class="pilot-col-check"><col></colgroup>
+                <thead><tr><th scope="col" id="col-pair-check-after"></th><th scope="col" data-text="batch.col.name"></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </details>
+      <!-- hostname の候補（チェックの既定はオフ）。候補があるときだけ出す -->
+      <details class="pilot-details pilot-details--list pilot-suggestions" id="suggestions" hidden>
+        <summary><h3 class="pilot-group-title" data-text="batch.suggestions"></h3></summary>
+        <div class="pilot-row">
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="accept-suggestions" data-text="batch.button.accept_suggestions"></button>
+          <button type="button" class="pilot-button pilot-button--secondary" id="dismiss-suggestions" data-text="batch.button.dismiss_suggestions"></button>
+        </div>
+        <div class="pilot-table-wrap" tabindex="0">
+          <table class="pilot-table pilot-table--fixed" id="suggestion-table">
+            <colgroup><col class="pilot-col-check"><col><col><col class="pilot-col-hint"></colgroup>
+            <thead>
+              <tr>
+                <!-- 見出しのチェックは画面の中の候補のチェックだけを付け外しする（ADR-0176 決定3） -->
+                <th scope="col" id="col-suggest-check"><input type="checkbox" class="pilot-check" id="suggest-all"></th>
+                <th scope="col" data-text="batch.col.side_before"></th>
+                <th scope="col" data-text="batch.col.side_after"></th>
+                <th scope="col" data-text="batch.col.hint"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+
+    <!-- ⑥AI の場所（REQ-213 / ADR-0153 決定9・10）。上に選んだ組の答え（比較の窓と同じ左の吹き出し。窓の高さの 4 割まで、
+         中でスクロール 1 本。答えが無いときは隠す）、下に AI の行（題・AI プロファイル・プロンプト・「内容を確かめる…」・「AI で解析」・
+         自動送信の文。どちらのボタンも主ボタンにしない）、その下に注記と追加の質問の案内（質問の欄は置かない） -->
+    <section class="pilot-batch-ai" id="ai-area" aria-labelledby="ai-title">
+      <div class="pilot-batch-answer" id="ai-answer" hidden>
+        <!-- 答えの吹き出しの上の顔と名前（ADR-0181 決定1）。キャラクターがオンのときだけ batch.js が hidden を外す。
+             名前と title は data-text・data-title の鍵の文 -->
+        <div class="pilot-avatar-row" id="ai-answer-avatar" hidden>
+          <img src="character/avatar.png" alt="" aria-hidden="true" class="pilot-avatar" data-title="character.avatar.title">
+          <span class="pilot-avatar-name" data-text="character.name"></span>
+        </div>
+        <!-- 読み上げの名前（batch.answer）は batch.js が aria-label に入れる -->
+        <div class="pilot-bubble pilot-bubble--ai" id="ai-answer-bubble">
+          <div class="pilot-answer" id="ai-answer-view" tabindex="0"></div>
+          <p class="pilot-lines" id="ai-answer-text" hidden></p>
+          <button type="button" class="pilot-icon-button" id="ai-copy" data-label="batch.button.copy" hidden></button>
+        </div>
+      </div>
+      <div class="pilot-row pilot-batch-ai-row">
+        <h2 class="pilot-group-title" id="ai-title"></h2>
+        <label for="ai-profile" data-text="batch.ai.profile"></label>
+        <select id="ai-profile" class="pilot-input"></select>
+        <label for="ai-prompt" data-text="batch.ai.prompt"></label>
+        <select id="ai-prompt" class="pilot-input"></select>
+        <button type="button" class="pilot-button pilot-button--secondary" id="ai-check" data-text="batch.button.ai_check"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="ai-send" data-text="batch.button.ai_send"></button>
+        <span class="pilot-note" id="ai-auto-send" hidden></span>
+      </div>
+      <!-- 「AI で解析」「内容を確かめる…」を押せない理由（ADR-0175 決定3）。文は Python が決める -->
+      <p class="pilot-note" id="ai-reason" hidden></p>
+      <p class="pilot-note pilot-lines" id="ai-notes" hidden></p>
+      <p class="pilot-note" id="ai-follow-up-note" data-text="batch.ai.follow_up_note"></p>
+    </section>
+  </main>
+
+  <!-- ⑦下のボタン（ADR-0153 決定3）: 実行・中止、間、保存、右端に設定…（ADR-0176 決定4）と比較画面で開く。注記はボタンの title -->
+  <footer class="pilot-footer">
+    <button type="button" class="pilot-button pilot-button--primary" id="run" data-text="batch.button.run"></button>
+    <button type="button" class="pilot-button pilot-button--secondary" id="cancel" data-text="batch.button.cancel"></button>
+    <span class="pilot-footer-gap"></span>
+    <button type="button" class="pilot-button pilot-button--secondary" id="save-manifest" data-text="batch.button.save_manifest"></button>
+    <button type="button" class="pilot-button pilot-button--secondary" id="save-results" data-text="batch.button.save_results"></button>
+    <!-- 人に渡す形の出力（ADR-0156）。形は選ぶダイアログで、秘密の行は必ず伏せる -->
+    <button type="button" class="pilot-button pilot-button--secondary" id="export" data-text="batch.button.export"></button>
+    <span class="pilot-spacer"></span>
+    <!-- 設定の窓を開く（比較の窓と同じ口。ADR-0176 決定4） -->
+    <button type="button" class="pilot-button pilot-button--secondary" id="open-settings" data-text="batch.button.settings"></button>
+    <button type="button" class="pilot-button pilot-button--secondary" id="handoff" data-text="batch.button.handoff"></button>
+  </footer>
+  <!-- ⑧ステータスの行: 左に状態の文、右に件数の文 -->
+  <div class="pilot-statusbar pilot-statusbar--split">
+    <span class="pilot-status-main" role="status" id="status"></span>
+    <!-- 単純比較の設定の要約と組ごとの設定の数（REQ-228 §7.2）。全部既定なら隠す。はみ出す分は「…」で、全文は title -->
+    <span class="pilot-status-note" id="raw-settings-line" hidden></span>
+    <span class="pilot-status-side" id="counts"></span>
+  </div>
+  <!-- ドロップの印の要素（REQ-205 / ADR-0147 決定2）。js/drop.js がドロップのファイルの一覧をここへ送り、Python はここの drop だけを受ける -->
+  <div id="drop-anchor" hidden></div>
+  <!-- 起動時の絵（ADR-0174 決定2）。--batch で最初に開いたときだけ（view の splash が真のとき）。窓いっぱいに重ね、
+       1.2 秒後に 0.3 秒で薄くして消す。クリックかキーで、すぐ消す（js/character.js） -->
+  <div class="pilot-splash" id="splash" hidden><img src="character/splash.png" alt="" aria-hidden="true" class="pilot-character" id="character-splash" hidden></div>
+</body>
+</html>

@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DriftPilot</title>
+  <link rel="stylesheet" href="pilot.css">
+  <script type="module" src="js/settings.js"></script>
+</head>
+<!--
+  設定の画面（REQ-104）。項目・ボタン・並びは wx の設定画面（gui/settings_frame.py）と同じ。
+  プロファイルの「種類」（ひな形）と送り方の欄（認証・送り方の細かい設定）は、この画面だけにある（REQ-100 §6）。
+  custom-http-json の定義の欄・書き出し・読み込み・接続テストの応答の形も、この画面だけにある（REQ-101 §4）。
+  手元の CLI の形式の欄（CLI の場所・時間の上限）も、この画面だけにある（REQ-102 §4）。
+  「設定ファイルを作る」（wx の「ひな形を作る」）は、最下段ではなく設定ファイルの枠の中に置く（REQ-113 §2）。
+  「AI への指示文」のプロファイルの枠も、この画面だけにある（REQ-116 §3。「プロンプト」のタブの、独立した枠）。
+  窓はタブ 5 枚に分ける（ADR-0154 / REQ-214。「単純比較」のタブは REQ-227 / ADR-0166 で足した）。見出しと帯とタブの行は動かさず、タブの面の中だけがスクロールする。
+  欄は消さずに面の hidden で隠すので、form() はどのタブの欄も読む（切り替えで打った値は消えない）。
+  文は書かず、data-text の鍵で messages.py の文を取る。状態は Python（gui_web/settings_api.py）が返す JSON を js/settings.js が描く
+-->
+<body class="pilot-window">
+  <main class="pilot-body">
+    <header class="pilot-row pilot-section">
+      <h1 class="pilot-heading" data-text="settings.title"></h1>
+      <span class="pilot-spacer"></span>
+      <span class="pilot-mark" id="status-mark" role="status"></span>
+    </header>
+
+    <div class="pilot-band pilot-band--warning" id="band-plaintext" role="status" hidden><span class="pilot-lines" id="band-plaintext-text"></span></div>
+    <div class="pilot-row pilot-section" id="migrate-row" hidden>
+      <button type="button" class="pilot-button pilot-button--secondary" id="migrate" data-text="settings.button.migrate"></button>
+      <p class="pilot-note pilot-lines pilot-grow" id="migrate-reason" hidden></p>
+    </div>
+    <div class="pilot-band pilot-band--warning" id="band-workdir-key" role="status" hidden><span class="pilot-lines" id="band-workdir-key-text"></span></div>
+    <div class="pilot-band pilot-band--warning" id="band-model" role="status" hidden><span class="pilot-lines" id="band-model-text"></span></div>
+    <div class="pilot-band pilot-band--warning" id="band-limits" role="status" hidden><span class="pilot-lines" id="band-limits-text"></span></div>
+    <div class="pilot-band pilot-band--warning" id="band-common-env" role="status" hidden><span class="pilot-lines" id="band-common-env-text"></span></div>
+    <div class="pilot-band pilot-band--error" id="error" role="alert" hidden><span class="pilot-lines" id="error-text"></span></div>
+
+    <!-- タブ（ADR-0154 決定1・7）。切り替えは js/settings.js の selectTab で、aria-selected と面の hidden だけを変える -->
+    <div class="pilot-tabs" role="tablist">
+      <button type="button" class="pilot-tab" role="tab" id="settings-tab-profiles" aria-controls="settings-panel-profiles" aria-selected="true" data-text="settings.tab.profiles"></button>
+      <button type="button" class="pilot-tab" role="tab" id="settings-tab-prompt" aria-controls="settings-panel-prompt" aria-selected="false" data-text="settings.tab.prompt"></button>
+      <button type="button" class="pilot-tab" role="tab" id="settings-tab-auto" aria-controls="settings-panel-auto" aria-selected="false" data-text="settings.tab.auto"></button>
+      <button type="button" class="pilot-tab" role="tab" id="settings-tab-raw" aria-controls="settings-panel-raw" aria-selected="false" data-text="settings.tab.raw"></button>
+      <button type="button" class="pilot-tab" role="tab" id="settings-tab-file" aria-controls="settings-panel-file" aria-selected="false" data-text="settings.tab.file"></button>
+    </div>
+
+    <!-- 「AI プロファイル」のタブ: 一覧と編集の枠・API キーの枠・接続テスト・「このプロファイルを使う」 -->
+    <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-profiles" aria-labelledby="settings-tab-profiles">
+      <div class="pilot-columns">
+        <div class="pilot-side">
+          <section class="pilot-group">
+            <h2 class="pilot-group-title" data-text="settings.profiles"></h2>
+            <div class="pilot-table-wrap" id="profile-list-wrap" tabindex="0">
+              <table class="pilot-table" id="profile-list">
+                <tbody></tbody>
+              </table>
+            </div>
+            <!-- 一覧のすぐ下のいちばん上の操作が「新規作成」（REQ-112） -->
+            <div class="pilot-row">
+              <button type="button" class="pilot-button pilot-button--secondary" id="add-profile" data-text="settings.button.add"></button>
+              <button type="button" class="pilot-button pilot-button--secondary" id="duplicate-profile" data-text="settings.button.duplicate"></button>
+              <span class="pilot-spacer"></span>
+              <button type="button" class="pilot-button pilot-button--danger" id="delete-profile" data-text="settings.button.delete_profile"></button>
+            </div>
+            <div class="pilot-row">
+              <!-- 「新規作成」で足すプロファイルのひな形（REQ-100 §5。選択肢は Python が返す） -->
+              <label for="profile-template" data-text="settings.field.template"></label>
+              <select id="profile-template" class="pilot-input"></select>
+            </div>
+          </section>
+        </div>
+
+        <div class="pilot-main">
+          <section class="pilot-group">
+            <!-- 見出しの横に、選んでいるプロファイルの保存した名前（REQ-112） -->
+            <h2 class="pilot-group-title"><span data-text="settings.edit"></span><span class="pilot-group-title-name" id="editor-name"></span></h2>
+            <div class="pilot-field">
+              <label for="name" data-text="settings.field.name"></label>
+              <input id="name" class="pilot-input" type="text" autocomplete="off">
+            </div>
+            <div class="pilot-field">
+              <label for="api-format" data-text="settings.field.api_format"></label>
+              <select id="api-format" class="pilot-input"></select>
+            </div>
+            <div class="pilot-field">
+              <label for="model" data-text="settings.field.model"></label>
+              <input id="model" class="pilot-input" type="text" autocomplete="off">
+            </div>
+            <div class="pilot-field" data-field="base_url">
+              <label for="base-url" data-text="settings.field.base_url"></label>
+              <input id="base-url" class="pilot-input" type="text" autocomplete="off">
+            </div>
+            <!-- 手元の CLI の形式の欄（REQ-102 §4.1）。この形式では接続先を隠すので、見た目は「モデル」の下。
+                 「選ぶ…」は Python が窓のファイルのダイアログで開く -->
+            <div data-field="cli_path">
+              <div class="pilot-field">
+                <label for="cli-path" data-text="settings.field.cli_path"></label>
+                <div class="pilot-row">
+                  <input id="cli-path" class="pilot-input pilot-grow" type="text" autocomplete="off" spellcheck="false">
+                  <button type="button" class="pilot-button pilot-button--secondary" id="choose-cli" data-text="settings.button.choose_cli"></button>
+                </div>
+              </div>
+              <p class="pilot-note pilot-lines" data-text="settings.note.cli_path"></p>
+            </div>
+            <div class="pilot-field" data-field="timeout_seconds">
+              <label for="timeout-seconds" data-text="settings.field.timeout_seconds"></label>
+              <input id="timeout-seconds" class="pilot-input" type="text" autocomplete="off">
+            </div>
+            <!-- CLI の2形式の Thinking の深さ（ADR-0157 決定12）。選択肢は形式ごとに Python が返す -->
+            <div data-field="cli_effort">
+              <div class="pilot-field">
+                <label for="cli-effort" data-text="settings.field.cli_effort"></label>
+                <select id="cli-effort" class="pilot-input"></select>
+              </div>
+              <p class="pilot-note pilot-lines" data-text="settings.note.thinking_cost"></p>
+            </div>
+            <p class="pilot-note pilot-lines" data-field="codex_note" data-text="settings.note.codex_config"></p>
+            <!-- custom-http-json の定義の欄（REQ-101 §4.1）。この形式では接続先を隠すので、見た目は「モデル」の下 -->
+            <div class="pilot-field" data-field="custom_url">
+              <label for="custom-url" data-text="settings.field.custom_url"></label>
+              <input id="custom-url" class="pilot-input" type="text" autocomplete="off">
+            </div>
+            <div class="pilot-field" data-field="custom_auth">
+              <label for="custom-auth" data-text="settings.field.custom_auth"></label>
+              <select id="custom-auth" class="pilot-input"></select>
+            </div>
+            <div data-field="custom_headers">
+              <div class="pilot-field pilot-field--top">
+                <label for="custom-headers" data-text="settings.field.custom_headers"></label>
+                <textarea id="custom-headers" class="pilot-input" rows="2" spellcheck="false"></textarea>
+              </div>
+              <p class="pilot-note pilot-lines" data-text="settings.note.custom_headers"></p>
+            </div>
+            <div data-field="custom_body">
+              <div class="pilot-field pilot-field--top">
+                <label for="custom-body" data-text="settings.field.custom_body"></label>
+                <textarea id="custom-body" class="pilot-input pilot-mono" rows="8" spellcheck="false"></textarea>
+              </div>
+              <p class="pilot-note pilot-lines" data-text="settings.note.custom_body"></p>
+            </div>
+            <div data-field="answer_path">
+              <div class="pilot-field">
+                <label for="answer-path" data-text="settings.field.answer_path"></label>
+                <input id="answer-path" class="pilot-input" type="text" autocomplete="off" spellcheck="false">
+              </div>
+              <p class="pilot-note pilot-lines" data-text="settings.note.answer_path"></p>
+            </div>
+            <!-- 定義の書き出し・読み込み（REQ-101 §4.3）。ファイルの選択は Python が窓のダイアログで開く -->
+            <div class="pilot-row pilot-section" data-field="custom_file">
+              <span class="pilot-spacer"></span>
+              <button type="button" class="pilot-button pilot-button--secondary" id="export-custom" data-text="settings.button.custom_export"></button>
+              <button type="button" class="pilot-button pilot-button--secondary" id="import-custom" data-text="settings.button.custom_import"></button>
+            </div>
+            <!-- 送り方の欄（REQ-100 §6.1）。data-field の欄を、形式ごとの表（view.format_fields）どおりに出し入れする -->
+            <div class="pilot-field" data-field="auth_header">
+              <label for="auth-header" data-text="settings.field.auth_header"></label>
+              <select id="auth-header" class="pilot-input"></select>
+            </div>
+            <details class="pilot-details pilot-section" id="wire-pane">
+              <summary data-text="settings.wire"></summary>
+              <div class="pilot-details-body">
+                <div class="pilot-field" data-field="max_output_tokens">
+                  <label for="max-output-tokens" data-text="settings.field.max_output_tokens"></label>
+                  <input id="max-output-tokens" class="pilot-input" type="text" autocomplete="off">
+                </div>
+                <div data-field="max_tokens_name">
+                  <div class="pilot-field">
+                    <label for="max-tokens-name" data-text="settings.field.max_tokens_name"></label>
+                    <input id="max-tokens-name" class="pilot-input" type="text" autocomplete="off">
+                  </div>
+                  <p class="pilot-note pilot-lines" data-text="settings.note.max_tokens_name"></p>
+                </div>
+                <div data-field="thinking">
+                  <div class="pilot-field">
+                    <label for="thinking" data-text="settings.field.thinking"></label>
+                    <select id="thinking" class="pilot-input"></select>
+                  </div>
+                  <div class="pilot-field">
+                    <label for="thinking-name" data-text="settings.field.thinking_name"></label>
+                    <input id="thinking-name" class="pilot-input" type="text" autocomplete="off">
+                  </div>
+                  <div class="pilot-field">
+                    <label for="thinking-on" data-text="settings.field.thinking_on"></label>
+                    <input id="thinking-on" class="pilot-input" type="text" autocomplete="off">
+                  </div>
+                  <div class="pilot-field">
+                    <label for="thinking-off" data-text="settings.field.thinking_off"></label>
+                    <input id="thinking-off" class="pilot-input" type="text" autocomplete="off">
+                  </div>
+                  <p class="pilot-note pilot-lines" data-text="settings.note.thinking"></p>
+                  <p class="pilot-note pilot-lines" data-text="settings.note.thinking_cost"></p>
+                </div>
+                <div data-field="query">
+                  <div class="pilot-field pilot-field--top">
+                    <label for="query" data-text="settings.field.query"></label>
+                    <textarea id="query" class="pilot-input" rows="3"></textarea>
+                  </div>
+                  <p class="pilot-note pilot-lines" data-text="settings.note.query"></p>
+                </div>
+              </div>
+            </details>
+            <div class="pilot-row">
+              <span class="pilot-spacer"></span>
+              <button type="button" class="pilot-button pilot-button--secondary" id="save-profile" data-text="settings.button.save_profile"></button>
+            </div>
+          </section>
+
+          <!-- 「API キー」の枠。CLI の形式では枠の全体を隠し、かわりに CLI のログインの注記を出す（REQ-102 §4.1） -->
+          <section class="pilot-group" data-field="api_key">
+            <h2 class="pilot-group-title" data-text="settings.key"></h2>
+            <!-- 環境変数の名前（ADR-0077）。頭の部分は固定の文で、続きだけを入れる。保存はプロファイルの「保存」。
+                 枠の中に置くので、CLI の形式では枠ごと隠れる（data-field は付けない） -->
+            <div class="pilot-field">
+              <label for="env-suffix" data-text="settings.field.env_suffix"></label>
+              <div class="pilot-row">
+                <span class="pilot-mono" id="env-prefix"></span>
+                <input id="env-suffix" class="pilot-input pilot-grow" type="text" autocomplete="off" spellcheck="false">
+              </div>
+            </div>
+            <div class="pilot-row">
+              <span data-text="settings.key.sources"></span>
+              <span class="pilot-spacer"></span>
+              <span id="key-summary"></span>
+            </div>
+            <div class="pilot-section" id="key-sources"></div>
+            <div class="pilot-row pilot-section">
+              <input id="key-input" class="pilot-input pilot-grow" type="password" autocomplete="off">
+              <button type="button" class="pilot-button pilot-button--secondary" id="save-key" data-text="settings.button.save_key"></button>
+              <button type="button" class="pilot-button pilot-button--danger" id="delete-key" data-text="settings.button.delete_key"></button>
+            </div>
+            <div id="key-help"></div>
+            <p class="pilot-note pilot-lines" id="store-note"></p>
+            <p class="pilot-note pilot-lines" id="profile-key-note"></p>
+          </section>
+          <p class="pilot-note pilot-lines pilot-section" data-field="cli_login_note" data-text="settings.note.cli_login"></p>
+
+          <div class="pilot-row pilot-section">
+            <button type="button" class="pilot-button pilot-button--secondary" id="check" data-text="settings.button.check"></button>
+            <span class="pilot-mark pilot-lines pilot-grow" id="check-result" role="status" hidden></span>
+          </div>
+          <!-- 接続テストの応答の形（custom-http-json。名前と型だけ。REQ-101 §4.2）。選ぶと「回答の位置」に道筋が入る -->
+          <div class="pilot-section" id="response-shape" hidden>
+            <p class="pilot-note" data-text="settings.shape"></p>
+            <ul class="pilot-tree" id="response-shape-tree"></ul>
+          </div>
+
+          <div class="pilot-row pilot-section">
+            <button type="button" class="pilot-button pilot-button--primary" id="use" data-text="settings.button.use"></button>
+            <span id="in-use-text"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 「プロンプト」のタブ: AI への指示文のプロファイル（REQ-116 §3）。id と class は今のまま（REQ-214 §2）。
+         最初から入っている3つは欄を読むだけにし、「保存」「削除…」を押せなくする。どのボタンも主ボタンにしない -->
+    <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-prompt" aria-labelledby="settings-tab-prompt" hidden>
+      <section class="pilot-group pilot-section" id="prompt-pane">
+        <h2 class="pilot-group-title" data-text="settings.prompt"></h2>
+        <div class="pilot-band pilot-band--warning" id="band-prompt-user-config" role="status" hidden><span class="pilot-lines" id="band-prompt-user-config-text"></span></div>
+        <div class="pilot-band pilot-band--error" id="prompt-error" role="alert" hidden><span class="pilot-lines" id="prompt-error-text"></span></div>
+        <div class="pilot-columns">
+          <div class="pilot-side">
+            <div class="pilot-table-wrap" id="prompt-list-wrap" tabindex="0">
+              <table class="pilot-table" id="prompt-list">
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="pilot-row">
+              <button type="button" class="pilot-button pilot-button--secondary" id="add-prompt" data-text="settings.prompt.button.add"></button>
+              <button type="button" class="pilot-button pilot-button--secondary" id="duplicate-prompt" data-text="settings.prompt.button.duplicate"></button>
+              <span class="pilot-spacer"></span>
+              <button type="button" class="pilot-button pilot-button--danger" id="delete-prompt" data-text="settings.prompt.button.delete"></button>
+            </div>
+          </div>
+          <div class="pilot-main">
+            <div class="pilot-field">
+              <label for="prompt-name" data-text="settings.prompt.field.name"></label>
+              <input id="prompt-name" class="pilot-input" type="text" autocomplete="off">
+            </div>
+            <h3 class="pilot-section-title"><label for="prompt-template" data-text="settings.prompt.field.template"></label></h3>
+            <textarea id="prompt-template" class="pilot-input pilot-mono pilot-wide" rows="14" spellcheck="false"></textarea>
+            <p class="pilot-note pilot-lines" id="prompt-builtin-note" data-text="settings.note.prompt_builtin" hidden></p>
+            <!-- 欄の下の説明（ADR-0167 決定1〜3）: 太字の決まり 1 行・「使える印」の表（既定は閉じる。開いた状態は保存しない）・注意の箇条書き。
+                 表の行は PROMPT_MARKS の順（テストで確かめる）。文はすべて data-text -->
+            <p class="pilot-strong" id="prompt-diff-once" data-text="settings.note.prompt_diff_once"></p>
+            <details class="pilot-details" id="prompt-marks">
+              <summary data-text="settings.prompt.marks"></summary>
+              <div class="pilot-details-body">
+                <table class="pilot-table" id="prompt-marks-table">
+                  <thead><tr>
+                    <th scope="col" data-text="settings.prompt.marks.col_mark"></th>
+                    <th scope="col" data-text="settings.prompt.marks.col_meaning"></th>
+                  </tr></thead>
+                  <tbody>
+                    <tr><td class="pilot-mono" data-text="settings.prompt.mark.diff.name"></td><td data-text="settings.prompt.mark.diff"></td></tr>
+                    <tr><td class="pilot-mono" data-text="settings.prompt.mark.diff_format.name"></td><td data-text="settings.prompt.mark.diff_format"></td></tr>
+                    <tr><td class="pilot-mono" data-text="settings.prompt.mark.diff_total.name"></td><td data-text="settings.prompt.mark.diff_total"></td></tr>
+                    <tr><td class="pilot-mono" data-text="settings.prompt.mark.sent_range.name"></td><td data-text="settings.prompt.mark.sent_range"></td></tr>
+                    <tr><td class="pilot-mono" data-text="settings.prompt.mark.max_diffs.name"></td><td data-text="settings.prompt.mark.max_diffs"></td></tr>
+                    <tr><td class="pilot-mono" data-text="settings.prompt.mark.notes.name"></td><td data-text="settings.prompt.mark.notes"></td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+            <ul class="pilot-note-list" id="prompt-cautions">
+              <li data-text="settings.note.prompt_plain"></li>
+              <li data-text="settings.note.prompt_premise"></li>
+            </ul>
+            <div class="pilot-row">
+              <button type="button" class="pilot-button pilot-button--secondary" id="use-prompt" data-text="settings.prompt.button.use"></button>
+              <span id="prompt-in-use-text"></span>
+              <span class="pilot-spacer"></span>
+              <button type="button" class="pilot-button pilot-button--secondary" id="save-prompt" data-text="settings.prompt.button.save"></button>
+            </div>
+          </div>
+        </div>
+      </section>
+      <!-- 毎回付ける前提（ADR-0172 決定6 / REQ-234 §5）。どのプロンプトでも送る文に付ける 1 つの文。
+           案内の 3 行は view から textContent で 1 行ずつ li に入れる（箇条の見た目は #prompt-cautions と同じ pilot-note-list）。
+           文字数は JS が欄の文字数から出すだけ（判定は Python） -->
+      <section class="pilot-group pilot-section" id="premise-pane">
+        <h2 class="pilot-group-title"><label for="premise-text" data-text="settings.premise"></label></h2>
+        <div class="pilot-band pilot-band--error" id="premise-error" role="alert" hidden><span class="pilot-lines" id="premise-error-text"></span></div>
+        <textarea id="premise-text" class="pilot-input pilot-wide" rows="6" spellcheck="false"></textarea>
+        <ul class="pilot-note-list" id="premise-notes"></ul>
+        <div class="pilot-row">
+          <span id="premise-count"></span>
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="save-premise" data-text="settings.premise.button.save"></button>
+        </div>
+      </section>
+    </div>
+
+    <!-- 「比較と自動の動き」のタブ（ADR-0154 決定4・5）。書くのは「保存」のとき（[gui] の auto_compare・auto_send_llm・character と、[llm] の上限）。
+         AI に送る差分の上限の欄は、設定ファイルのタブから自動送信の下へ移した（ADR-0167 決定5。id と読み書きは今のまま）。
+         この「保存」（save-auto）と設定ファイルのタブの「保存」（save-config）は、どちらも同じ save_config を呼ぶ -->
+    <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-auto" aria-labelledby="settings-tab-auto" hidden>
+      <!-- 比較の画面の自動の比較（REQ-110） -->
+      <div class="pilot-row">
+        <span class="pilot-radio">
+          <input id="auto-compare" class="pilot-check" type="checkbox">
+          <label for="auto-compare" data-text="settings.config.auto_compare"></label>
+        </span>
+      </div>
+      <!-- 自動送信（ADR-0080 決定2）。オフからオンへの「保存」は送り先を見せて確かめる -->
+      <div class="pilot-row">
+        <span class="pilot-radio">
+          <input id="auto-send-llm" class="pilot-check" type="checkbox">
+          <label for="auto-send-llm" data-text="settings.config.auto_send_llm"></label>
+        </span>
+      </div>
+      <p class="pilot-note pilot-lines" data-text="settings.note.auto_send"></p>
+      <!-- キャラクター（Mirarin）の絵（ADR-0174 決定1。[gui] の character。効くのは次に窓を開いたとき） -->
+      <div class="pilot-row">
+        <span class="pilot-radio">
+          <input id="character" class="pilot-check" type="checkbox">
+          <label for="character" data-text="settings.config.character"></label>
+        </span>
+      </div>
+      <p class="pilot-note pilot-lines" data-text="settings.note.character"></p>
+      <!-- AI に送る差分の上限（ADR-0167 決定5。保存先は config.toml の [llm] のまま） -->
+      <h3 class="pilot-section-title" data-text="settings.config.limits"></h3>
+      <div class="pilot-field">
+        <label for="max-diffs" data-text="settings.config.per_job"></label>
+        <input id="max-diffs" class="pilot-input" type="text" autocomplete="off">
+      </div>
+      <div class="pilot-field">
+        <label for="max-total-diffs" data-text="settings.config.total"></label>
+        <input id="max-total-diffs" class="pilot-input" type="text" autocomplete="off">
+      </div>
+      <p class="pilot-note pilot-lines" id="limits-note"></p>
+      <p class="pilot-note pilot-lines" data-text="settings.note.save_both"></p>
+      <div class="pilot-row">
+        <span class="pilot-spacer"></span>
+        <button type="button" class="pilot-button pilot-button--secondary" id="save-auto" data-text="settings.button.save_config"></button>
+      </div>
+    </div>
+
+    <!-- 「単純比較」のタブ（REQ-227 §12 / ADR-0166 決定10）。比較の窓を開いたときの単純比較の設定（raw-compare.json）。
+         欄は比較の窓と同じ部品（js/raw_options.js・同じ id。「既定に戻す」は置かない）。この「保存」（save-raw）は raw-compare.json だけを書き、
+         config.toml は書かない（form() にも入れない）。誤りの文と読めないときの帯の文は Python が返す -->
+    <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-raw" aria-labelledby="settings-tab-raw" hidden>
+      <section class="pilot-group pilot-rawopt">
+        <h2 class="pilot-group-title" data-text="raw_options.defaults_title"></h2>
+        <p class="pilot-note pilot-lines" data-text="settings.note.raw_defaults"></p>
+        <div class="pilot-band pilot-band--warning" id="raw-defaults-error" role="status" hidden><span class="pilot-lines" id="raw-defaults-error-text"></span></div>
+        <div class="pilot-rawopt-body" id="rawopt-fields">
+          <label for="rawopt-ignore" data-text="raw_options.ignore"></label>
+          <textarea id="rawopt-ignore" class="pilot-input pilot-mono pilot-wide" rows="4" spellcheck="false"></textarea>
+          <p class="pilot-note" data-text="raw_options.ignore.note"></p>
+          <div class="pilot-row">
+            <select id="rawopt-ignore-example" class="pilot-input"><option value="" data-text="raw_options.example"></option></select>
+          </div>
+          <span class="pilot-rawopt-label" data-text="raw_options.replace"></span>
+          <table class="pilot-table pilot-rawopt-replace" id="rawopt-replace">
+            <thead>
+              <tr>
+                <th scope="col" id="rawopt-replace-pattern-head" data-text="raw_options.replace.pattern"></th>
+                <th scope="col" id="rawopt-replace-text-head" data-text="raw_options.replace.text"></th>
+                <th scope="col"><span id="rawopt-remove-label" data-text="raw_options.replace.remove" hidden></span></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="pilot-row">
+            <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-replace-add" data-text="raw_options.replace.add"></button>
+            <select id="rawopt-replace-example" class="pilot-input"><option value="" data-text="raw_options.example"></option></select>
+          </div>
+          <div class="pilot-row">
+            <label for="rawopt-space" data-text="raw_options.space"></label>
+            <select id="rawopt-space" class="pilot-input">
+              <option value="off" data-text="raw_options.space.off"></option>
+              <option value="trailing" data-text="raw_options.space.trailing"></option>
+              <option value="amount" data-text="raw_options.space.amount"></option>
+              <option value="all" data-text="raw_options.space.all"></option>
+            </select>
+          </div>
+          <p class="pilot-note" id="rawopt-space-note" data-text="raw_options.space.indent_note" hidden></p>
+          <div class="pilot-row">
+            <span class="pilot-radio">
+              <input id="rawopt-blank" class="pilot-check" type="checkbox">
+              <label for="rawopt-blank" data-text="raw_options.blank"></label>
+            </span>
+            <span class="pilot-radio">
+              <input id="rawopt-case" class="pilot-check" type="checkbox">
+              <label for="rawopt-case" data-text="raw_options.case"></label>
+            </span>
+          </div>
+          <!-- REQ-228 §8.1: 差分のみ表示の前後の行数・行の移動・比べ方（範囲の確かめは Python。JavaScript は数を送るだけ） -->
+          <div class="pilot-row">
+            <label for="rawopt-context" data-text="raw_options.context"></label>
+            <input id="rawopt-context" class="pilot-input pilot-rawopt-context" type="number" min="0" max="20" step="1">
+          </div>
+          <div class="pilot-row">
+            <span class="pilot-radio">
+              <input id="rawopt-moves" class="pilot-check" type="checkbox">
+              <label for="rawopt-moves" data-text="raw_options.moves"></label>
+            </span>
+          </div>
+          <p class="pilot-note" data-text="raw_options.moves.note"></p>
+          <div class="pilot-row">
+            <label for="rawopt-algorithm" data-text="raw_options.algorithm"></label>
+            <select id="rawopt-algorithm" class="pilot-input">
+              <option value="standard" data-text="raw_options.algorithm.standard"></option>
+              <option value="minimal" data-text="raw_options.algorithm.minimal"></option>
+              <option value="patience" data-text="raw_options.algorithm.patience"></option>
+            </select>
+          </div>
+          <p class="pilot-note" data-text="raw_options.algorithm.note"></p>
+          <p class="pilot-band pilot-band--error pilot-lines" id="rawopt-problems" role="alert" hidden></p>
+        </div>
+        <div class="pilot-row">
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="save-raw" data-text="settings.button.save_raw"></button>
+        </div>
+        <p class="pilot-note pilot-lines" data-text="settings.note.save_raw"></p>
+      </section>
+    </div>
+
+    <!-- 「設定ファイル」のタブ: 伏せる語・「設定ファイルを作る」・「保存」と、診断の折りたたみ。
+         AI に送る差分の上限は「比較と自動の動き」のタブへ移した（ADR-0167 決定5）。見出しのすぐ下でそのことを案内する -->
+    <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-file" aria-labelledby="settings-tab-file" hidden>
+      <section class="pilot-group" id="config-pane">
+        <h2 class="pilot-group-title" data-text="settings.config"></h2>
+        <p class="pilot-note pilot-lines" data-text="settings.note.limits_moved"></p>
+        <h3 class="pilot-section-title" data-text="settings.config.words"></h3>
+        <textarea id="words" class="pilot-input pilot-wide" rows="4"></textarea>
+        <p class="pilot-note pilot-lines" id="words-note"></p>
+        <p class="pilot-lines" id="words-in-effect"></p>
+        <p class="pilot-note pilot-lines" data-text="settings.note.save_both"></p>
+        <!-- 「設定ファイルを作る」は設定ファイルが無いときだけ押せる（REQ-113 §2。動きは create_template のまま） -->
+        <div class="pilot-row">
+          <button type="button" class="pilot-button pilot-button--secondary" id="template" data-text="settings.button.template"></button>
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="save-config" data-text="settings.button.save_config"></button>
+        </div>
+      </section>
+
+      <details class="pilot-details pilot-section" id="diag-pane">
+        <summary data-text="settings.diagnostics"></summary>
+        <div class="pilot-details-body">
+          <section class="pilot-group">
+            <h3 class="pilot-group-title" data-text="settings.diagnostics.fingerprints"></h3>
+            <dl class="pilot-info" id="diag-fingerprints"></dl>
+          </section>
+          <section class="pilot-group">
+            <h3 class="pilot-group-title" data-text="settings.diagnostics.versions"></h3>
+            <dl class="pilot-info" id="diag-versions"></dl>
+          </section>
+          <section class="pilot-group">
+            <h3 class="pilot-group-title" data-text="settings.diagnostics.config_file"></h3>
+            <dl class="pilot-info">
+              <dt data-text="settings.diagnostics.location"></dt>
+              <dd class="pilot-lines" id="diag-location"></dd>
+            </dl>
+          </section>
+        </div>
+      </details>
+    </div>
+  </main>
+
+  <footer class="pilot-footer">
+    <button type="button" class="pilot-button pilot-button--secondary" id="open-folder" data-text="settings.button.open_folder"></button>
+    <button type="button" class="pilot-button pilot-button--secondary" id="export-profiles" data-text="settings.button.export_profiles"></button>
+    <button type="button" class="pilot-button pilot-button--secondary" id="import-profiles" data-text="settings.button.import_profiles"></button>
+    <span class="pilot-spacer"></span>
+    <button type="button" class="pilot-button pilot-button--secondary" id="close" data-text="settings.button.close"></button>
+  </footer>
+  <div class="pilot-statusbar" id="status" role="status"></div>
+</body>
+</html>

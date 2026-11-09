@@ -1,0 +1,45 @@
+[project]
+name = "driftpilot"
+version = "0.1.0"
+description = "Semantic config diff tool for network devices, with LLM-based drift analysis"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = [
+    "hier-config>=3.7.1,<4",
+    "ntc-templates",
+    "pyyaml>=6,<7",
+    "textfsm",
+    # 設定画面が config.toml の決まった行だけを書き換える(コメント・並びを保つ。REQ-93 / ADR-0071 決定3)
+    "tomlkit==0.15.2",
+]
+
+[project.scripts]
+driftpilot = "driftpilot.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-xdist"]
+# LLM 解析の既定の接続(REQ-16)と、API キーの OS の保管庫(REQ-34 / ADR-0033)。
+# 入れなくても比較の全機能は動く(LLM 解析は「未実施(理由)」になる。保管庫は「使えない」として飛ばす)
+llm = ["openai>=3.31,<4", "keyring>=25.7,<26"]
+# 比較画面。pywebview の HTML で描く画面(ADR-0074 / REQ-103・REQ-107。`driftpilot gui`)。wxPython は REQ-249 で外した(ADR-0185)
+# 入れなくても CLI の全機能は動く(`driftpilot gui` は「pywebview が入っていません」になる)
+gui = ["pywebview>=6.2.1,<7"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["ui: 画面を開くテスト。既定では流さない。流すときは pytest -m ui"]
+addopts = ["-m", "not ui"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+"driftpilot.format_detect" = ["defaults.yaml"]
+# 機種の正規化ルール(REQ-22)。--rules を省いても効くように同梱する
+"driftpilot.diff_engine" = ["platform_rules.yaml"]
+# pywebview の画面の HTML・CSS・JavaScript(ADR-0074 決定2 / REQ-103)。exe にも collect_data_files("driftpilot") で入る
+"driftpilot.gui_web" = ["static/*.html", "static/*.css", "static/js/*.js", "static/character/*.png", "static/character/README.md"]

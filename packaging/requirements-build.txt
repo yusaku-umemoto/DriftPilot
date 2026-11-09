@@ -1,0 +1,4 @@
+# exe を作るときだけに使う道具（ADR-0036 決定1）。製品の依存（pyproject.toml）とは分ける。
+# 版は 2026-10-29 に Mac と Windows で試しのビルドが通ったものに固定する。
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9

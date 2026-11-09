@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DriftPilot</title>
+  <link rel="stylesheet" href="pilot.css">
+  <script type="module" src="js/ai_pane.js"></script>
+</head>
+<!--
+  AI の窓（ADR-0160 / REQ-220）。比較の窓の AI の面の「↗」で開く。中身は比較の窓の AI の面と同じ要素（「↗」は置かない）。
+  状態は比較の窓の Python の側が持ち、この窓の Python の側（gui_web/ai_pane_api.py）が返す JSON を js/ai_pane.js が描く（描き方は js/ai_view.js）。
+  文は書かず、data-text・data-placeholder・data-label（title と aria-label）の鍵で messages.py の文を取る。
+  ドロップの印の要素（#drop-anchor）は置かない（js/drop.js が既定の動きを止めるだけで、ファイルは開かれず、Python へも送らない）
+-->
+<body class="pilot-window">
+  <main class="pilot-body">
+    <!-- AI の面（比較の窓の右の面と同じ並び）。上から見出し、答えと質問の吹き出し（スクロールは1本）、質問の欄、切り替えとボタン -->
+    <section class="pilot-fill pilot-ai-pane pilot-ai-window" id="ai-pane" aria-labelledby="ai-title">
+      <div class="pilot-ai-head">
+        <h2 class="pilot-group-title" id="ai-title" data-text="compare.llm"></h2>
+      </div>
+      <!-- 「考えている内容」の折りたたみ（ADR-0169 決定4）の題と注記。js/ai_view.js が読んで、JS が作る details に textContent で入れる -->
+      <span id="ai-thinking-title" data-text="compare.ai.thinking.title" hidden></span>
+      <span id="ai-thinking-note" data-text="compare.ai.thinking.note" hidden></span>
+      <!-- キャラクターがオンのときの空の面の案内（ADR-0181 決定2）。js/ai_view.js が読んで #ai-empty に入れる -->
+      <span id="ai-empty-character" data-text="compare.ai.empty.character" hidden></span>
+      <div class="pilot-chat" id="ai-chat" tabindex="0">
+        <!-- 答えが無いときの短い案内 -->
+        <p class="pilot-note" id="ai-empty" data-text="compare.ai.empty"></p>
+        <!-- 最初の依頼（右の吹き出し。ADR-0179 決定1）。文は js/ai_view.js が textContent だけで入れる（無ければ hidden） -->
+        <div class="pilot-bubble pilot-bubble--me" id="first-request" data-label="compare.ai.first_request" hidden>
+          <p class="pilot-lines" id="first-request-text"></p>
+        </div>
+        <!-- 最初の答え（左の吹き出し）。Python が読み取ったブロックを js/answer_view.js が textContent だけで描く。コピーのアイコンは答えがあるときだけ出す -->
+        <!-- 答えの吹き出しの上の顔と名前（ADR-0181 決定1）。キャラクターがオンで吹き出しが出ているときだけ js/ai_view.js が hidden を外す -->
+        <div class="pilot-avatar-row" id="llm-avatar" hidden>
+          <img src="character/avatar.png" alt="" aria-hidden="true" class="pilot-avatar" data-title="character.avatar.title">
+          <span class="pilot-avatar-name" data-text="character.name"></span>
+        </div>
+        <div class="pilot-bubble pilot-bubble--ai" id="llm-bubble" hidden>
+          <div id="llm-view" class="pilot-answer" tabindex="0"></div>
+          <button type="button" class="pilot-icon-button" id="llm-copy" data-label="compare.button.copy" hidden></button>
+        </div>
+        <!-- 追加の質問のやり取り。質問は右、答えは左の吹き出しで順に並べる -->
+        <div class="pilot-chat-turns" id="follow-up-turns"></div>
+        <p class="pilot-note" id="follow-up-note" hidden></p>
+        <!-- API が返したエラーの文（ADR-0168 決定5）。既定は閉じる。題・文・注記は Python が view の api_error で渡し、textContent だけで入れる。
+             キャラクターがオンのときだけ、文の左に警告の絵を出す（ADR-0174 決定2。#api-error-row はオフのときは形を持たない） -->
+        <div id="api-error-row">
+          <img src="character/warning.png" alt="" aria-hidden="true" class="pilot-character" id="character-warning" hidden>
+          <details class="pilot-details" id="api-error" hidden>
+            <summary id="api-error-title"></summary>
+            <p class="pilot-lines pilot-mono" id="api-error-text"></p>
+            <p class="pilot-note pilot-lines" id="api-error-note"></p>
+          </details>
+        </div>
+        <!-- AI に送る間のクルクルと今の状態の文（ADR-0164 決定5）。途中の答えが出たら隠す。文はステータスの行と同じなので読み上げは重ねない。
+             キャラクターがオンのときは、スピナーの代わりに考え中の絵を出す（ADR-0174 決定2） -->
+        <div class="pilot-ai-busy" id="ai-busy" aria-hidden="true" hidden><span class="pilot-spinner pilot-spinner--small" id="ai-busy-spinner"></span><img src="character/ai-thinking.png" alt="" aria-hidden="true" class="pilot-character pilot-character--motion" id="character-ai-thinking" hidden><img src="character/ai-thinking-still.png" alt="" aria-hidden="true" class="pilot-character pilot-character--still" id="character-ai-thinking-still" hidden><span class="pilot-lines" id="ai-busy-text"></span></div>
+      </div>
+      <div class="pilot-ai-controls">
+        <textarea id="follow-up-question" class="pilot-input pilot-wide" rows="2" spellcheck="false" data-label="compare.ai.input" data-placeholder="compare.ai.input.hint"></textarea>
+        <!-- 「差分＋全文を送る」（ADR-0158）。押せるか・オンの間の案内は Python が決める -->
+        <!-- 押せない理由・全文を付ける組（ADR-0175 決定1・2）はすぐ下の注記と title に出す。文は Python が決める -->
+        <span class="pilot-radio">
+          <input id="send-full-text" class="pilot-check" type="checkbox">
+          <label for="send-full-text" data-text="compare.llm.full_text"></label>
+        </span>
+        <p class="pilot-note pilot-lines" id="send-full-text-reason" hidden></p>
+        <p class="pilot-note pilot-lines" id="send-full-text-note" hidden></p>
+        <div class="pilot-row pilot-ai-row">
+          <label for="ai-profile" data-text="compare.ai.profile"></label>
+          <select id="ai-profile" class="pilot-input"></select>
+          <label for="prompt-profile" data-text="compare.ai.prompt"></label>
+          <select id="prompt-profile" class="pilot-input"></select>
+          <!-- 1つのボタン（ADR-0148 決定5）。名前と押せるかは Python が渡す材料で決まる -->
+          <button type="button" class="pilot-button pilot-button--secondary pilot-ai-ask" id="ai-ask"></button>
+        </div>
+        <p class="pilot-note pilot-lines" id="ai-note" hidden></p>
+      </div>
+    </section>
+  </main>
+  <!-- 状態の文（「AI に送っています」など）と、呼び出しの失敗の文 -->
+  <div class="pilot-statusbar" role="status">
+    <span class="pilot-status-main" id="status-main"></span>
+  </div>
+</body>
+</html>

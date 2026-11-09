@@ -1,0 +1,8 @@
+DriftPilot
+Copyright 2026 umemonmon
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The distributed applications (Windows zip, macOS dmg) bundle third-party
+components. Their licenses are listed in THIRD_PARTY_LICENSES.txt inside
+each distribution.

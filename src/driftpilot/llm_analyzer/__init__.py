@@ -1,0 +1,175 @@
+"""LLM 解析(ADR-0018 / ADR-0019)。差分だけを送り、認証情報を表で伏せ、判定できない行は送らない。
+
+入口(CLI / GUI)が client を組み立てて LlmRequest に入れ、core が analyze を呼ぶ。
+core はキーも設定も知らない(ADR-0015 決定5)。openai は client を作るときにだけ読み込む(`llm` extra)。
+"""
+
+from driftpilot.llm_analyzer.analyze import WholeSection, analyze, analyze_whole
+from driftpilot.llm_analyzer.api_error import ApiErrorText, for_display
+from driftpilot.llm_analyzer.anthropic_client import DEFAULT_ANTHROPIC_BASE_URL, AnthropicMessagesClient
+from driftpilot.llm_analyzer.approval import ApprovedPromptClient, PromptNotApproved
+from driftpilot.llm_analyzer.cli_client import (
+    CLAUDE_CODE_CLI,
+    CLI_DEFAULT_MODEL,
+    CLI_EFFORT_TIMEOUT_SECONDS,
+    CLI_EFFORTS,
+    CLI_FORMATS,
+    CODEX_CLI,
+    DEFAULT_CLI_TIMEOUT_SECONDS,
+    CliClient,
+)
+from driftpilot.llm_analyzer.client import (
+    LLMClient,
+    LLMClientUnavailable,
+    LLMConnectionError,
+    LLMError,
+    LLMResponseError,
+    StreamingClient,
+    StreamStopped,
+    ask_with_deltas,
+)
+from driftpilot.llm_analyzer.connection_check import (
+    CONNECTION_CHECK_PROMPT,
+    ConnectionCheckResult,
+    ShapedClient,
+    send_connection_check,
+)
+from driftpilot.llm_analyzer.custom_http import (
+    CUSTOM_AUTH_NONE,
+    CUSTOM_AUTHS,
+    CUSTOM_HTTP_JSON,
+    CustomHttpJson,
+    CustomProblem,
+    ShapeNode,
+    custom_problem,
+)
+from driftpilot.llm_analyzer.custom_http_client import CustomHttpJsonClient
+from driftpilot.llm_analyzer.mask_patterns import MASK_PATTERNS, SECRET_WORDS, MaskPattern, masking_fingerprint
+from driftpilot.llm_analyzer.masking import Masker
+from driftpilot.llm_analyzer.openai_http_client import OpenAIApiKeyClient
+from driftpilot.llm_analyzer.pair_suggestion import (
+    MAX_PAIR_NAMES,
+    PairReading,
+    build_pair_prompt,
+    file_name_refused,
+    read_pair_answer,
+)
+from driftpilot.llm_analyzer.prompt import (
+    BUILTIN_PROMPT_VERSIONS,
+    DEFAULT_PROMPT_TEMPLATE,
+    INCIDENT_PROMPT_TEMPLATE,
+    PROMPT_MARKS,
+    PROMPT_TEMPLATE_MAX_CHARS,
+    PROMPT_VERSION,
+    STATUS_PROMPT_TEMPLATE,
+    check_prompt_template,
+    normalize_newlines,
+    prompt_version_of,
+    template_for,
+)
+from driftpilot.llm_analyzer.thinking import THINKING_CUT_NOTE, THINKING_MAX_CHARS, ThinkingBuffer
+from driftpilot.llm_analyzer.types import (
+    DEFAULT_MAX_DIFFS,
+    DISABLED,
+    LlmAnalysis,
+    LlmReason,
+    LlmRequest,
+    Unsent,
+    UnsentShape,
+)
+from driftpilot.llm_analyzer.wire import (
+    AUTH_API_KEY,
+    AUTH_BEARER,
+    AUTH_HEADERS,
+    DEFAULT_WIRE,
+    THINKING_OFF,
+    THINKING_VALUES,
+    ThinkingParam,
+    WireOptions,
+    json_text,
+    parse_json_text,
+    wire_problem,
+)
+
+__all__ = [
+    "AUTH_API_KEY",
+    "AUTH_BEARER",
+    "AUTH_HEADERS",
+    "BUILTIN_PROMPT_VERSIONS",
+    "CLAUDE_CODE_CLI",
+    "CLI_DEFAULT_MODEL",
+    "CLI_EFFORTS",
+    "CLI_EFFORT_TIMEOUT_SECONDS",
+    "CLI_FORMATS",
+    "CODEX_CLI",
+    "CONNECTION_CHECK_PROMPT",
+    "CUSTOM_AUTHS",
+    "CUSTOM_AUTH_NONE",
+    "CUSTOM_HTTP_JSON",
+    "DEFAULT_ANTHROPIC_BASE_URL",
+    "DEFAULT_CLI_TIMEOUT_SECONDS",
+    "DEFAULT_MAX_DIFFS",
+    "DEFAULT_PROMPT_TEMPLATE",
+    "DEFAULT_WIRE",
+    "DISABLED",
+    "INCIDENT_PROMPT_TEMPLATE",
+    "MASK_PATTERNS",
+    "MAX_PAIR_NAMES",
+    "PROMPT_MARKS",
+    "PROMPT_TEMPLATE_MAX_CHARS",
+    "PROMPT_VERSION",
+    "SECRET_WORDS",
+    "STATUS_PROMPT_TEMPLATE",
+    "THINKING_CUT_NOTE",
+    "THINKING_MAX_CHARS",
+    "THINKING_OFF",
+    "THINKING_VALUES",
+    "AnthropicMessagesClient",
+    "ApiErrorText",
+    "ApprovedPromptClient",
+    "CliClient",
+    "ConnectionCheckResult",
+    "CustomHttpJson",
+    "CustomHttpJsonClient",
+    "CustomProblem",
+    "LLMClient",
+    "LLMClientUnavailable",
+    "LLMConnectionError",
+    "LLMError",
+    "LLMResponseError",
+    "LlmAnalysis",
+    "LlmReason",
+    "LlmRequest",
+    "MaskPattern",
+    "Masker",
+    "OpenAIApiKeyClient",
+    "PairReading",
+    "PromptNotApproved",
+    "ShapeNode",
+    "ShapedClient",
+    "StreamStopped",
+    "StreamingClient",
+    "ThinkingBuffer",
+    "ThinkingParam",
+    "Unsent",
+    "UnsentShape",
+    "WholeSection",
+    "WireOptions",
+    "analyze",
+    "analyze_whole",
+    "ask_with_deltas",
+    "build_pair_prompt",
+    "check_prompt_template",
+    "custom_problem",
+    "file_name_refused",
+    "for_display",
+    "json_text",
+    "masking_fingerprint",
+    "normalize_newlines",
+    "parse_json_text",
+    "prompt_version_of",
+    "read_pair_answer",
+    "send_connection_check",
+    "template_for",
+    "wire_problem",
+]

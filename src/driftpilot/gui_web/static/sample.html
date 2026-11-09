@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DriftPilot</title>
+  <link rel="stylesheet" href="pilot.css">
+  <script type="module" src="js/sample.js"></script>
+</head>
+<!-- 部品の見本（REQ-103 §5）。文は書かず、data-text の鍵で messages.py の文を取る（js/sample.js） -->
+<body class="pilot-window">
+  <main class="pilot-scroll">
+    <header class="pilot-section">
+      <h1 class="pilot-heading" data-text="sample.heading"></h1>
+      <p class="pilot-note" data-text="sample.note"></p>
+      <dl class="pilot-info">
+        <dt data-text="sample.info.driftpilot"></dt>
+        <dd id="info-driftpilot"></dd>
+        <dt data-text="sample.info.python"></dt>
+        <dd id="info-python"></dd>
+        <dt data-text="sample.info.renderer"></dt>
+        <dd id="info-renderer"></dd>
+      </dl>
+    </header>
+
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.buttons"></h2>
+      <div class="pilot-row">
+        <button type="button" class="pilot-button pilot-button--primary" data-text="sample.button.primary"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" data-text="sample.button.secondary"></button>
+        <button type="button" class="pilot-button pilot-button--danger" data-text="sample.button.danger"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" disabled data-text="sample.button.disabled"></button>
+      </div>
+    </section>
+
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.bands"></h2>
+      <div class="pilot-band pilot-band--info" role="status"><span data-text="sample.band.info"></span></div>
+      <div class="pilot-band pilot-band--warning" role="status"><span data-text="sample.band.warning"></span></div>
+      <div class="pilot-band pilot-band--error" role="alert"><span data-text="sample.band.error"></span></div>
+    </section>
+
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.table"></h2>
+      <div class="pilot-table-wrap">
+        <table class="pilot-table" id="sample-table">
+          <thead>
+            <tr>
+              <th scope="col" aria-sort="ascending" data-text="sample.table.name"></th>
+              <th scope="col" aria-sort="none" data-text="sample.table.status"></th>
+              <th scope="col" aria-sort="none" class="pilot-num" data-text="sample.table.diffs"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr aria-selected="true">
+              <td data-text="sample.table.row1.name"></td>
+              <td data-text="sample.table.row1.status"></td>
+              <td class="pilot-num" data-text="sample.table.row1.diffs"></td>
+            </tr>
+            <tr aria-selected="false">
+              <td data-text="sample.table.row2.name"></td>
+              <td data-text="sample.table.row2.status"></td>
+              <td class="pilot-num" data-text="sample.table.row2.diffs"></td>
+            </tr>
+            <tr aria-selected="false">
+              <td data-text="sample.table.row3.name"></td>
+              <td data-text="sample.table.row3.status"></td>
+              <td class="pilot-num" data-text="sample.table.row3.diffs"></td>
+            </tr>
+            <tr aria-selected="false">
+              <td data-text="sample.table.row4.name"></td>
+              <td data-text="sample.table.row4.status"></td>
+              <td class="pilot-num" data-text="sample.table.row4.diffs"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.details"></h2>
+      <details class="pilot-details">
+        <summary data-text="sample.details.summary"></summary>
+        <div class="pilot-details-body"><span data-text="sample.details.body"></span></div>
+      </details>
+    </section>
+
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.fields"></h2>
+      <div class="pilot-field">
+        <label for="field-name" data-text="sample.field.text"></label>
+        <input id="field-name" class="pilot-input" type="text">
+      </div>
+      <div class="pilot-field">
+        <label for="field-kind" data-text="sample.field.select"></label>
+        <select id="field-kind" class="pilot-input">
+          <option value="openai" data-text="sample.field.option1"></option>
+          <option value="azure" data-text="sample.field.option2"></option>
+        </select>
+      </div>
+      <div class="pilot-field pilot-field--top">
+        <label for="field-words" data-text="sample.field.textarea"></label>
+        <textarea id="field-words" class="pilot-input" rows="3"></textarea>
+      </div>
+      <div class="pilot-field pilot-field--check">
+        <input id="field-exposed" class="pilot-check" type="checkbox">
+        <label for="field-exposed" data-text="sample.field.check"></label>
+      </div>
+    </section>
+
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.tabs"></h2>
+      <div class="pilot-tabs" role="tablist">
+        <button type="button" class="pilot-tab" role="tab" id="tab-compare" aria-controls="panel-compare" aria-selected="true" data-text="sample.tab.compare"></button>
+        <button type="button" class="pilot-tab" role="tab" id="tab-batch" aria-controls="panel-batch" aria-selected="false" data-text="sample.tab.batch"></button>
+        <button type="button" class="pilot-tab" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false" data-text="sample.tab.settings"></button>
+      </div>
+      <div class="pilot-tabpanel" role="tabpanel" id="panel-compare" aria-labelledby="tab-compare"><span data-text="sample.tab.compare.body"></span></div>
+      <div class="pilot-tabpanel" role="tabpanel" id="panel-batch" aria-labelledby="tab-batch" hidden><span data-text="sample.tab.batch.body"></span></div>
+      <div class="pilot-tabpanel" role="tabpanel" id="panel-settings" aria-labelledby="tab-settings" hidden><span data-text="sample.tab.settings.body"></span></div>
+    </section>
+
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.dialog"></h2>
+      <div class="pilot-row">
+        <button type="button" class="pilot-button pilot-button--danger" id="sample-confirm" data-text="sample.dialog.confirm"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="sample-notice" data-text="sample.dialog.notice"></button>
+      </div>
+    </section>
+
+    <!-- 比較の画面の部品（REQ-105 §5） -->
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.compare"></h2>
+      <div class="pilot-group">
+        <div class="pilot-input-grid">
+          <label for="sample-before" data-text="sample.compare.before"></label>
+          <input id="sample-before" class="pilot-input" type="text" readonly data-value="sample.compare.path">
+          <button type="button" class="pilot-button pilot-button--secondary" data-text="sample.compare.browse"></button>
+          <button type="button" class="pilot-button pilot-button--secondary" id="sample-wide" data-text="sample.compare.paste"></button>
+          <span data-text="sample.compare.summary"></span>
+        </div>
+      </div>
+      <div class="pilot-row pilot-section">
+        <fieldset class="pilot-radio-group">
+          <legend data-text="sample.compare.mode"></legend>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="sample-mode" checked><span data-text="sample.compare.mode.both"></span></label>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="sample-mode"><span data-text="sample.compare.mode.raw"></span></label>
+        </fieldset>
+      </div>
+      <div class="pilot-table-wrap">
+        <table class="pilot-table pilot-table--fixed pilot-mono">
+          <colgroup>
+            <col class="pilot-col-mark">
+            <col class="pilot-col-no">
+            <col class="pilot-col-text">
+            <col class="pilot-col-no">
+            <col class="pilot-col-text">
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col"></th>
+              <th scope="col" data-text="sample.compare.before_no"></th>
+              <th scope="col" data-text="sample.compare.before"></th>
+              <th scope="col" data-text="sample.compare.after_no"></th>
+              <th scope="col" data-text="sample.compare.after"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr aria-selected="false">
+              <td></td>
+              <td data-text="sample.compare.row1.no"></td>
+              <td data-text="sample.compare.row1.text"></td>
+              <td data-text="sample.compare.row1.no"></td>
+              <td data-text="sample.compare.row1.text"></td>
+            </tr>
+            <tr aria-selected="false" data-diff="true">
+              <td data-text="sample.compare.row2.mark"></td>
+              <td data-text="sample.compare.row2.no"></td>
+              <td data-text="sample.compare.row2.before"></td>
+              <td data-text="sample.compare.row2.no"></td>
+              <td data-text="sample.compare.row2.after"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pilot-pair">
+        <textarea class="pilot-input pilot-mono" rows="2" readonly data-value="sample.compare.row2.before"></textarea>
+        <textarea class="pilot-input pilot-mono pilot-nowrap" rows="2" readonly data-value="sample.compare.row2.after"></textarea>
+      </div>
+      <div class="pilot-statusbar pilot-statusbar--split">
+        <span class="pilot-status-main" data-text="sample.compare.status"></span>
+        <span class="pilot-status-side" data-text="sample.compare.counts"></span>
+      </div>
+    </section>
+
+    <section class="pilot-section">
+      <h2 class="pilot-section-title" data-text="sample.section.progress"></h2>
+      <div class="pilot-stack">
+        <label for="sample-progress" data-text="sample.progress.label"></label>
+        <progress id="sample-progress" class="pilot-progress" max="4" value="2"></progress>
+      </div>
+    </section>
+  </main>
+
+  <footer class="pilot-footer">
+    <button type="button" class="pilot-button pilot-button--secondary" data-text="sample.footer.open"></button>
+    <span class="pilot-spacer"></span>
+    <button type="button" class="pilot-button pilot-button--secondary" data-text="sample.footer.close"></button>
+  </footer>
+  <div class="pilot-statusbar" id="status" role="status"></div>
+</body>
+</html>

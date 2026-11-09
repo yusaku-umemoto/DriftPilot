@@ -1,0 +1,4 @@
+# 改行を変換しない。コミットしたバイト列のまま取り出す(REQ-19)。
+# fixture の改行は意図を持つデータである(実機の config は CRLF と LF が混在する。corpus-findings §9)。
+# switch_hash.txt は CRLF を含むことを検査しているため、text eol=lf にもしない。
+* -text

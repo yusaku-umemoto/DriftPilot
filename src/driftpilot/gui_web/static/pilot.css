@@ -1,0 +1,2222 @@
+/*
+ * pilot.css — Pilot シリーズ（DriftPilot・ConvoyPilot・CommandPilot）の画面の見た目の部品（ADR-0074 決定4 / REQ-103）。
+ * 使い分けと言葉づかいは docs/notes/pilot-ui-standard.md。ほかの製品は、この文書とこのファイルをコピーして使う。
+ *
+ * - 色・文字・余白は CSS の変数（--pilot- で始まる名前）で持つ。:root にライト、prefers-color-scheme: dark にダーク
+ * - 色の変数（--pilot-color-）は、ライトとダークで同じ名前をそろえる（ダークだけに無い名前を作らない）
+ * - 部品のクラス名は pilot- で始める。状態は属性（:disabled・aria-selected・aria-sort・hidden）で表す
+ * - 外部のファイル（書体・画像）を読まない
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* 色（ライト）。今の wxPython の画面（OS の色）に近い、落ち着いた色 */
+  --pilot-color-text: #1f1f1f;
+  --pilot-color-text-muted: #666666;
+  --pilot-color-bg: #ffffff;
+  --pilot-color-surface: #f3f3f3;
+  --pilot-color-border: #c9c9c9;
+  --pilot-color-accent: #0a64c8;
+  --pilot-color-accent-hover: #0857ae;
+  --pilot-color-accent-text: #ffffff;
+  --pilot-color-danger: #c42b1c;
+  --pilot-color-danger-hover: #a52416;
+  --pilot-color-danger-text: #ffffff;
+  --pilot-color-button: #fbfbfb;
+  --pilot-color-button-hover: #ececec;
+  --pilot-color-selection: #cfe3f8;
+  --pilot-color-selection-text: #1f1f1f;
+  --pilot-color-stripe: #f7f7f7;
+  --pilot-color-focus: #0a64c8;
+  --pilot-color-disabled: #eeeeee;
+  --pilot-color-disabled-text: #9a9a9a;
+  --pilot-color-info-bg: #e6f0fa;
+  --pilot-color-info-text: #1f2d3d;
+  --pilot-color-info-border: #9cc2ea;
+  --pilot-color-warning-bg: #fff4ce;
+  --pilot-color-warning-text: #3d2e00;
+  --pilot-color-warning-border: #e3c04f;
+  --pilot-color-error-bg: #fde7e9;
+  --pilot-color-error-text: #5c0b10;
+  --pilot-color-error-border: #e5a0a6;
+  --pilot-color-diff: #fbe9c4;
+  /* 変更の行で違う文字の印（mark.pilot-mark。REQ-226）。変更前の側と変更後の側 */
+  --pilot-color-mark-removed: #f6c0c0;
+  --pilot-color-mark-added: #bfe8c6;
+  --pilot-color-in-use: #2e7d32;
+  --pilot-color-in-use-text: #ffffff;
+  /* AI の答えの赤字（REQ-204） */
+  --pilot-color-answer-red: #c42b1c;
+
+  /* 文字。OS の標準の書体（Windows は Yu Gothic UI / Segoe UI、Mac はシステムの書体） */
+  --pilot-font-family: "Yu Gothic UI", "Segoe UI", -apple-system, "Hiragino Sans", sans-serif;
+  --pilot-font-family-mono: Consolas, Menlo, "Cascadia Mono", monospace;
+  --pilot-font-size: 13px;
+  --pilot-font-size-small: 12px;
+  --pilot-font-size-heading: 15px;
+  --pilot-line-height: 1.5;
+
+  /* 余白と形 */
+  --pilot-space-1: 4px;
+  --pilot-space-2: 8px;
+  --pilot-space-3: 12px;
+  --pilot-space-4: 16px;
+  --pilot-radius: 4px;
+  --pilot-control-height: 28px;
+  --pilot-label-width: 160px;
+  --pilot-side-width: 200px;
+  /* 比較の画面のコマンドの組の一覧の幅（REQ-122） */
+  --pilot-split-width: 300px;
+  /* 境目で幅を変える左右の面（.pilot-split--resizable。REQ-206）。左の面の初めの幅（58:42）と、両側の最小の幅。
+     左の幅は画面のスクリプトが要素の上で書き換える（保存しない） */
+  --pilot-split-left: 58%;
+  --pilot-pane-min-width: 220px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* 色（ダーク）。ライトと同じ名前をそろえる */
+    --pilot-color-text: #e6e6e6;
+    --pilot-color-text-muted: #a0a0a0;
+    --pilot-color-bg: #1e1e1e;
+    --pilot-color-surface: #2a2a2a;
+    --pilot-color-border: #4a4a4a;
+    --pilot-color-accent: #2f7fd6;
+    --pilot-color-accent-hover: #4790e0;
+    --pilot-color-accent-text: #ffffff;
+    --pilot-color-danger: #d13438;
+    --pilot-color-danger-hover: #de4c50;
+    --pilot-color-danger-text: #ffffff;
+    --pilot-color-button: #333333;
+    --pilot-color-button-hover: #3d3d3d;
+    --pilot-color-selection: #264f78;
+    --pilot-color-selection-text: #ffffff;
+    --pilot-color-stripe: #252525;
+    --pilot-color-focus: #4c9ee8;
+    --pilot-color-disabled: #2e2e2e;
+    --pilot-color-disabled-text: #6e6e6e;
+    --pilot-color-info-bg: #1c2f45;
+    --pilot-color-info-text: #d8e7f7;
+    --pilot-color-info-border: #2f5b8a;
+    --pilot-color-warning-bg: #3a3014;
+    --pilot-color-warning-text: #f3e2a6;
+    --pilot-color-warning-border: #7a6420;
+    --pilot-color-error-bg: #43191c;
+    --pilot-color-error-text: #f6c8cc;
+    --pilot-color-error-border: #8a2c33;
+    --pilot-color-diff: #4a3a1c;
+    --pilot-color-mark-removed: #6e2b2b;
+    --pilot-color-mark-added: #22522c;
+    --pilot-color-in-use: #57b45c;
+    --pilot-color-in-use-text: #0e2410;
+    --pilot-color-answer-red: #ff8f85;
+  }
+}
+
+/* --- 土台 --- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--pilot-color-bg);
+  color: var(--pilot-color-text);
+  font-family: var(--pilot-font-family);
+  font-size: var(--pilot-font-size);
+  line-height: var(--pilot-line-height);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: 2px solid var(--pilot-color-focus);
+  outline-offset: 1px;
+}
+
+/* --- 窓の形: スクロールする中身・最下段の固定のボタンの行（REQ-96）・ステータスの行（一番下） --- */
+
+.pilot-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.pilot-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--pilot-space-4);
+}
+
+.pilot-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--pilot-space-2);
+  padding: var(--pilot-space-2) var(--pilot-space-4);
+  border-top: 1px solid var(--pilot-color-border);
+  background: var(--pilot-color-surface);
+}
+
+.pilot-spacer {
+  flex: 1 1 auto;
+}
+
+.pilot-statusbar {
+  flex: none;
+  min-height: calc(var(--pilot-font-size-small) * 1.5 + var(--pilot-space-1) * 2);
+  padding: var(--pilot-space-1) var(--pilot-space-3);
+  border-top: 1px solid var(--pilot-color-border);
+  background: var(--pilot-color-surface);
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ステータスの行を左右2つの場所に分ける（左に状態の文、右に件数の文。今の wx のステータスバーの幅の比 3:2） */
+.pilot-statusbar--split {
+  display: flex;
+  gap: var(--pilot-space-3);
+}
+
+.pilot-status-main,
+.pilot-status-side {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pilot-status-main {
+  flex: 3 1 0;
+}
+
+.pilot-status-side {
+  flex: 2 1 0;
+}
+
+/* 窓の下の行の注記（REQ-227 / ADR-0166 決定11-1。使っている単純比較の設定の要約）。1 行で、はみ出す分は「…」（全文は title） */
+.pilot-status-note {
+  flex: 2 1 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--pilot-color-text);
+}
+
+/*
+ * 窓の中身を縦にスクロールさせない形（比較の画面）。上の枠は中身の高さで、.pilot-fill の面が残りの高さを使い、
+ * 面の中の表（.pilot-table-wrap）がスクロールする。最下段（.pilot-footer）とステータスの行は .pilot-scroll と同じく外に置く
+ */
+.pilot-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--pilot-space-3) var(--pilot-space-4) var(--pilot-space-2);
+  overflow: hidden;
+}
+
+.pilot-body > * {
+  flex: none;
+}
+
+.pilot-body > .pilot-fill,
+.pilot-fill {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pilot-fill > .pilot-table-wrap {
+  flex: 1 1 auto;
+  min-height: calc(var(--pilot-control-height) * 3);
+  max-height: none;
+}
+
+.pilot-fill > * {
+  flex: none;
+}
+
+/* 面の中の面（タブの面など）も、残りの高さを使う（.pilot-fill > * の flex: none を打ち消す。一括比較の画面。REQ-106） */
+.pilot-fill > .pilot-fill {
+  flex: 1 1 auto;
+}
+
+/*
+ * 表の枠の最低の高さを、見出しと 5 行分にする（一括比較の窓の組の表。REQ-224 / ADR-0163）。
+ * .pilot-fill > .pilot-table-wrap（3 行分）と同じ強さにして後ろに置く。表の面は、窓が低くてもこの高さより縮まない
+ */
+.pilot-table-wrap.pilot-table-wrap--rows5 {
+  min-height: calc(var(--pilot-control-height) * 6);
+}
+
+.pilot-body > .pilot-fill:has(> .pilot-table-wrap--rows5) {
+  min-height: auto;
+}
+
+/*
+ * 縦に並べた2つの面が、残りの高さを 2:3 で分ける（一括比較の画面の組の一覧と結果の枠。今の wx の比と同じ。REQ-106）。
+ * .pilot-body > .pilot-fill と同じ強さにして、後ろに置く
+ */
+.pilot-fill.pilot-fill--2 {
+  flex: 2 1 0;
+}
+
+.pilot-fill.pilot-fill--3 {
+  flex: 3 1 0;
+}
+
+/*
+ * 横に並べた面: 左に幅の決まった一覧（.pilot-split-side）、右に残りの幅の面（比較の画面のまとめての比較。REQ-122）。
+ * 一覧が隠れている（hidden）ときは、右の面が全部の幅を使う。一覧の表は残りの高さでスクロールする
+ */
+.pilot-fill.pilot-split {
+  flex-direction: row;
+  gap: var(--pilot-space-3);
+}
+
+.pilot-split > .pilot-split-side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: var(--pilot-split-width);
+  min-height: 0;
+}
+
+.pilot-split > .pilot-split-side[hidden] {
+  display: none;
+}
+
+.pilot-split-side > .pilot-table-wrap {
+  flex: 1 1 auto;
+  max-height: none;
+}
+
+.pilot-split > .pilot-fill {
+  min-width: 0;
+}
+
+/*
+ * 結果の面の中の、コマンドの組の一覧と比較の表の境目（#multi-handle。REQ-224 / ADR-0163）。
+ * 間は面の gap で足りるので、境目の左右の余白は 0。760px 未満で .pilot-split-handle を隠す決まりはこの境目にも効く
+ */
+.pilot-busy-host > .pilot-split-handle {
+  margin: 0;
+}
+
+/*
+ * 比較中の表示（REQ-205 / ADR-0147 決定3）。面（.pilot-busy-host）の真ん中に、スピナーと今の段階の文を重ねる。
+ * 重ねた部分はクリックを受けない（下の面の操作と「中止」は押せる）。隠すのは [hidden] の決まり。
+ * 色はライトとダークの両方にある変数だけを使う。動きを減らす設定（prefers-reduced-motion）では回さず文だけ出す
+ */
+.pilot-busy-host {
+  position: relative;
+}
+
+.pilot-busy {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--pilot-space-2);
+  pointer-events: none;
+}
+
+.pilot-busy-text {
+  max-width: 80%;
+  padding: var(--pilot-space-2) var(--pilot-space-3);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-surface);
+  color: var(--pilot-color-text);
+  text-align: center;
+}
+
+.pilot-spinner {
+  display: block;
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--pilot-color-border);
+  border-top-color: var(--pilot-color-accent);
+  border-radius: 50%;
+  animation: pilot-spin 0.9s linear infinite;
+}
+
+@keyframes pilot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+ * AI に送る間の表示（ADR-0164 決定5）。結果の面に重ねず、AI の面の答えの欄の下に小さいスピナーと今の状態の文を横に並べる。
+ * 途中の答えが出たら隠す（[hidden] の決まり）。.pilot-spinner--small は .pilot-spinner と一緒に付けるので、
+ * 動きを減らす設定では下の .pilot-spinner の決まりで隠れて文だけになる
+ */
+.pilot-ai-busy {
+  display: flex;
+  align-items: center;
+  gap: var(--pilot-space-2);
+  padding: var(--pilot-space-1) 0;
+  color: var(--pilot-color-text-muted);
+}
+
+.pilot-spinner--small {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pilot-spinner {
+    display: none;
+  }
+}
+
+/*
+ * 境目で幅を変える左右の面（REQ-206 / ADR-0148 決定2。比較の画面の結果の面と AI の面）。
+ * .pilot-fill.pilot-split に .pilot-split--resizable を足し、子に .pilot-split-pane（左右の面）と .pilot-split-handle（境目）を置く。
+ * 左の面の幅は --pilot-split-left（初めは 58%）、両側とも --pilot-pane-min-width より狭くしない。
+ * 面は min-width・min-height を 0 にして中身で広がらないようにし、はみ出しは面の中で切る（タブと表の見出しが隣の面に重ならない。W4）。
+ * スクロールは面の中の1か所だけ（左は表の枠、右は答えの欄 .pilot-chat）。760px 未満の窓では縦に積み、境目を隠す
+ */
+.pilot-fill.pilot-split--resizable {
+  gap: 0;
+}
+
+.pilot-split--resizable > .pilot-split-pane {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: var(--pilot-pane-min-width);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pilot-split--resizable > .pilot-split-pane:first-child {
+  flex: 0 1 var(--pilot-split-left);
+}
+
+/* 左の面が結果の面（.pilot-split）のときは、中の一覧とタブを横に並べたままにする */
+.pilot-split--resizable > .pilot-split-pane.pilot-split {
+  flex-direction: row;
+}
+
+.pilot-split-pane .pilot-tabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+.pilot-split-handle {
+  flex: none;
+  width: 6px;
+  margin: 0 var(--pilot-space-1);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-border);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pilot-split-handle:hover,
+.pilot-split-handle:focus-visible {
+  background: var(--pilot-color-accent);
+}
+
+@media (max-width: 759.98px) {
+  .pilot-fill.pilot-split--resizable {
+    flex-direction: column;
+    gap: var(--pilot-space-2);
+  }
+
+  .pilot-split--resizable > .pilot-split-pane,
+  .pilot-split--resizable > .pilot-split-pane:first-child {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: var(--pilot-pane-min-width);
+  }
+
+  .pilot-split-handle {
+    display: none;
+  }
+}
+
+/* 比較の画面の上の3行（REQ-206 / ADR-0148 決定1）。入力の2行の右に2行にまたがる入れ替えのボタン、3行目に設定の要約 */
+.pilot-compare-top {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pilot-space-1);
+}
+
+.pilot-input-swap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: stretch;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-swap {
+  min-width: calc(var(--pilot-control-height) + var(--pilot-space-1));
+  padding: 0 var(--pilot-space-2);
+  font-size: var(--pilot-font-size-heading);
+}
+
+.pilot-settings-line {
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.pilot-segment-line {
+  margin: 0 0 0 var(--pilot-space-3);
+}
+
+.pilot-settings-line > .pilot-note,
+.pilot-segment-line > .pilot-note {
+  margin: 0;
+}
+
+.pilot-settings-panel {
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.pilot-footer-gap {
+  flex: none;
+  width: var(--pilot-space-3);
+}
+
+/*
+ * AI の面（REQ-206 / ADR-0148 決定4・8）。上から見出し、答えと質問の吹き出し（.pilot-chat。スクロールは1本）、下に操作（.pilot-ai-controls）。
+ * 吹き出しは答えが左（.pilot-bubble--ai）、質問が右（.pilot-bubble--me）。吹き出しの中の .pilot-answer は高さの上限と枠を外す
+ * （入れ子のスクロールを作らない。表とコマンドの塊の横のスクロールは今のまま）。コピーは .pilot-icon-button（.pilot-icon-copy は CSS で描く）
+ */
+.pilot-ai-pane > .pilot-group-title {
+  flex: none;
+}
+
+.pilot-chat {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--pilot-space-2);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+}
+
+.pilot-chat-turns {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-bubble {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  max-width: 92%;
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: calc(var(--pilot-radius) * 2);
+}
+
+.pilot-bubble--ai {
+  align-self: flex-start;
+  background: var(--pilot-color-surface);
+}
+
+.pilot-bubble--me {
+  align-self: flex-end;
+  border-color: var(--pilot-color-info-border);
+  background: var(--pilot-color-info-bg);
+  color: var(--pilot-color-info-text);
+}
+
+.pilot-bubble--me > .pilot-lines {
+  margin: 0;
+}
+
+.pilot-bubble .pilot-answer {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+/*
+ * 答えの吹き出しの上（外）の顔と名前の行（ADR-0181 決定1 / REQ-244）。キャラクターがオンのときだけ JS が hidden を外す
+ * （隠すのは [hidden] の決まり）。顔の絵は飾りなのでクリックを受けない。名前は小さな文字と補助の色（ライトとダークの両方にある変数）
+ */
+.pilot-avatar-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--pilot-space-1);
+}
+
+.pilot-batch-answer > .pilot-avatar-row {
+  margin-bottom: var(--pilot-space-1);
+}
+
+.pilot-avatar {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.pilot-avatar-name {
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+}
+
+.pilot-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  width: calc(var(--pilot-control-height) - var(--pilot-space-1));
+  height: calc(var(--pilot-control-height) - var(--pilot-space-1));
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--pilot-radius);
+  background: none;
+  color: var(--pilot-color-text-muted);
+  cursor: pointer;
+}
+
+.pilot-icon-button:hover {
+  border-color: var(--pilot-color-border);
+  background: var(--pilot-color-button-hover);
+  color: var(--pilot-color-text);
+}
+
+/* コピーのアイコン: 2つ重ねた角の丸い四角（文字を使わない） */
+.pilot-icon-copy {
+  position: relative;
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+.pilot-icon-copy::before,
+.pilot-icon-copy::after {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 1.4px solid currentColor;
+  border-radius: 2px;
+  content: "";
+}
+
+.pilot-icon-copy::before {
+  top: 0;
+  left: 0;
+}
+
+.pilot-icon-copy::after {
+  right: 0;
+  bottom: 0;
+  background: var(--pilot-color-surface);
+}
+
+/* 選択のコピーに使う読むだけの欄（navigator.clipboard が使えないとき。画面の外に置く） */
+.pilot-copy-buffer {
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.pilot-ai-controls {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--pilot-space-1);
+  padding: var(--pilot-space-2) 0 0;
+}
+
+.pilot-ai-controls > textarea.pilot-input {
+  resize: none;
+}
+
+.pilot-ai-row {
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.pilot-ai-row > select.pilot-input {
+  min-width: 0;
+  max-width: 12em;
+}
+
+.pilot-ai-ask {
+  margin-left: auto;
+}
+
+/*
+ * AI の面を別の窓で出す（ADR-0160 / REQ-220）。
+ * .pilot-ai-head: AI の面の見出しの行。見出しの右端に「↗」（.pilot-icon-button）を置く
+ * .pilot-tabs-bar: 結果のタブの行。別の窓が開いている間だけ、右端に「↗」（別の窓を前に出す）を出す
+ * .pilot-split--detached: 別の窓が開いている間の左右の面。右の面と境目は hidden にし、左の面を全幅にする
+ * .pilot-ai-window: AI の窓の中の AI の面（窓いっぱいに出す）
+ */
+.pilot-ai-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--pilot-space-2);
+  margin: 0 0 var(--pilot-space-2);
+}
+
+.pilot-ai-head > .pilot-group-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.pilot-ai-head > .pilot-icon-button,
+.pilot-tabs-bar > .pilot-icon-button {
+  flex: none;
+  align-self: center;
+}
+
+.pilot-tabs-bar {
+  display: flex;
+  flex: none;
+  align-items: flex-end;
+  gap: var(--pilot-space-2);
+  border-bottom: 1px solid var(--pilot-color-border);
+}
+
+.pilot-tabs-bar > .pilot-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: none;
+}
+
+.pilot-split--detached > .pilot-split-pane:first-child {
+  flex: 1 1 0;
+}
+
+.pilot-ai-window {
+  min-width: 0;
+}
+
+/* --- 見出し・説明・並び --- */
+
+.pilot-heading {
+  margin: 0 0 var(--pilot-space-2);
+  font-size: var(--pilot-font-size-heading);
+  font-weight: 600;
+}
+
+.pilot-section {
+  margin: 0 0 var(--pilot-space-4);
+}
+
+.pilot-section-title {
+  margin: 0 0 var(--pilot-space-2);
+  font-size: var(--pilot-font-size);
+  font-weight: 600;
+}
+
+.pilot-note {
+  margin: 0 0 var(--pilot-space-2);
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+}
+
+/* 注意を 2 つ以上並べるときの箇条書き（ADR-0167 決定3）。文字は .pilot-note と同じ薄い小さめ。色は変数なのでダークモードでも切り替わる */
+.pilot-note-list {
+  margin: 0 0 var(--pilot-space-2);
+  padding-left: var(--pilot-space-4);
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+  list-style: disc;
+}
+
+.pilot-note-list > li + li {
+  margin-top: var(--pilot-space-1);
+}
+
+.pilot-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-info {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--pilot-space-1) var(--pilot-space-3);
+  margin: 0;
+}
+
+.pilot-info dt {
+  color: var(--pilot-color-text-muted);
+}
+
+.pilot-info dd {
+  margin: 0;
+}
+
+.pilot-mono {
+  font-family: var(--pilot-font-family-mono);
+}
+
+/* --- ボタン: 主（1画面に1つ）・副・危険。押せないときは :disabled --- */
+
+.pilot-button {
+  min-height: var(--pilot-control-height);
+  padding: 0 var(--pilot-space-3);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-button);
+  color: var(--pilot-color-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.pilot-button:hover {
+  background: var(--pilot-color-button-hover);
+}
+
+.pilot-button--secondary {
+  border-color: var(--pilot-color-border);
+  background: var(--pilot-color-button);
+  color: var(--pilot-color-text);
+}
+
+.pilot-button--primary {
+  border-color: var(--pilot-color-accent);
+  background: var(--pilot-color-accent);
+  color: var(--pilot-color-accent-text);
+}
+
+.pilot-button--primary:hover {
+  background: var(--pilot-color-accent-hover);
+}
+
+.pilot-button--danger {
+  border-color: var(--pilot-color-danger);
+  background: var(--pilot-color-danger);
+  color: var(--pilot-color-danger-text);
+}
+
+.pilot-button--danger:hover {
+  background: var(--pilot-color-danger-hover);
+}
+
+.pilot-button:disabled,
+.pilot-button:disabled:hover {
+  border-color: var(--pilot-color-border);
+  background: var(--pilot-color-disabled);
+  color: var(--pilot-color-disabled-text);
+  cursor: default;
+}
+
+/* --- 帯: 情報（青系）・注意（黄系）・エラー（赤系）。閉じるボタンを持たない（今の Band） --- */
+
+.pilot-band {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--pilot-space-2);
+  margin: 0 0 var(--pilot-space-2);
+  padding: var(--pilot-space-2) var(--pilot-space-3);
+  border: 1px solid;
+  border-left-width: 4px;
+  border-radius: var(--pilot-radius);
+}
+
+.pilot-band::before {
+  flex: none;
+  font-weight: 700;
+}
+
+.pilot-band--info {
+  border-color: var(--pilot-color-info-border);
+  background: var(--pilot-color-info-bg);
+  color: var(--pilot-color-info-text);
+}
+
+.pilot-band--info::before {
+  content: "ⓘ";
+}
+
+.pilot-band--warning {
+  border-color: var(--pilot-color-warning-border);
+  background: var(--pilot-color-warning-bg);
+  color: var(--pilot-color-warning-text);
+}
+
+.pilot-band--warning::before {
+  content: "⚠";
+}
+
+.pilot-band--error {
+  border-color: var(--pilot-color-error-border);
+  background: var(--pilot-color-error-bg);
+  color: var(--pilot-color-error-text);
+}
+
+.pilot-band--error::before {
+  content: "✕";
+}
+
+/* --- 表: 見出しの固定・行の選択（aria-selected）・縞・並べ替えの印（aria-sort） --- */
+
+.pilot-table-wrap {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+}
+
+.pilot-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.pilot-table th,
+.pilot-table td {
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.pilot-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--pilot-color-border);
+  background: var(--pilot-color-surface);
+  font-weight: 600;
+}
+
+.pilot-table th[aria-sort] {
+  cursor: pointer;
+  user-select: none;
+}
+
+.pilot-table th[aria-sort="ascending"]::after {
+  content: " ▲";
+  font-size: var(--pilot-font-size-small);
+}
+
+.pilot-table th[aria-sort="descending"]::after {
+  content: " ▼";
+  font-size: var(--pilot-font-size-small);
+}
+
+.pilot-table tbody tr:nth-child(even) {
+  background: var(--pilot-color-stripe);
+}
+
+.pilot-table tbody tr[aria-selected="true"] {
+  background: var(--pilot-color-selection);
+  color: var(--pilot-color-selection-text);
+}
+
+.pilot-table .pilot-num {
+  text-align: right;
+}
+
+/* 差分の行（単純比較の差分。今の wx の差分の行の背景色）。選んでいる行は選択の色のまま */
+.pilot-table tbody tr[data-diff="true"] {
+  background: var(--pilot-color-diff);
+}
+
+.pilot-table tbody tr[data-diff="true"][aria-selected="true"] {
+  background: var(--pilot-color-selection);
+  color: var(--pilot-color-selection-text);
+}
+
+/*
+ * 使用中の行（設定の画面のプロファイルの一覧。REQ-113 §1）。左に緑の帯を付ける。背景は変えないので、
+ * 選んでいる行（aria-selected）は選択の色のまま、両方に当たる行は選択の色に緑の帯になる。文字は .pilot-badge--in-use で添える
+ */
+.pilot-table tbody tr[data-in-use="true"] > td:first-child {
+  box-shadow: inset 4px 0 0 var(--pilot-color-in-use);
+}
+
+/*
+ * 見出しを折り返す表（一括比較の結果。見出しの文が長い「構造化比較の差分」など。REQ-207 §3 / ADR-0149）。
+ * 折り返すのは見出しだけで、行のセルは折り返さない
+ */
+.pilot-table--wrap-head thead th {
+  white-space: normal;
+}
+
+/*
+ * 列の幅を決めた表（行の多い比較の結果）。幅は <colgroup> の <col> に付けた .pilot-col- のクラスで決める
+ * （CSP でインラインの style が使えないため。比は今の wx の列の幅に合わせた）。セルは折り返さず「…」で切る
+ */
+.pilot-table--fixed {
+  table-layout: fixed;
+}
+
+.pilot-table--fixed th,
+.pilot-table--fixed td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pilot-table--fixed tbody tr {
+  cursor: default;
+}
+
+/*
+ * 単純比較の「差分のみ表示」（REQ-215 / ADR-0155 決定2・3）。行は結果を受け取ったときに 1 回だけ作り、
+ * tbody のクラス pilot-diff-only を付け外しするだけで出し分ける。残す行（差分の行と前後 3 行）は data-keep を持つ。
+ * 折りたたみの行（.pilot-raw-fold）はオンのときだけ出し、「… N 行を省略」を薄い色で真ん中に出す
+ */
+.pilot-table tbody.pilot-diff-only tr:not([data-keep]) { display: none; }
+.pilot-table tbody:not(.pilot-diff-only) tr.pilot-raw-fold { display: none; }
+/* 「無視した行 N 行…」のボタン（REQ-227 §11.4）を押している間は、無視した行・同じとみなした行（data-set-aside）だけを出す */
+.pilot-table tbody.pilot-set-aside-only tr:not([data-set-aside]) { display: none; }
+
+.pilot-raw-fold td {
+  color: var(--pilot-color-text-muted);
+  text-align: center;
+}
+
+/*
+ * カテゴリのチップ（REQ-215 / ADR-0155 決定1）。構造化比較の表の上に横に並べ、狭いときは折り返す。
+ * 押されたチップは aria-pressed="true" で、選択の色と強調の色の枠に加えて太字にする（色だけに頼らない）。色は今の変数だけ（ダークモードも同じ）
+ */
+.pilot-chips {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: var(--pilot-space-1);
+  margin: 0 0 var(--pilot-space-2);
+}
+
+.pilot-chip {
+  padding: 1px var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: 12px;
+  background: var(--pilot-color-button);
+  color: var(--pilot-color-text);
+  font: inherit;
+  font-size: var(--pilot-font-size-small);
+  cursor: pointer;
+}
+
+.pilot-chip:hover {
+  background: var(--pilot-color-button-hover);
+}
+
+.pilot-chip[aria-pressed="true"],
+.pilot-chip[aria-pressed="true"]:hover {
+  border-color: var(--pilot-color-accent);
+  background: var(--pilot-color-selection);
+  color: var(--pilot-color-selection-text);
+  font-weight: 700;
+}
+
+/*
+ * パスを後ろ（ファイル名の側）から見せる読むだけの場所（REQ-211 §4 / ADR-0153。js/path_tail.js の pathCell が作る）。
+ * 中の span を右に寄せ、はみ出す左側を切る。文字の向きを変える指定は使わない。切れているもの（data-clipped="true"）は、
+ * 左端に「…」をその場所の背景色の上に出す。表のセルの中では、セルの省略（.pilot-table--fixed）よりこちらが優先する
+ */
+.pilot-path {
+  display: flex;
+  justify-content: flex-end;
+  overflow: hidden;
+  white-space: nowrap;
+  min-width: 0;
+  position: relative;
+}
+
+.pilot-path > span {
+  flex: none;
+}
+
+.pilot-path[data-clipped="true"]::before {
+  content: "…";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  padding-right: var(--pilot-space-1);
+  background: var(--pilot-color-bg);
+}
+
+.pilot-table tbody tr:nth-child(even) .pilot-path[data-clipped="true"]::before {
+  background: var(--pilot-color-stripe);
+}
+
+.pilot-table tbody tr[aria-selected="true"] .pilot-path[data-clipped="true"]::before {
+  background: var(--pilot-color-selection);
+}
+
+.pilot-table--fixed td > .pilot-path {
+  max-width: 100%;
+}
+
+/*
+ * 見出しの右端の境目（表の列の幅。一括比較の窓の表は REQ-211 §5、比較の窓の 5 つの表は REQ-224 / ADR-0163。
+ * js/column_width.js が操作を受ける）。見出しのセル（position: sticky）の右端に重ね、ドラッグと左右の矢印のキーで幅を変える
+ */
+.pilot-col-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pilot-col-resize:hover,
+.pilot-col-resize:focus-visible {
+  background: var(--pilot-color-accent);
+  outline: none;
+}
+
+/*
+ * 一括比較の窓の片方だけのファイル（REQ-211 §2）。REQ-224 / ADR-0163 で、片方だけのファイルと候補を折りたたみ（.pilot-details--list）にした。
+ * 場所は縮んでよい（.pilot-body > * の flex: none を打ち消す）。開いているときは中の表の枠が縮んでスクロールする。
+ * 表の枠の上限は、片方だけのファイルが窓の高さの 3 割、候補が 2 割
+ */
+.pilot-unpaired {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--pilot-space-2);
+}
+
+.pilot-body > .pilot-unpaired {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* REQ-233: 片方だけのファイルは左右 2 列（.pilot-unpaired-columns）になった。上限の 30vh は 2 つの列の枠にそれぞれ当てる */
+.pilot-unpaired-list > .pilot-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 30vh;
+}
+
+/*
+ * 一覧の折りたたみ（details。REQ-224 / ADR-0163）。summary の中に見出し（.pilot-group-title）を置き、印の横に並べる。
+ * 見出しは閉じても見える。ボタンの行と表の枠は summary の外に置く。中身は縦に並べ、表の枠が縮んでスクロールする
+ */
+.pilot-details--list {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pilot-details--list::details-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pilot-details--list > summary > .pilot-group-title {
+  display: inline;
+  margin: 0;
+}
+
+.pilot-details--list > .pilot-row {
+  padding: var(--pilot-space-1) var(--pilot-space-2) 0;
+}
+
+.pilot-details--list > .pilot-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: var(--pilot-space-1) var(--pilot-space-2) var(--pilot-space-2);
+}
+
+/* 片方だけのファイルの「どちらにあるか」の列（REQ-233 の左右 2 列からは使わない） */
+.pilot-col-side {
+  width: 9em;
+}
+
+/*
+ * 片方だけのファイルの左右 2 列（REQ-233 / ADR-0171 決定1）。左が変更前、右が変更後。幅が 559px 以下では上下（上が変更前）。
+ * 箱は折りたたみの中で縮み、2 つの列の枠はそれぞれ窓の高さの 3 割まで（上の .pilot-unpaired-list > .pilot-table-wrap）で中でスクロールする
+ */
+.pilot-unpaired-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--pilot-space-3);
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: var(--pilot-space-1) var(--pilot-space-2) var(--pilot-space-2);
+}
+
+@media (max-width: 559px) {
+  .pilot-unpaired-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.pilot-unpaired-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pilot-unpaired-list > .pilot-group-title {
+  margin: 0 0 var(--pilot-space-1);
+}
+
+.pilot-details--list > .pilot-note {
+  margin: var(--pilot-space-1) var(--pilot-space-2) 0;
+}
+
+/*
+ * ファイル名を左に寄せるパスの場所（REQ-233 / ADR-0171 決定2。pathCell(value, true) が付ける）。
+ * 切れているとき（data-clipped="true"）は今の .pilot-path と同じく右に寄せ、後ろ（ファイル名の側）を見せて左端に「…」
+ */
+.pilot-path--start {
+  justify-content: flex-start;
+}
+
+.pilot-path--start[data-clipped="true"] {
+  justify-content: flex-end;
+}
+
+/*
+ * パスのファイル名の部分だけを太字にする（REQ-247 / ADR-0184 決定4。js/path_tail.js の namePathCell が付ける。
+ * 一括比較の窓の結果の表・組の候補・片方だけのファイルの表）。色は変えない
+ */
+.pilot-path-name {
+  font-weight: 600;
+}
+
+/*
+ * 片方だけのファイルの行のドラッグ（REQ-233 / ADR-0171 決定3。js/pair_drag.js が印の属性を付ける）。
+ * 指（タッチ）では一覧のスクロールを優先する（touch-action は付けない。ドラッグは pointercancel で止まってよい）
+ */
+.pilot-unpaired-list tbody tr {
+  user-select: none;
+  cursor: grab;
+}
+
+body[data-pair-dragging="true"],
+body[data-pair-dragging="true"] * {
+  cursor: grabbing;
+}
+
+/* ドラッグの間は窓全体で文字を選べない（ADR-0176 決定1。外れれば選べる状態に戻る） */
+body[data-pair-dragging] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body[data-pair-dragging="true"] [data-drop-blocked="true"],
+body[data-pair-dragging="true"] [data-drop-blocked="true"] * {
+  cursor: not-allowed;
+}
+
+.pilot-table tbody tr[data-drag-source="true"] {
+  opacity: 0.5;
+}
+
+.pilot-table tbody tr[data-drop-target="true"] {
+  outline: 1px dashed var(--pilot-color-accent);
+  outline-offset: -1px;
+}
+
+.pilot-table tbody tr[data-drop-hover="true"] {
+  background: var(--pilot-color-selection);
+  color: var(--pilot-color-selection-text);
+}
+
+.pilot-table tbody tr[data-drop-hover="true"] .pilot-path[data-clipped="true"]::before {
+  background: var(--pilot-color-selection);
+}
+
+/* ドラッグ中に指の右下に出す札（ファイル名）。窓のダイアログ（dialog の最上層）より下 */
+.pilot-drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 3;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-surface);
+  color: var(--pilot-color-text);
+}
+
+/*
+ * 一括比較の窓で組を直す部品（REQ-212 / ADR-0153 決定4〜8）。
+ * チェックの列（表の先頭の「実行する」、片方だけのファイルと候補の「組にする」）は幅を決め、中のチェックを真ん中に置く。
+ * 表のセルの中の選択（機種の列）はセルの幅いっぱいで、行の高さを変えない。
+ */
+.pilot-col-check {
+  width: 36px;
+}
+
+.pilot-check-cell {
+  text-align: center;
+}
+
+.pilot-select-cell {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.pilot-cell-select {
+  width: 100%;
+  min-width: 0;
+}
+
+/* タブの行（タブと、右の「組の設定…」「全部の組の設定…」「組を解除」） */
+.pilot-table-tools {
+  flex-wrap: nowrap;
+  align-items: flex-end;
+}
+
+.pilot-table-tools > .pilot-tabs {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* 組の設定のダイアログの欄: 見出しと欄の 2 列 */
+.pilot-settings-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--pilot-space-2) var(--pilot-space-3);
+  align-items: center;
+}
+
+.pilot-settings-control {
+  display: flex;
+  gap: var(--pilot-space-2);
+  min-width: 0;
+}
+
+.pilot-settings-control > .pilot-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pilot-settings-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* hostname の候補の場所（片方だけのファイルの下。折りたたみ）。表は窓の高さの 2 割まで（片方だけのファイルの 3 割より後ろに置いて勝たせる） */
+.pilot-suggestions {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--pilot-space-2);
+}
+
+.pilot-unpaired > .pilot-suggestions > .pilot-table-wrap {
+  max-height: 20vh;
+}
+
+.pilot-col-hint {
+  width: 30%;
+}
+
+/*
+ * 一括比較の窓の AI の場所（REQ-213 / ADR-0153 決定9）。表と片方だけのファイルの下、下のボタンの上。
+ * 上に選んだ組の答え（.pilot-batch-answer。比較の窓と同じ左の吹き出し .pilot-bubble--ai。窓の高さの 4 割まで、中でスクロール 1 本）、
+ * 下に AI の行（.pilot-batch-ai-row。題・選択・ボタン・自動送信の文。狭いときは折り返す）。色は今の変数だけ（ダークモードも同じ）
+ */
+.pilot-batch-ai {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--pilot-space-1);
+  margin-top: var(--pilot-space-2);
+}
+
+/* 窓が低いときは、AI の場所の中の答えの欄だけが縮む（AI の行と注記は縮まない。REQ-224 / ADR-0163） */
+.pilot-body > .pilot-batch-ai {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.pilot-batch-ai > * {
+  flex: none;
+}
+
+.pilot-batch-answer {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+}
+
+.pilot-batch-answer > .pilot-bubble > .pilot-lines {
+  margin: 0;
+}
+
+.pilot-batch-ai-row {
+  flex-wrap: wrap;
+}
+
+.pilot-batch-ai-row > .pilot-group-title {
+  margin: 0;
+}
+
+.pilot-batch-ai > .pilot-note {
+  margin: 0;
+}
+
+/* 構造化比較: 操作 60・カテゴリ 110・対象 170・項目 170・変更前 260・変更後 260 */
+.pilot-col-op {
+  width: 6%;
+}
+
+.pilot-col-category {
+  width: 11%;
+}
+
+.pilot-col-target,
+.pilot-col-item {
+  width: 16%;
+}
+
+.pilot-col-value {
+  width: 25.5%;
+}
+
+/* 単純比較: 印 77・前 48・変更前 394・後 48・変更後 394（印の列は「移動元 12」が入る幅。REQ-228 §8.2。REQ-227 では 5%） */
+.pilot-col-mark {
+  width: 8%;
+}
+
+.pilot-col-no {
+  width: 5%;
+}
+
+.pilot-col-text {
+  width: 41%;
+}
+
+/* 差分のみ表示の前後の行数の欄（REQ-228 §8.1。0〜20 の数が入る幅） */
+.pilot-rawopt-context {
+  width: 6em;
+}
+
+/* まとめての比較のコマンドの組の一覧（REQ-224 / ADR-0163）: コマンド（残りを埋める）・状態 88px・差分の数 56px */
+.pilot-col-multi-status {
+  width: 88px;
+}
+
+.pilot-col-multi-diffs {
+  width: 56px;
+}
+
+/* 未解釈: 操作 60・行 460・親 380 */
+.pilot-col-line {
+  width: 52%;
+}
+
+.pilot-col-parents {
+  width: 42%;
+}
+
+/* --- 折りたたみ（details と summary） --- */
+
+.pilot-details {
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+}
+
+.pilot-details > summary {
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.pilot-details[open] > summary {
+  border-bottom: 1px solid var(--pilot-color-border);
+}
+
+.pilot-details-body {
+  padding: var(--pilot-space-2);
+}
+
+/*
+ * AI が考えている内容の折りたたみ（ADR-0169 決定4 / REQ-231 §5.3）。答えの吹き出しの上に1つだけ出す。
+ * 灰色の文字と薄い枠。色は :root の変数だけなので、ダークモードでも変数が切り替わって読める
+ */
+.pilot-thinking {
+  margin: 0 0 var(--pilot-space-2);
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+}
+
+.pilot-thinking > summary {
+  cursor: pointer;
+}
+
+.pilot-thinking > .pilot-lines {
+  margin: var(--pilot-space-1) 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pilot-thinking > .pilot-note {
+  margin: 0 0 var(--pilot-space-1);
+}
+
+/* --- 木（入れ子の ul・li。接続テストの応答の形など）。押せる項目は文字のように見せるボタン --- */
+
+.pilot-tree,
+.pilot-tree ul {
+  margin: 0;
+  padding: 0 0 0 var(--pilot-space-4);
+  list-style: none;
+}
+
+.pilot-tree {
+  padding-left: 0;
+}
+
+.pilot-tree-item {
+  padding: 0 var(--pilot-space-1);
+  border: 0;
+  border-radius: var(--pilot-radius);
+  background: none;
+  color: var(--pilot-color-accent);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pilot-tree-item:hover {
+  text-decoration: underline;
+}
+
+.pilot-tree-label {
+  padding: 0 var(--pilot-space-1);
+  color: var(--pilot-color-text-muted);
+}
+
+/* --- 入力の行: ラベルと欄（文字・選択・複数行・チェック） --- */
+
+.pilot-field {
+  display: grid;
+  grid-template-columns: var(--pilot-label-width) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--pilot-space-2);
+  margin: 0 0 var(--pilot-space-2);
+}
+
+.pilot-field--check {
+  grid-template-columns: max-content minmax(0, 1fr);
+}
+
+.pilot-field--top {
+  align-items: start;
+}
+
+.pilot-input {
+  min-height: var(--pilot-control-height);
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-bg);
+  color: var(--pilot-color-text);
+  font: inherit;
+}
+
+/* 等幅の入力欄。.pilot-input の font: inherit より後ろに置き、書体だけを等幅に戻す */
+.pilot-input.pilot-mono {
+  font-family: var(--pilot-font-family-mono);
+}
+
+textarea.pilot-input {
+  resize: vertical;
+}
+
+/* 読むだけの欄（ファイルの名前・差分の全文・LLM 解析の文など）。見た目は入力の欄と同じで、文字を選んでコピーできる */
+.pilot-input[readonly] {
+  background: var(--pilot-color-bg);
+  color: var(--pilot-color-text);
+  cursor: text;
+}
+
+textarea.pilot-input[readonly] {
+  resize: none;
+}
+
+/* 折り返さない欄（config の貼り付け・送る内容など）。横にスクロールする */
+.pilot-nowrap {
+  overflow-wrap: normal;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/*
+ * AI の答え（REQ-204 / ADR-0146）。読むだけの欄と同じ枠・背景・余白で、高さは今の欄（8行）まで。超える分は縦にスクロールする。
+ * 中は Python が読み取ったブロックを textContent だけで描いた p・h4・ul・table・pre と、行の中の strong・code・赤字。
+ * 表とコマンドの塊は、横に長いときに枠の中で横にスクロールする。段落の間は var(--pilot-space-2)（REQ-208 / ADR-0150 決定6）
+ */
+.pilot-answer {
+  width: 100%;
+  max-height: calc(8 * var(--pilot-line-height) * var(--pilot-font-size) + 2 * var(--pilot-space-2));
+  overflow-y: auto;
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-bg);
+  color: var(--pilot-color-text);
+  cursor: text;
+  user-select: text;
+}
+
+.pilot-answer p {
+  margin: 0 0 var(--pilot-space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pilot-answer h4 {
+  margin: var(--pilot-space-2) 0 var(--pilot-space-1);
+  font-size: var(--pilot-font-size-heading);
+  font-weight: 600;
+}
+
+.pilot-answer ul {
+  margin: 0 0 var(--pilot-space-1);
+  padding-left: var(--pilot-space-4);
+}
+
+.pilot-answer table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 var(--pilot-space-1);
+  border-collapse: collapse;
+}
+
+.pilot-answer th,
+.pilot-answer td {
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.pilot-answer th {
+  background: var(--pilot-color-surface);
+  font-weight: 600;
+}
+
+.pilot-answer code {
+  font-family: var(--pilot-font-family-mono);
+}
+
+.pilot-answer pre {
+  margin: 0 0 var(--pilot-space-1);
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  overflow-x: auto;
+  background: var(--pilot-color-surface);
+  border-radius: var(--pilot-radius);
+  font-family: var(--pilot-font-family-mono);
+  white-space: pre;
+}
+
+/* AI が <red>…</red> で指定した語（ADR-0146 決定3。DriftPilot が語を見つけて色を付けることはしない） */
+.pilot-answer-red {
+  color: var(--pilot-color-answer-red);
+}
+
+.pilot-input:disabled {
+  background: var(--pilot-color-disabled);
+  color: var(--pilot-color-disabled-text);
+}
+
+/* ラジオの並び（fieldset と legend。今の wx の RadioBox）。選択肢は label の中に input.pilot-check と文字 */
+.pilot-radio-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pilot-space-3);
+  margin: 0;
+  padding: 0 var(--pilot-space-2) var(--pilot-space-1);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+}
+
+.pilot-radio-group > legend {
+  padding: 0 var(--pilot-space-1);
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+}
+
+.pilot-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pilot-space-1);
+}
+
+/* 入力の行の並び（比較の画面の「入力」の枠）。見出し・名前（残りの幅）・ボタン2つ・要約の5列 */
+.pilot-input-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content max-content minmax(8em, max-content);
+  align-items: center;
+  gap: var(--pilot-space-1) var(--pilot-space-2);
+}
+
+/* 入力の行の並び（一括比較の窓の変更前・変更後のフォルダ。REQ-211 §6）。見出し・パス（残りの幅）・「選ぶ…」の3列 */
+.pilot-input-grid.pilot-input-grid--pick {
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+}
+
+/* 横に並べる2つの欄（単純比較で選んだ行の変更前と変更後の全文） */
+.pilot-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--pilot-space-2);
+  margin: var(--pilot-space-2) 0 0;
+}
+
+/*
+ * 読むだけの文字の箱（REQ-226 §4.3）。div[role="textbox"][aria-readonly="true"]。textarea の中には印（<mark>）を描けないため、
+ * 単純比較で選んだ行の全文はこの箱に出す。見た目は読むだけの欄（.pilot-input[readonly]）に合わせる: 枠、3 行分の高さ、
+ * 6 行を超えたら中で縦にスクロール、折り返す。文字は選んでコピーできる（user-select を止めない）
+ */
+.pilot-line-view {
+  min-height: calc(3 * var(--pilot-line-height) * var(--pilot-font-size) + 2 * var(--pilot-space-1) + 2px);
+  max-height: calc(6 * var(--pilot-line-height) * var(--pilot-font-size) + 2 * var(--pilot-space-1) + 2px);
+  overflow-y: auto;
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-bg);
+  color: var(--pilot-color-text);
+  line-height: var(--pilot-line-height);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+  user-select: text;
+}
+
+/*
+ * 違う文字の印（REQ-226 / ADR-0165）。変更の行で、前後で違う文字だけを <mark> で塗る。範囲は Python が求める。
+ * 文字の色は変えない（行の色・選んだ行の色の上でも読める）。色だけに頼らないよう下線を引く。どちら側かは列で分かる
+ * ★ 同じクラス名 .pilot-mark を「状態の印」（span.pilot-mark。下の --- 状態の印 --- の節）も使う。こちらは mark の要素に絞り、
+ *   状態の印の inline-block・余白・枠を打ち消す（状態の印には下線を付けない）
+ */
+mark.pilot-mark {
+  display: inline;
+  color: inherit;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  overflow-wrap: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pilot-mark--removed {
+  background: var(--pilot-color-mark-removed);
+}
+
+.pilot-mark--added {
+  background: var(--pilot-color-mark-added);
+}
+
+.pilot-check {
+  margin: 0;
+  accent-color: var(--pilot-color-accent);
+}
+
+/* --- タブ（role=tablist の中の role=tab。選んでいるものは aria-selected="true"） --- */
+
+.pilot-tabs {
+  display: flex;
+  gap: var(--pilot-space-1);
+  border-bottom: 1px solid var(--pilot-color-border);
+}
+
+.pilot-tab {
+  padding: var(--pilot-space-1) var(--pilot-space-3);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--pilot-color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.pilot-tab[aria-selected="true"] {
+  border-bottom-color: var(--pilot-color-accent);
+  color: var(--pilot-color-text);
+  font-weight: 600;
+}
+
+/*
+ * 押せないタブ（ADR-0164 決定1・2）。disabled 属性は使わず aria-disabled="true" と title（理由の文）で表す（フォーカスは止まれる）。
+ * 文字を灰色にし、マウスを置いても背景を変えない。打ち消し線は付けない（題の件数が読みにくくなる）。
+ * 色のほかに、押しても移らないこと（画面のスクリプト）とマウスを置いた文で分かる
+ */
+.pilot-tab[aria-disabled="true"],
+.pilot-tab[aria-disabled="true"]:hover {
+  background: none;
+  color: var(--pilot-color-disabled-text);
+  cursor: default;
+}
+
+.pilot-tabpanel {
+  padding: var(--pilot-space-2) 0;
+}
+
+/*
+ * 中だけがスクロールするタブの面（設定の窓。REQ-214）。スクロールする要素は端から外に描いたものを切るので、
+ * 左右に余白を置いて、端の欄のフォーカスの枠（:focus-visible。外へ 3px）を切らない
+ */
+.pilot-tabpanel.pilot-scroll {
+  padding: var(--pilot-space-2) var(--pilot-space-1);
+}
+
+/* --- 進み具合（progress） --- */
+
+.pilot-progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--pilot-color-accent);
+}
+
+/* --- 文の形: 改行と空白をそのまま出して折り返す・太字・2行目の控えめな文字・途中で改行しないコマンドの行（REQ-37 §3） --- */
+
+.pilot-lines {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pilot-strong {
+  font-weight: 600;
+}
+
+.pilot-subline {
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+}
+
+.pilot-command {
+  margin: 0 0 var(--pilot-space-1);
+  overflow: hidden;
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+  white-space: pre;
+}
+
+.pilot-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pilot-wide {
+  width: 100%;
+}
+
+/* --- 枠: 見出しの付いた囲み（今の StaticBox） --- */
+
+.pilot-group {
+  margin: 0 0 var(--pilot-space-3);
+  padding: var(--pilot-space-2) var(--pilot-space-3);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+}
+
+.pilot-group-title {
+  margin: 0 0 var(--pilot-space-2);
+  font-size: var(--pilot-font-size);
+  font-weight: 600;
+}
+
+/* 見出しの横に添える名前（設定の画面の「選んだプロファイル」の横の、選んでいる名前。REQ-112） */
+.pilot-group-title-name {
+  margin-left: var(--pilot-space-2);
+  overflow-wrap: anywhere;
+}
+
+/* --- 状態の印: 使える（青系）・足りない／失敗（黄系）。どちらでもないときは修飾なし --- */
+
+.pilot-mark {
+  display: inline-block;
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--pilot-radius);
+  overflow-wrap: anywhere;
+}
+
+.pilot-mark--ok {
+  border-color: var(--pilot-color-info-border);
+  background: var(--pilot-color-info-bg);
+  color: var(--pilot-color-info-text);
+}
+
+.pilot-mark--attention {
+  border-color: var(--pilot-color-warning-border);
+  background: var(--pilot-color-warning-bg);
+  color: var(--pilot-color-warning-text);
+}
+
+/* --- バッジ: 名前の右に添える小さな印。色だけに頼らないよう、必ず文字を入れる（REQ-113 §1） --- */
+
+.pilot-badge {
+  display: inline-block;
+  margin-left: var(--pilot-space-1);
+  padding: 0 var(--pilot-space-1);
+  border-radius: var(--pilot-radius);
+  font-size: var(--pilot-font-size-small);
+  font-weight: 600;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+/* 使用中（設定の画面のプロファイルの一覧。行の緑の帯と同じ色） */
+.pilot-badge--in-use {
+  background: var(--pilot-color-in-use);
+  color: var(--pilot-color-in-use-text);
+}
+
+/*
+ * --- 2列の並び: 左に幅の決まった一覧（.pilot-side）、右に残りの幅の列（.pilot-main） ---
+ * 右の列の文は右の列の幅で折り返し、窓の幅を押し広げない（REQ-53・91）。
+ * 左の列は高さを行の高さに合わせる（height: 0 と min-height: 100% で、行の高さを右の列だけで決める）。
+ * 一覧は中身の高さで、右の列の高さを超える分だけスクロールし、ボタンの行は一覧のすぐ下に来る（REQ-92 §1）
+ */
+
+.pilot-columns {
+  display: grid;
+  grid-template-columns: var(--pilot-side-width) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--pilot-space-3);
+}
+
+.pilot-side {
+  display: flex;
+  flex-direction: column;
+  height: 0;
+  min-height: 100%;
+}
+
+.pilot-side > .pilot-group {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+}
+
+.pilot-side .pilot-table-wrap {
+  flex: 0 1 auto;
+  min-height: calc(var(--pilot-control-height) * 2);
+  max-height: none;
+  margin: 0 0 var(--pilot-space-2);
+}
+
+.pilot-side .pilot-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+/* 左の列のボタンと欄の見出しは文の途中で折り返さない。行と行の間は空ける（REQ-199 §5） */
+.pilot-side .pilot-button,
+.pilot-side .pilot-row > label {
+  white-space: nowrap;
+}
+
+.pilot-side .pilot-row + .pilot-row {
+  margin-top: var(--pilot-space-2);
+}
+
+.pilot-main {
+  min-width: 0;
+}
+
+/*
+ * --- ダイアログ: 窓の中に出す確かめ（ボタン2つ）と知らせ（ボタン1つ）。<dialog class="pilot-dialog"> を showModal() で開く ---
+ * 安全なほう（「いいえ」「送らない」「OK」）を右に置き、開いたときにフォーカスする。Esc は安全なほうと同じ（static/js/dialog.js）
+ */
+
+.pilot-dialog {
+  width: min(520px, calc(100vw - var(--pilot-space-4) * 2));
+  padding: 0;
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-bg);
+  color: var(--pilot-color-text);
+}
+
+.pilot-dialog::backdrop {
+  background: var(--pilot-color-text);
+  opacity: 0.25;
+}
+
+.pilot-dialog-title {
+  margin: 0;
+  padding: var(--pilot-space-3) var(--pilot-space-4) 0;
+  font-size: var(--pilot-font-size-heading);
+  font-weight: 600;
+}
+
+.pilot-dialog-body {
+  max-height: 60vh;
+  margin: 0;
+  padding: var(--pilot-space-2) var(--pilot-space-4) var(--pilot-space-4);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pilot-dialog-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--pilot-space-2);
+  padding: var(--pilot-space-2) var(--pilot-space-4);
+  border-top: 1px solid var(--pilot-color-border);
+  background: var(--pilot-color-surface);
+}
+
+/*
+ * 大きいダイアログ（貼り付け・送信前のプレビュー。今の wx の 720〜820 の幅のダイアログ）。高さは窓に収め、
+ * 本文の中の複数行の欄（textarea）が残りの高さを使う
+ */
+.pilot-dialog--wide {
+  width: min(820px, calc(100vw - var(--pilot-space-4) * 2));
+  height: min(640px, calc(100vh - var(--pilot-space-4) * 2));
+}
+
+.pilot-dialog--wide[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.pilot-dialog--wide .pilot-dialog-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--pilot-space-2);
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.pilot-dialog--wide .pilot-dialog-body > * {
+  flex: none;
+  margin: 0;
+}
+
+.pilot-dialog--wide .pilot-dialog-body > textarea {
+  flex: 1 1 0;
+  min-height: calc(var(--pilot-control-height) * 2);
+  resize: none;
+}
+
+/* 大きいダイアログの中の表（一括比較の送信前の確認の、送る組の一覧。REQ-106）。残りの高さを使い、表の中でスクロールする */
+.pilot-dialog--wide .pilot-dialog-body > .pilot-table-wrap {
+  flex: 1 1 0;
+  min-height: calc(var(--pilot-control-height) * 3);
+  max-height: none;
+}
+
+/*
+ * 単純比較の設定の欄（REQ-227 / ADR-0166）。比較の窓では「比較の設定」の欄の最後の行いっぱいに置く閉じた折りたたみ、
+ * 設定の窓では「単純比較」のタブの中身。欄は縦に並べ、置き換えの表の入力は列の幅いっぱい。誤りは .pilot-band--error（記号と色）
+ */
+.pilot-settings-panel > .pilot-rawopt {
+  flex: 1 1 100%;
+}
+
+.pilot-rawopt-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-rawopt-body > .pilot-note {
+  margin: 0;
+}
+
+.pilot-rawopt-label {
+  font-weight: 600;
+}
+
+.pilot-rawopt-replace {
+  width: 100%;
+}
+
+.pilot-rawopt-replace td > .pilot-input {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.pilot-rawopt-replace th:last-child,
+.pilot-rawopt-replace td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* 一括比較の「組の設定」の、単純比較の設定の読むだけの 1 行（REQ-228 §7.2） */
+.pilot-settings-raw {
+  margin: 0;
+}
+
+/*
+ * キャラクター（Mirarin）の絵（ADR-0174 / REQ-236）。設定でオンにしたときだけ JS が hidden を外す（隠すのは [hidden] の決まり）。
+ * 飾りなのでクリックを受けない（起動時の絵だけは、重ねた .pilot-splash が消すためのクリックを受ける）。絵の下に色を敷かない（透明のまま）。
+ * 動く絵（--motion。APNG）と止まった絵（--still）を並べて書き、動きを減らす設定では止まった絵だけを見せる。
+ * 大きさは場面ごとの値（決定2 の表。画面の点）。絵のファイル名で選ぶと .png がクラスの名前の決まりに当たるので、要素の id で選ぶ
+ */
+.pilot-character {
+  display: block;
+  flex: none;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.pilot-character--still {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pilot-character--motion {
+    display: none;
+  }
+
+  .pilot-character--still {
+    display: block;
+  }
+}
+
+/* 起動時（窓いっぱい・真ん中・最前面）。消えるまで下の窓は操作できない */
+.pilot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pilot-splash > .pilot-character {
+  width: 100%;
+  height: 100%;
+}
+
+/* AI の考え中（#ai-busy の中。スピナーの代わり） */
+#character-ai-thinking {
+  width: 128px;
+  height: 80px;
+}
+
+#character-ai-thinking-still {
+  width: 107px;
+  height: 80px;
+}
+
+/* 一括比較の実行中（#progress-row の先頭。進み具合の棒の左） */
+#character-batch-progress {
+  width: 96px;
+  height: 64px;
+}
+
+#character-batch-progress-still {
+  width: 96px;
+  height: 72px;
+}
+
+/* 差分なし（構造化と単純比較のタブの「差分が無い」文の上） */
+#character-no-diff,
+#character-no-diff-raw {
+  width: 192px;
+  height: 128px;
+}
+
+#character-no-diff-still,
+#character-no-diff-raw-still {
+  width: 171px;
+  height: 128px;
+}
+
+/* 空の窓（結果の面の真ん中に重ねる。下の面の操作はそのまま） */
+#character-welcome {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 1;
+  width: 240px;
+  height: 180px;
+  transform: translate(-50%, -50%);
+}
+
+/* 警告（AI の面のエラーの文の左）。オフのときは包む要素が形を持たず、今と同じに描く */
+#character-warning {
+  width: 64px;
+  height: 48px;
+}
+
+#api-error-row {
+  display: contents;
+}
+
+#api-error-row[data-character="on"] {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--pilot-space-2);
+}
+
+#api-error-row[data-character="on"] > .pilot-details {
+  flex: 1 1 auto;
+  min-width: 0;
+}

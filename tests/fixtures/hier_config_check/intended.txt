@@ -1,0 +1,180 @@
+Building configuration...
+
+Current configuration : 7468 bytes
+!
+! Last configuration change at 11:00:00 UTC Thu Oct 15 2026 by example-admin
+!
+version 17.9
+service timestamps debug datetime msec
+service timestamps log datetime msec
+service password-encryption
+!
+hostname example-c9k-01
+!
+vrf definition EXAMPLE-MGMT
+ !
+ address-family ipv4
+ exit-address-family
+!
+vrf definition EXAMPLE-RED
+ rd 65000:10
+ !
+ address-family ipv4
+ exit-address-family
+!
+logging buffered 64000 informational
+logging host 192.0.2.50
+!
+aaa new-model
+!
+!
+aaa authentication login default local
+aaa authorization exec default local
+!
+switch 1 provision c9300-48p
+switch 2 provision c9300-48p
+!
+crypto pki trustpoint EXAMPLE-TP
+ enrollment selfsigned
+ subject-name cn=EXAMPLE-TP
+ revocation-check none
+!
+crypto pki certificate chain EXAMPLE-TP
+ certificate self-signed 01
+  3082022B 30820194 A0030201 02020101 300D0609 2A864886 F70D0101 05050030
+  31312F30 2D060355 04031326 45584D50 4C452D53 454C462D 5349474E 45442D43
+  4552542D 30303030 30303030 301E170D 32363130 31353130 30303030 5A170D33
+  5A300000 0000AABB CCDD
+  	quit
+!
+username example-admin privilege 15 secret 9 $9$EXAMPLEsalt0001$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhas
+!
+vlan 10
+ name EXAMPLE-USERS
+!
+vlan 20
+ name EXAMPLE-VOICE
+!
+vlan 30
+ name EXAMPLE-SERVERS
+!
+vlan 40
+ name EXAMPLE-GUEST
+!
+vlan 99
+ name EXAMPLE-NATIVE
+!
+interface Port-channel1
+ description EXAMPLE-PO-TO-DIST
+ switchport trunk native vlan 99
+ switchport trunk allowed vlan 10,20,30
+ switchport mode trunk
+!
+interface GigabitEthernet0/0
+ description EXAMPLE-OOB-MGMT
+ vrf forwarding EXAMPLE-MGMT
+ ip address 192.0.2.10 255.255.255.0
+ negotiation auto
+!
+interface GigabitEthernet1/0/1
+ description EXAMPLE-TRUNK-TO-AP
+ switchport trunk native vlan 99
+ switchport trunk allowed vlan 10,20,30,40
+ switchport mode trunk
+!
+interface GigabitEthernet1/0/2
+ description EXAMPLE-USER-PORT
+ switchport access vlan 10
+ switchport mode access
+ switchport voice vlan 20
+ power inline auto
+ spanning-tree portfast
+!
+interface GigabitEthernet1/0/3
+ description EXAMPLE-UNUSED
+ switchport access vlan 10
+ switchport mode access
+ power inline never
+ shutdown
+!
+interface GigabitEthernet1/0/4
+ description EXAMPLE-FIXED-SPEED
+ switchport access vlan 30
+ switchport mode access
+  spanning-tree portfast
+ speed 1000
+ duplex full
+!
+interface GigabitEthernet1/0/5
+ description EXAMPLE-ROUTED-UPLINK
+ no switchport
+ ip address 198.51.100.1 255.255.255.252
+ ip ospf network point-to-point
+!
+interface GigabitEthernet1/0/6
+ description EXAMPLE-SUBIF-PARENT
+ no switchport
+ no ip address
+!
+interface GigabitEthernet1/0/6.100
+ description EXAMPLE-SUBIF
+ encapsulation dot1Q 100
+ vrf forwarding EXAMPLE-RED
+ ip address 198.51.100.5 255.255.255.252
+!
+interface GigabitEthernet1/0/47
+ description EXAMPLE-PO1-MEMBER-A
+ switchport trunk native vlan 99
+ switchport trunk allowed vlan 10,20,30
+ switchport mode trunk
+ channel-group 1 mode active
+!
+interface GigabitEthernet1/0/48
+ description EXAMPLE-PO1-MEMBER-B
+ switchport trunk native vlan 99
+ switchport trunk allowed vlan 10,20,30
+ switchport mode trunk
+ channel-group 1 mode active
+!
+interface Vlan10
+ description EXAMPLE-USERS-SVI
+ ip address 203.0.113.1 255.255.255.0
+!
+interface Loopback0
+ description EXAMPLE-ROUTER-ID
+ ip address 192.0.2.1 255.255.255.255
+!
+router ospf 1
+ router-id 192.0.2.1
+ passive-interface default
+ no passive-interface GigabitEthernet1/0/5
+ network 192.0.2.1 0.0.0.0 area 0
+ network 198.51.100.0 0.0.0.3 area 0
+ network 203.0.113.0 0.0.0.255 area 0
+!
+ip route 0.0.0.0 0.0.0.0 192.0.2.254
+!
+ip access-list extended EXAMPLE-ACL-IN
+ 10 permit tcp 192.0.2.0 0.0.0.255 any eq 22
+ 20 permit udp any any eq 123
+ 25 permit tcp any any eq 443
+ 30 deny ip any any log
+!
+snmp-server community EXAMPLE-RO RO
+snmp-server location EXAMPLE-LAB
+snmp-server contact example-noc
+!
+banner motd ^C
+EXAMPLE banner line 1
+EXAMPLE banner line 2
+^C
+!
+line con 0
+ exec-timeout 5 0
+line vty 0 4
+ exec-timeout 5 0
+ transport input ssh
+!
+ntp server 192.0.2.123
+!
+end

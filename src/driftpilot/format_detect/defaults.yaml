@@ -1,0 +1,21 @@
+# フォーマット識別(ADR-0004 Tier 1)の設定。数値はここだけに置く。
+# threshold: 最高スコアがこの値未満(0 より大きい場合)なら曖昧
+# margin: 最高スコアと次点の差がこの値未満なら曖昧(シグネチャが2つ以上のとき)
+threshold: 0.6
+margin: 0.1
+signatures:
+  cisco_ios_config:
+    features:
+      # 強い特徴
+      - {pattern: '^version \d', weight: 0.3}
+      - {pattern: '^hostname \S+', weight: 0.3}
+      - {pattern: '^interface \S+[^\n]*\n[ \t]+\S', weight: 0.3}
+      - {pattern: '^!\s*$', weight: 0.3}
+      - {pattern: '^end\s*$', weight: 0.3}
+      - {pattern: '^Building configuration', weight: 0.3}
+      - {pattern: '^Current configuration : \d+ bytes', weight: 0.3}
+      # 弱い特徴
+      - {pattern: '^router ospf \d+', weight: 0.1}
+      - {pattern: '^ip access-list ', weight: 0.1}
+      - {pattern: '^vlan \d+', weight: 0.1}
+      - {pattern: '^line vty', weight: 0.1}
