@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
+from driftpilot import i18n
+
 MaskKind = Literal["mask", "pass"]
 
 # 秘密語の初期値(ADR-0019 決定4)。encrypted-password と api-key は REQ-16 の Q3 で追加した(Junos / FortiGate)。
@@ -496,6 +498,89 @@ MASK_PATTERNS: tuple[MaskPattern, ...] = (
         "pass", "set policy-options policy-statement EXPORT term 1 from community CL-1", "Junos", note="BGP のコミュニティ",
     ),
 )
+
+# --- 利用者に見える説明の英語の版(REQ-259 / ADR-0190 決定3) ---
+# 送る前の確かめ・`driftpilot mask-patterns` の出力に出る備考・出どころ・例を、言語に合わせて出す。
+# 伏せる・送らないの判定(match・scope・kind・秘密語・送らない形・指紋の計算)には使わない。MaskPattern の値は日本語のまま変えない
+# (例は表の自己照合とテストの入力に使う)。備考のある 44 件すべてに英語がある(ID → 英語。テストが鍵を照らす)
+MASK_NOTES_EN: dict[str, str] = {
+    "MSK-03": "A public key is not a secret, but the value has no meaning and uses up tokens, so it is masked (ADR-0018 decision 2b). The trailing comment is sent",
+    "MSK-04": "Password expiry settings",
+    "MSK-10": "Under line vty / con",
+    "MSK-12": "The same applies to a neighbor under a vrf (router bgp is an ancestor)",
+    "MSK-13": "The body of the key is in the profile",
+    "MSK-14": "What follows the community name (RO / RW / view / group / ACL name) is sent",
+    "MSK-15": "Masks the auth and priv keys and the localized / engineID values",
+    "MSK-17": "For version 3, auth / priv is the security level, and what follows is the user name",
+    "MSK-92": "Enabling traps on an interface",
+    "MSK-93": "Words are listed so that `snmp mib community-map <community>` is not included",
+    "MSK-94": "Trap types. If what follows were any word, unknown forms containing a secret word and a value would be sent, so the words are listed",
+    "MSK-23": "Authentication method (algorithm)",
+    "MSK-30": "What follows key is the key number, not the body of the key",
+    "MSK-33": "Algorithm specification",
+    "MSK-39": "MACsec key. What follows key is the key name (CKN)",
+    "MSK-42": "File names of the certificate and the key",
+    "MSK-43": "Key name of auto-certificate",
+    "MSK-81": "Algorithm specification",
+    "MSK-45": "Key of the session shared-secret profile. What follows secret is the key name, followed by the validity period",
+    "MSK-49": "TCAM key fields",
+    "MSK-58": "Under the supplicant profile",
+    "MSK-60": "BGP community attribute",
+    "MSK-61": "Name of the community list",
+    "MSK-62": "VLAN type",
+    "MSK-64": "List of algorithms",
+    "MSK-67": "Log facility name",
+    "MSK-68": "A description is not masked (ADR-0018 decision 2). It is handled like a description that has no secret word",
+    "MSK-70": "Authentication method",
+    "MSK-72": "Display format setting (ADR-0019 measurement 2)",
+    "MSK-85": "The third word is the community name. What follows (the trap / setrequest specification) is sent with its words listed",
+    "MSK-87": "Device name and the address of the agent",
+    "MSK-89": "Trap types observed in the corpus",
+    "MSK-91": "NAT translation for SNMP",
+    "MSK-73": "FortiGate puts ENC before an encrypted value. The word after ENC is masked whatever the item name is",
+    "MSK-74": "Plain text value (without ENC)",
+    "MSK-75": "Type of user authentication",
+    "MSK-82": "Enabling a feature and the authentication method",
+    "MSK-76": "Block of the authentication screen text",
+    "MSK-83": "Block heading. The community name is on the child set name line, which has no secret word (docs/notes/req-16-llm.md)",
+    "MSK-95": "Block heading",
+    "MSK-96": "List of protocols allowed for management. Limited to the protocol names observed in the corpus",
+    "MSK-84": "Curly brace form",
+    "MSK-97": "Block heading",
+    "MSK-80": "BGP community",
+}
+# 出どころの英語の版(日本語の出どころだけ。ほかはもともと英語)
+_SOURCES_EN: dict[str, str] = {
+    "共通": "Common",
+    "富士通 Si-R": "Fujitsu Si-R",
+    "富士通 SR-S": "Fujitsu SR-S",
+    "富士通 SR-S / Si-R": "Fujitsu SR-S / Si-R",
+}
+# 例の中の「伏せる位置」の印(日本語の版は `<値>`)。英語の版の表示だけ `<value>` にする
+_EXAMPLE_MARK_JA = "<値>"
+_EXAMPLE_MARK_EN = "<value>"
+
+
+def shown_note(p: MaskPattern) -> str:
+    """利用者に見せる備考。英語のときは MASK_NOTES_EN(備考のある表の行に英語が無ければ日本語のまま)。"""
+    if p.note and i18n.current_language() == i18n.EN:
+        return MASK_NOTES_EN.get(p.id, p.note)
+    return p.note
+
+
+def shown_source(p: MaskPattern) -> str:
+    """利用者に見せる出どころ。英語のときは日本語の出どころだけ英語にする。"""
+    if i18n.current_language() == i18n.EN:
+        return _SOURCES_EN.get(p.source, p.source)
+    return p.source
+
+
+def shown_example(p: MaskPattern) -> str:
+    """利用者に見せる例。英語のときだけ `<値>` を `<value>` にする(MaskPattern.example は変えない)。"""
+    if i18n.current_language() == i18n.EN:
+        return p.example.replace(_EXAMPLE_MARK_JA, _EXAMPLE_MARK_EN)
+    return p.example
+
 
 _ID = re.compile(r"MSK-\d{2,}")
 

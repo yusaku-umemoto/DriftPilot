@@ -69,6 +69,7 @@ from pathlib import Path
 from typing import Any
 
 # 保存・削除などは設定画面がここから呼ぶ(gui が読むのは llm_settings まで。gui の層の境界)
+from driftpilot import i18n
 from driftpilot.core.batch_llm import DEFAULT_MAX_TOTAL_DIFFS
 from driftpilot.key_store import (  # noqa: F401
     DEFAULT_PROFILE_ID,
@@ -105,6 +106,9 @@ from driftpilot.llm_analyzer.openai_client import DEFAULT_BASE_URL  # noqa: F401
 from driftpilot.llm_analyzer.wire import AUTH_API_KEY, AUTH_BEARER, DEFAULT_WIRE, WireOptions
 from driftpilot.messages import (
     CONFIG_TEMPLATE_NOTE,
+    LLMP_ERRORS,
+    LLMSET_ERRORS,
+    LLMSET_UNSET,
     cli_destination,
     llm_profile_not_found,
     llm_profiles_missing,
@@ -143,6 +147,10 @@ THEME_SYSTEM = "system"
 THEME_LIGHT = "light"
 THEME_DARK = "dark"
 THEMES = (THEME_SYSTEM, THEME_LIGHT, THEME_DARK)
+# 画面の言語(ADR-0190 決定1。"en"・"ja"・"system"。書かれていない・ほかの値・文字でないときは "en")。読み方は i18n に 1 か所だけ置く
+LANGUAGE_KEY = i18n.LANGUAGE_KEY
+LANGUAGES = i18n.LANGUAGES
+DEFAULT_LANGUAGE = i18n.DEFAULT_LANGUAGE
 
 # 利用者ごとの設定ファイルの雛形(REQ-27 §B-4。2行目と上限の行は REQ-93 で直した)。値の行はすべてコメントのまま
 CONFIG_TEMPLATE = f"""\
@@ -168,6 +176,7 @@ CONFIG_TEMPLATE = f"""\
 
 # プロンプトは、設定画面の「プロンプト」の枠でプロファイルとして編集できます。差分を入れる印 {{{{diff}}}} が要ります
 # 比較の画面で、ファイルが2つそろったら自動で比較を始めるか（[gui] の auto_compare。書かなければ始めます）は、設定画面の「設定ファイル」の枠で変えられます
+# 画面の言語（[gui] の language。"en"・"ja"・"system"。書かなければ "en"）は、設定画面の「表示」のタブで変えられます
 # 画面の色（[gui] の theme。"system"・"light"・"dark"。書かなければ "system"）は、設定画面の「表示」のタブで変えられます
 # 起動したときに新しい版を確かめるか（[gui] の auto_update_check。書かなければ確かめません）は、設定画面の「更新」のタブで変えられます
 """
@@ -343,7 +352,7 @@ def read_bytes(path: Path) -> bytes | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise SettingsError(f"{path}: 読めません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(LLMP_ERRORS["unreadable"].format(path=path, reason=exc.strerror or type(exc).__name__)) from None
 
 
 def parse_section(data: bytes | None, path: Path) -> dict[str, Any]:
@@ -353,10 +362,10 @@ def parse_section(data: bytes | None, path: Path) -> dict[str, Any]:
     try:
         parsed = tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
-        raise SettingsError(f"{path}: TOML として読めません") from None
+        raise SettingsError(LLMSET_ERRORS["not_toml"].format(path=path)) from None
     section = parsed.get(SECTION, {})
     if not isinstance(section, dict):
-        raise SettingsError(f"{path}: [{SECTION}] は表にしてください")
+        raise SettingsError(LLMSET_ERRORS["section_not_table"].format(path=path, section=SECTION))
     return section
 
 
@@ -369,7 +378,7 @@ def _string(section: dict[str, Any], key: str, path: Path) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise SettingsError(f"{path}: {SECTION}.{key} は空でない文字列にしてください")
+        raise SettingsError(LLMSET_ERRORS["non_empty_string"].format(path=path, section=SECTION, key=key))
     return value.strip()
 
 
@@ -415,7 +424,7 @@ def is_secret_word(word: object) -> bool:
 def words_of(section: Mapping[str, Any], path: Path) -> tuple[str, ...]:
     value = section.get("extra_secret_words", [])
     if not isinstance(value, list) or not all(is_secret_word(w) for w in value):
-        raise SettingsError(f"{path}: {SECTION}.extra_secret_words は、空白を含まない語のリストにしてください")
+        raise SettingsError(LLMSET_ERRORS["extra_secret_words"].format(path=path, section=SECTION))
     return tuple(value)
 
 
@@ -430,7 +439,7 @@ def limit_of(section: Mapping[str, Any], key: str, path: Path) -> int | None:
     if value is None:
         return None
     if not is_limit(value):
-        raise SettingsError(f"{path}: {SECTION}.{key} は 1 以上の整数にしてください")
+        raise SettingsError(LLMSET_ERRORS["positive_int"].format(path=path, section=SECTION, key=key))
     return value
 
 
@@ -539,6 +548,25 @@ def gui_theme(
     except SettingsError:
         return THEME_SYSTEM
     return theme_of(data)
+
+
+def language_of(data: bytes | None) -> str:
+    """設定ファイルのバイト列から [gui] の language を読む(ADR-0190)。i18n.language_setting_of を呼ぶだけ。
+
+    "en"・"ja"・"system" はそのまま。ほか(無い・読めない・3 つ以外)は "en"。
+    """
+    return i18n.language_setting_of(data)
+
+
+def gui_language(
+    *, env: Mapping[str, str] | None = None, platform: str | None = None, home: Path | None = None
+) -> str:
+    """利用者ごとの設定ファイルの [gui] language(設定画面に見せる値。ADR-0190)。読めなければ "en"。"""
+    try:
+        data = read_bytes(user_config_path(platform=platform, env=env, home=home))
+    except SettingsError:
+        return DEFAULT_LANGUAGE
+    return language_of(data)
 
 
 def auto_compare_enabled(
@@ -677,7 +705,7 @@ def load_settings(
     vault = StoredKey() if cli else read_key(profile_id)
     if file_key_usable and env_key is None and stored is not None and (not isinstance(stored, str) or not stored.strip()):
         # 使う環境変数のキーが無いときに形を確かめる(今までと同じ。保管庫にキーがあっても、壊れた設定ファイルは知らせる)
-        raise SettingsError(f"{user_path}: {SECTION}.api_key は空でない文字列にしてください")
+        raise SettingsError(LLMSET_ERRORS["api_key_string"].format(path=user_path, section=SECTION))
     file_key = stored.strip() if isinstance(stored, str) and stored.strip() else None
     usable_file_key = file_key if file_key_usable else None
     key, source = next(
@@ -874,9 +902,9 @@ def write_template(path: Path) -> Path:
         with path.open("x", encoding="utf-8", newline="\n") as fh:
             fh.write(CONFIG_TEMPLATE)
     except FileExistsError:
-        raise SettingsError(f"{path}: 既にあります。上書きしません") from None
+        raise SettingsError(LLMP_ERRORS["already_exists"].format(path=path)) from None
     except OSError as exc:
-        raise SettingsError(f"{path}: 書けません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(LLMP_ERRORS["unwritable"].format(path=path, reason=exc.strerror or type(exc).__name__)) from None
     return path
 
 
@@ -1043,7 +1071,7 @@ def prepare_connection_check(
 def display_key(key: str | None) -> str:
     """画面に出すときのキー。末尾4文字だけを見せる(`sk-...a3f9`)。短いキーは末尾も見せない。"""
     if not key:
-        return "(未設定)"
+        return LLMSET_UNSET
     prefix = "sk-" if key.startswith("sk-") else ""
     if len(key) < 12:
         return f"{prefix}..."

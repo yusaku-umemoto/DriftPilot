@@ -18,7 +18,55 @@ from typing import Any, Literal, get_args
 
 import yaml
 
+from driftpilot import i18n
 from driftpilot.config_parser.platforms import FLAT_PLATFORMS
+
+# 利用者に見える誤りの文。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)
+_TEXTS_JA = {
+    "yaml_unreadable": "ルールファイルを YAML として読めません: {error}",
+    "top_level": "ルールファイルの最上位は `rules:` のリストにしてください",
+    "rule_not_mapping": "rules[{index}] はマッピングにしてください",
+    "missing_key": "rules[{index}] に必須キー {key} がありません",
+    "id_not_string": "rules[{index}] の id は空でない文字列にしてください",
+    "id_duplicate": "ルール ID が重複しています: {rule_id}",
+    "scope_invalid": "{rule_id}: scope が不正です: {scope}",
+    "default_enabled_bool": "{rule_id}: default_enabled は真偽値にしてください",
+    "description_pattern_string": "{rule_id}: description と pattern は文字列にしてください",
+    "replacement_string": "{rule_id}: replacement は文字列にしてください",
+    "pattern_invalid": "{rule_id}: pattern または replacement が不正です: {error}",
+    "platform_string": "{rule_id}: platform は空でない文字列にしてください",
+    "platform_scope": "{rule_id}: platform を付けるルールの scope は config にしてください",
+    "platform_newline": "{rule_id}: platform を付けるルールの replacement に改行は書けません(行数が変わるため)",
+    "reason_invalid": "{rule_id}: exclusion_reason が不正です: {reason}(使える値: {allowed})",
+    "reason_needs_platform": "{rule_id}: exclusion_reason は platform と一緒に指定してください",
+    "kind_invalid": "kind は config か show にしてください: {kind}",
+    "enabled_duplicate": "enabled_ids にルール ID の重複があります: {rule_id}",
+    "enabled_not_usable": "kind={kind} で使えないルール ID です: {rule_id}",
+    "line_split": "正規化ルールの置換で行が割れました(機種のルールは行数を変えてはいけません)",
+}
+_TEXTS_EN = {
+    "yaml_unreadable": "Cannot read the rules file as YAML: {error}",
+    "top_level": "The top level of the rules file must be a list under `rules:`",
+    "rule_not_mapping": "rules[{index}] must be a mapping",
+    "missing_key": "rules[{index}] is missing the required key {key}",
+    "id_not_string": "The id of rules[{index}] must be a non-empty string",
+    "id_duplicate": "Duplicate rule ID: {rule_id}",
+    "scope_invalid": "{rule_id}: invalid scope: {scope}",
+    "default_enabled_bool": "{rule_id}: default_enabled must be true or false",
+    "description_pattern_string": "{rule_id}: description and pattern must be strings",
+    "replacement_string": "{rule_id}: replacement must be a string",
+    "pattern_invalid": "{rule_id}: invalid pattern or replacement: {error}",
+    "platform_string": "{rule_id}: platform must be a non-empty string",
+    "platform_scope": "{rule_id}: the scope of a rule with platform must be config",
+    "platform_newline": "{rule_id}: the replacement of a rule with platform cannot contain a line break (it would change the line count)",
+    "reason_invalid": "{rule_id}: invalid exclusion_reason: {reason} (allowed values: {allowed})",
+    "reason_needs_platform": "{rule_id}: exclusion_reason must be given together with platform",
+    "kind_invalid": "kind must be config or show: {kind}",
+    "enabled_duplicate": "enabled_ids contains a duplicate rule ID: {rule_id}",
+    "enabled_not_usable": "Rule ID not usable with kind={kind}: {rule_id}",
+    "line_split": "A normalization rule replacement split a line (rules for a platform must not change the line count)",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 SCOPES = ("config", "show", "both")
 KINDS = ("config", "show")
@@ -50,7 +98,7 @@ def load_rules(path: str | Path) -> list[NormalizationRule]:
         try:
             data = yaml.safe_load(f)
         except yaml.YAMLError as e:
-            raise ValueError(f"ルールファイルを YAML として読めません: {e}") from e
+            raise ValueError(_T["yaml_unreadable"].format(error=e)) from e
     return parse_rules(data)
 
 
@@ -68,51 +116,51 @@ def builtin_rules() -> list[NormalizationRule]:
 def parse_rules(data: Any) -> list[NormalizationRule]:
     """読み込んだ YAML の値を検証し、ルール一覧にする。"""
     if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
-        raise ValueError("ルールファイルの最上位は `rules:` のリストにしてください")
+        raise ValueError(_T["top_level"])
     rules: list[NormalizationRule] = []
     seen: set[str] = set()
     for index, raw in enumerate(data["rules"]):
         if not isinstance(raw, dict):
-            raise ValueError(f"rules[{index}] はマッピングにしてください")
+            raise ValueError(_T["rule_not_mapping"].format(index=index))
         for key in ("id", "description", "pattern", "scope", "default_enabled"):
             if key not in raw:
-                raise ValueError(f"rules[{index}] に必須キー {key} がありません")
+                raise ValueError(_T["missing_key"].format(index=index, key=key))
         rule_id = raw["id"]
         if not isinstance(rule_id, str) or not rule_id:
-            raise ValueError(f"rules[{index}] の id は空でない文字列にしてください")
+            raise ValueError(_T["id_not_string"].format(index=index))
         if rule_id in seen:
-            raise ValueError(f"ルール ID が重複しています: {rule_id}")
+            raise ValueError(_T["id_duplicate"].format(rule_id=rule_id))
         seen.add(rule_id)
         if raw["scope"] not in SCOPES:
-            raise ValueError(f"{rule_id}: scope が不正です: {raw['scope']!r}")
+            raise ValueError(_T["scope_invalid"].format(rule_id=rule_id, scope=repr(raw["scope"])))
         if not isinstance(raw["default_enabled"], bool):
-            raise ValueError(f"{rule_id}: default_enabled は真偽値にしてください")
+            raise ValueError(_T["default_enabled_bool"].format(rule_id=rule_id))
         if not isinstance(raw["description"], str) or not isinstance(raw["pattern"], str):
-            raise ValueError(f"{rule_id}: description と pattern は文字列にしてください")
+            raise ValueError(_T["description_pattern_string"].format(rule_id=rule_id))
         replacement = raw.get("replacement", "")
         if not isinstance(replacement, str):
-            raise ValueError(f"{rule_id}: replacement は文字列にしてください")
+            raise ValueError(_T["replacement_string"].format(rule_id=rule_id))
         try:
             pattern = re.compile(raw["pattern"])
             pattern.sub(replacement, "")
         except (re.error, IndexError) as e:
-            raise ValueError(f"{rule_id}: pattern または replacement が不正です: {e}") from e
+            raise ValueError(_T["pattern_invalid"].format(rule_id=rule_id, error=e)) from e
         platform = raw.get("platform")
         if platform is not None:
             if not isinstance(platform, str) or not platform.strip():
-                raise ValueError(f"{rule_id}: platform は空でない文字列にしてください")
+                raise ValueError(_T["platform_string"].format(rule_id=rule_id))
             if raw["scope"] != "config":
-                raise ValueError(f"{rule_id}: platform を付けるルールの scope は config にしてください")
+                raise ValueError(_T["platform_scope"].format(rule_id=rule_id))
             if "\n" in replacement or "\r" in replacement or _NEWLINE_ESCAPE.search(replacement):
-                raise ValueError(f"{rule_id}: platform を付けるルールの replacement に改行は書けません(行数が変わるため)")
+                raise ValueError(_T["platform_newline"].format(rule_id=rule_id))
         reason = raw.get("exclusion_reason")
         if reason is not None:
             if reason not in EXCLUSION_REASONS:
                 raise ValueError(
-                    f"{rule_id}: exclusion_reason が不正です: {reason!r}(使える値: {', '.join(EXCLUSION_REASONS)})"
+                    _T["reason_invalid"].format(rule_id=rule_id, reason=repr(reason), allowed=", ".join(EXCLUSION_REASONS))
                 )
             if platform is None:
-                raise ValueError(f"{rule_id}: exclusion_reason は platform と一緒に指定してください")
+                raise ValueError(_T["reason_needs_platform"].format(rule_id=rule_id))
         rules.append(
             NormalizationRule(
                 id=rule_id,
@@ -136,7 +184,7 @@ def select_rules(
     機種のルールは、kind=config で platform が一致したときだけ対象になり、既定では default_enabled が効く。
     """
     if kind not in KINDS:
-        raise ValueError(f"kind は config か show にしてください: {kind!r}")
+        raise ValueError(_T["kind_invalid"].format(kind=repr(kind)))
     in_scope = [
         r
         for r in rules
@@ -151,10 +199,10 @@ def select_rules(
     seen: set[str] = set()
     for rule_id in enabled_ids:
         if rule_id in seen:
-            raise ValueError(f"enabled_ids にルール ID の重複があります: {rule_id}")
+            raise ValueError(_T["enabled_duplicate"].format(rule_id=rule_id))
         seen.add(rule_id)
         if rule_id not in by_id:
-            raise ValueError(f"kind={kind} で使えないルール ID です: {rule_id}")
+            raise ValueError(_T["enabled_not_usable"].format(kind=kind, rule_id=rule_id))
         selected.append(by_id[rule_id])
     return selected
 
@@ -205,5 +253,5 @@ def normalize_text(text: str, rules: list[NormalizationRule]) -> tuple[str, dict
     lines, counts = apply_rules(text, rules)
     for line in lines:
         if line and line.splitlines() != [line]:
-            raise ValueError("正規化ルールの置換で行が割れました(機種のルールは行数を変えてはいけません)")
+            raise ValueError(_T["line_split"])
     return "\n".join(lines), counts

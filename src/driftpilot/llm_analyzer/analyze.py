@@ -8,6 +8,7 @@
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 
+from driftpilot import i18n
 from driftpilot.diff_engine import CompareResult, RawCompareResult, ShowCompareResult
 from driftpilot.llm_analyzer.api_error import ApiErrorText, for_display
 from driftpilot.llm_analyzer.approval import PromptNotApproved
@@ -28,6 +29,12 @@ from driftpilot.llm_analyzer.prompt import (
     with_whole_rules,
 )
 from driftpilot.llm_analyzer.types import LlmAnalysis, LlmReason, LlmRequest
+
+
+# 利用者に見える誤りの文(日本語・英語。REQ-258)。{value!r} は値の repr
+_TEXTS_JA = {"max_total_diffs_invalid": "max_total_diffs は 1 以上の整数にしてください: {value!r}"}
+_TEXTS_EN = {"max_total_diffs_invalid": "max_total_diffs must be an integer of 1 or more: {value!r}"}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 
 def _now() -> str:
@@ -229,7 +236,7 @@ def analyze_whole_sent(
 ) -> tuple[LlmAnalysis, tuple[int, ...]]:
     """analyze_whole と同じ解析と、送る文の本文に入れた組の sections の位置(送る文ができなかったときは空)。"""
     if type(max_total_diffs) is not int or max_total_diffs < 1:
-        raise ValueError(f"max_total_diffs は 1 以上の整数にしてください: {max_total_diffs!r}")
+        raise ValueError(_T["max_total_diffs_invalid"].format(value=max_total_diffs))
     try:
         return _analyze_whole(request, sections, max_total_diffs, unchanged, clock)
     except Exception as exc:  # noqa: BLE001 - 解析の失敗で比較を止めない(ADR-0018 決定4)

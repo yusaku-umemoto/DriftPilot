@@ -19,12 +19,30 @@ from typing import Any
 import driftpilot
 from driftpilot import coverage_show
 from driftpilot.messages import (
+    CLI_ERR_CONFIRM_ALONE,
+    CLI_ERR_LLM_MAX_DIFFS_ALONE,
+    CLI_ERR_LLM_MAX_DIFFS_RANGE,
+    CLI_ERR_LLM_MAX_TOTAL_DIFFS_ALONE,
+    CLI_ERR_LLM_MAX_TOTAL_DIFFS_RANGE,
+    CLI_ERR_NO_FILE_MEASURED,
+    CLI_ERR_NO_FILES,
+    CLI_ERR_NO_SEGMENTS,
+    CLI_ERR_SAVE_NEEDS_PATH,
+    CLI_ERR_SEGMENT_NOT_SELECTED,
+    CLI_ERR_SEGMENTS_AMBIGUOUS,
+    CLI_ERR_TOP_FILES_NEGATIVE,
+    CLI_ERR_TOP_NEGATIVE,
+    CLI_ERROR_PREFIX,
+    CLI_HELP,
     COMPARE_MULTI_NOTHING_TO_SAVE,
     LLM_NO_PREMISE_ALONE,
     LLM_NO_PREMISE_HELP,
     premise_refused_cli,
     batch_llm_gave_up,
     cli_api_error_line,
+    cli_err_all_segments_conflict,
+    cli_err_cannot_write,
+    cli_err_platform_rejected,
     common_env_ignored_note,
     compare_llm_confirm_hint,
     gui_web_unavailable,
@@ -86,6 +104,8 @@ from driftpilot.llm_settings import build_request as build_llm_request
 from driftpilot.segmentation.input_forms import InputDecodeError, InputText, read_config_input
 from driftpilot.storage import StorageError, build_record, save
 
+_H = CLI_HELP  # 説明の文(言語で選んだ辞書)
+
 EXIT_SAME = 0
 EXIT_DIFF = 1
 EXIT_ERROR = 2
@@ -105,195 +125,105 @@ class CliError(Exception):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="driftpilot", description="ネットワーク機器の設定の差分を調べる")
+    parser = argparse.ArgumentParser(prog="driftpilot", description=_H["main.description"])
     # 版は selfcheck と同じ出どころ(配る形の driftpilot-cli でも同じ。REQ-97 §5)
-    parser.add_argument("--version", action="version", version=version_line(driftpilot.__version__), help="版を表示して終わる")
+    parser.add_argument("--version", action="version", version=version_line(driftpilot.__version__), help=_H["main.version"])
     sub = parser.add_subparsers(dest="command", required=True)
-    cmp = sub.add_parser("compare", help="2つのファイルを比較する")
-    cmp.add_argument("before", help="変更前のファイル")
-    cmp.add_argument("after", help="変更後のファイル")
-    cmp.add_argument("--mode", choices=["structured", "raw", "both"], default="both", help="比較方式(既定: both)")
-    cmp.add_argument("--format", choices=["text", "json"], default="text", help="出力形式(既定: text)")
-    cmp.add_argument(
-        "--kind",
-        choices=["config", "show", "auto"],
-        default="config",
-        help="入力の種類。auto は内容から判定する(既定: config)",
-    )
-    cmp.add_argument(
-        "--platform",
-        metavar="NAME",
-        help=(
-            "config では、既定でないパーサーの系統を選ぶ。fujitsu_sir を指定すると平坦 config のパーサー、"
-            "fortinet を指定すると FortiGate のパーサーを使う"
-            "(--show-command は不要。省略や他の名前は Cisco 系で、指定は要らない)。"
-            "show では、機種を ntc-templates の platform 名で指定する(例: cisco_ios)。--show-command と一緒に指定する。"
-            "auto は config の中身から機種を決める(--show-command は不要。show では機種なしの単純比較になる)"
-        ),
-    )
-    cmp.add_argument(
-        "--show-command", metavar="TEXT", dest="show_command", help="show のコマンド(例: 'show ip interface brief')"
-    )
-    for side, label in (("before", "変更前"), ("after", "変更後")):
-        cmp.add_argument(f"--{side}-command", metavar="TEXT", help=f"{label}の区間を、コマンドの原文の部分一致で選ぶ")
-        cmp.add_argument(f"--{side}-segment", type=int, metavar="N", help=f"{label}の区間を、順番(1始まり)で選ぶ")
-    cmp.add_argument(
-        "--all-segments",
-        action="store_true",
-        help=(
-            "両側の区間をコマンドで組にして全部比べる。設定のコマンド(running-config など)の組は config、"
-            "ほかは show として比べ、--kind はコマンドが分からない組にだけ効く。"
-            "--save は組ごとに1行の JSON Lines で書く(相手なしの区間は入れない)。"
-            "--llm は一括比較と同じく、送る内容の要約を出すだけで、送るのは --confirm を付けたときだけ。"
-            "--before-segment・--after-segment・--before-command・--after-command・--show-command とは同時に使えない"
-        ),
-    )
-    cmp.add_argument(
-        "--confirm",
-        action="store_true",
-        help="--all-segments --llm で、要約を確かめた後に AI への送信を実行する(--all-segments と --llm と一緒に使う)",
-    )
+    cmp = sub.add_parser("compare", help=_H["compare.help"])
+    cmp.add_argument("before", help=_H["compare.before"])
+    cmp.add_argument("after", help=_H["compare.after"])
+    cmp.add_argument("--mode", choices=["structured", "raw", "both"], default="both", help=_H["compare.mode"])
+    cmp.add_argument("--format", choices=["text", "json"], default="text", help=_H["format_text"])
+    cmp.add_argument("--kind", choices=["config", "show", "auto"], default="config", help=_H["compare.kind"])
+    cmp.add_argument("--platform", metavar="NAME", help=_H["compare.platform"])
+    cmp.add_argument("--show-command", metavar="TEXT", dest="show_command", help=_H["compare.show_command"])
+    for side in ("before", "after"):
+        cmp.add_argument(f"--{side}-command", metavar="TEXT", help=_H[f"compare.{side}_command"])
+        cmp.add_argument(f"--{side}-segment", type=int, metavar="N", help=_H[f"compare.{side}_segment"])
+    cmp.add_argument("--all-segments", action="store_true", help=_H["compare.all_segments"])
+    cmp.add_argument("--confirm", action="store_true", help=_H["compare.confirm"])
     cmp.add_argument(
         "--llm-max-total-diffs",
         type=int,
         metavar="N",
-        help=(
-            "--all-segments で、全部の組で AI に送る差分の合計の上限。超えたら1件も送らない。1 以上"
-            f"(既定: 利用者ごとの設定ファイル config.toml の llm.max_total_diffs、無ければ {DEFAULT_MAX_TOTAL_DIFFS})"
-        ),
+        help=_H["compare.llm_max_total_diffs"].format(default=DEFAULT_MAX_TOTAL_DIFFS),
     )
-    cmp.add_argument("--prompt", metavar="TEXT", help="プロンプト文字列(自己校正を上書きする。両側に適用)")
-    cmp.add_argument(
-        "--rules",
-        metavar="PATH",
-        help=(
-            "正規化ルールのファイル。省略すると同梱の機種のルールを使う(--platform fortinet の config では、"
-            "ENC の付く値を比較対象外にするルールなど2つが既定で効き、外した件数を結果に出す)。"
-            "この既定を外すには、そのルールを含まないか default_enabled: false にした自分のルールファイルを --rules で渡す"
-        ),
-    )
-    cmp.add_argument(
-        "--enable-rule",
-        action="append",
-        metavar="ID",
-        help="有効にするルール ID(繰り返し可)。指定すると既定で有効なルールは使わず、ここに書いた ID だけを使う",
-    )
-    cmp.add_argument(
-        "--save",
-        metavar="PATH",
-        help="比較結果を JSON で保存する。既存のディレクトリなら名前を自動で付ける。上書きはしない(既定: 保存しない)",
-    )
+    cmp.add_argument("--prompt", metavar="TEXT", help=_H["compare.prompt"])
+    cmp.add_argument("--rules", metavar="PATH", help=_H["compare.rules"])
+    cmp.add_argument("--enable-rule", action="append", metavar="ID", help=_H["compare.enable_rule"])
+    cmp.add_argument("--save", metavar="PATH", help=_H["compare.save"])
     llm = cmp.add_mutually_exclusive_group()
-    llm.add_argument(
-        "--llm", action="store_true", help="差分を AI に送り、意味の説明を注釈として付ける(認証情報は伏せる。差分は変わらない)"
-    )
-    llm.add_argument(
-        "--llm-dry-run", action="store_true", help="AI に送る内容(マスク後)と、送らない行の形を出す。送信はしない"
-    )
+    llm.add_argument("--llm", action="store_true", help=_H["compare.llm"])
+    llm.add_argument("--llm-dry-run", action="store_true", help=_H["compare.llm_dry_run"])
     cmp.add_argument(
         "--llm-max-diffs",
         type=int,
         metavar="N",
-        help=(
-            "AI に送る差分の件数の上限。1 以上"
-            f"(既定: 利用者ごとの設定ファイル config.toml の llm.max_diffs、無ければ {DEFAULT_MAX_DIFFS})。無制限の指定は無い"
-        ),
+        help=_H["compare.llm_max_diffs"].format(default=DEFAULT_MAX_DIFFS),
     )
     # 単純比較の設定(ADR-0166。REQ-227 §8)。既定の設定のファイル(raw-compare.json)は読まない
-    cmp.add_argument(
-        "--ignore-line",
-        action="append",
-        metavar="REGEX",
-        help=(
-            "単純比較で、この正規表現に当たる行を比べない(繰り返し可)。"
-            "単純比較だけに効く。構造化比較は変えない。既定の設定のファイル(設定画面の『単純比較』)は読まない"
-        ),
-    )
-    cmp.add_argument(
-        "--replace",
-        action="append",
-        nargs=2,
-        metavar=("REGEX", "TEXT"),
-        help="単純比較で、行の REGEX に当たる部分を TEXT に置き換えてから比べる(繰り返し可。上から順に当てる)",
-    )
+    cmp.add_argument("--ignore-line", action="append", metavar="REGEX", help=_H["compare.ignore_line"])
+    cmp.add_argument("--replace", action="append", nargs=2, metavar=("REGEX", "TEXT"), help=_H["compare.replace"])
     cmp.add_argument(
         "--ignore-space",
         choices=["off", "trailing", "amount", "all"],
         default="off",
-        help="単純比較で、空白の違いを無視する。trailing は行末、amount は数、all はすべて(既定: off)",
+        help=_H["compare.ignore_space"],
     )
-    cmp.add_argument("--ignore-blank-lines", action="store_true", help="単純比較で、空行を比べない")
-    cmp.add_argument("--ignore-case", action="store_true", help="単純比較で、大文字と小文字を区別しない")
+    cmp.add_argument("--ignore-blank-lines", action="store_true", help=_H["compare.ignore_blank_lines"])
+    cmp.add_argument("--ignore-case", action="store_true", help=_H["compare.ignore_case"])
     # REQ-228 §6。行の移動の検出と比べ方(どちらも単純比較だけに効く)
-    cmp.add_argument(
-        "--detect-moves",
-        action="store_true",
-        help="単純比較で、3 行以上の塊が別の場所へ動いたものを「移動」として示す(移動も差分として数える)",
-    )
+    cmp.add_argument("--detect-moves", action="store_true", help=_H["compare.detect_moves"])
     cmp.add_argument(
         "--diff-algorithm",
         choices=["standard", "minimal", "patience"],
         default="standard",
-        help=(
-            "単純比較の比べ方。minimal は変更の行がいちばん少ない差分(変更が 1,000 行を超えると standard)、"
-            "patience は両側に 1 回ずつある行を目印にする(既定: standard)"
-        ),
+        help=_H["compare.diff_algorithm"],
     )
     add_llm_profile_argument(cmp)
     add_llm_prompt_profile_argument(cmp)
     add_llm_no_premise_argument(cmp)
-    pat =sub.add_parser("patterns", help="config パーサーの対応一覧(パターン表)を出力する")
-    pat.add_argument("--format", choices=["markdown", "json"], default="markdown", help="出力形式(既定: markdown)")
-    pat.add_argument("--output", metavar="PATH", help="標準出力ではなく、このファイルへ UTF-8 で書く")
-    pat.add_argument(
-        "--platform",
-        choices=CONFIG_PLATFORMS,
-        help="平坦 config・FortiGate の表を出す(省略時は Cisco 系の表。docs/notes/flat-patterns.md、fortinet-patterns.md)",
-    )
-    cov = sub.add_parser("coverage", help="config パーサーの被覆率を測る")
-    cov.add_argument("paths", nargs="+", metavar="PATH", help="config のファイル、または切り出し済みのディレクトリ(_index.tsv を読む)")
-    cov.add_argument(
-        "--exposure",
-        choices=["normal", "exposed"],
-        default="normal",
-        help="ファイルを直接渡したときの区分(既定: normal)。ディレクトリは _index.tsv の command 列で決まる",
-    )
-    cov.add_argument("--format", choices=["text", "json"], default="text", help="出力形式(既定: text)")
-    cov.add_argument(
-        "--platform", choices=CONFIG_PLATFORMS, help="平坦 config・FortiGate のパーサーで測る(省略時は Cisco 系のパーサー)"
-    )
+    pat = sub.add_parser("patterns", help=_H["patterns.help"])
+    pat.add_argument("--format", choices=["markdown", "json"], default="markdown", help=_H["format_markdown"])
+    pat.add_argument("--output", metavar="PATH", help=_H["output"])
+    pat.add_argument("--platform", choices=CONFIG_PLATFORMS, help=_H["patterns.platform"])
+    cov = sub.add_parser("coverage", help=_H["coverage.help"])
+    cov.add_argument("paths", nargs="+", metavar="PATH", help=_H["coverage.paths"])
+    cov.add_argument("--exposure", choices=["normal", "exposed"], default="normal", help=_H["coverage.exposure"])
+    cov.add_argument("--format", choices=["text", "json"], default="text", help=_H["format_text"])
+    cov.add_argument("--platform", choices=CONFIG_PLATFORMS, help=_H["coverage.platform"])
     cov.add_argument(
         "--top",
         type=int,
         default=DEFAULT_TOP,
         metavar="N",
-        help=f"未解釈の形と、FortiGate の汎用の形の行が多いブロックの上位件数(既定: {DEFAULT_TOP})",
+        help=_H["coverage.top"].format(default=DEFAULT_TOP),
     )
     cov.add_argument(
-        "--files", type=int, default=DEFAULT_FILES, metavar="N", help=f"text に出すファイル行の件数(既定: {DEFAULT_FILES})"
+        "--files",
+        type=int,
+        default=DEFAULT_FILES,
+        metavar="N",
+        help=_H["coverage.files"].format(default=DEFAULT_FILES),
     )
     # show 側は指標が別物のため、coverage に相乗りさせず別コマンドにする(REQ-17)。名前は一覧で coverage の隣に並ぶように
-    covs = sub.add_parser("coverage-show", help="show 側の被覆率(特定率とテンプレート保有率)を測る")
-    covs.add_argument(
-        "paths", nargs="+", metavar="PATH", help="端末ログのファイル、または切り出し済みのディレクトリ(_index.tsv を読む)"
+    covs = sub.add_parser("coverage-show", help=_H["coverage_show.help"])
+    covs.add_argument("paths", nargs="+", metavar="PATH", help=_H["coverage_show.paths"])
+    covs.add_argument("--platform", metavar="NAME", help=_H["coverage_show.platform"])
+    covs.add_argument("--format", choices=["text", "json"], default="text", help=_H["format_text"])
+    scmd = sub.add_parser("show-commands", help=_H["show_commands.help"])
+    scmd.add_argument("--format", choices=["markdown", "json"], default="markdown", help=_H["format_markdown"])
+    scmd.add_argument("--output", metavar="PATH", help=_H["output"])
+    mpat = sub.add_parser("mask-patterns", help=_H["mask_patterns.help"])
+    mpat.add_argument("--format", choices=["markdown", "json"], default="markdown", help=_H["format_markdown"])
+    mpat.add_argument("--output", metavar="PATH", help=_H["output"])
+    mcov = sub.add_parser("mask-coverage", help=_H["mask_coverage.help"])
+    mcov.add_argument("paths", nargs="+", metavar="PATH", help=_H["mask_coverage.paths"])
+    mcov.add_argument("--format", choices=["text", "json"], default="text", help=_H["format_text"])
+    mcov.add_argument(
+        "--top", type=int, default=MASK_TOP, metavar="N", help=_H["mask_coverage.top"].format(default=MASK_TOP)
     )
-    covs.add_argument(
-        "--platform",
-        metavar="NAME",
-        help="ntc-templates の platform 名(例: cisco_ios)。省略時はテンプレート保有率を「測定不能」とする",
-    )
-    covs.add_argument("--format", choices=["text", "json"], default="text", help="出力形式(既定: text)")
-    scmd = sub.add_parser("show-commands", help="show 側の被覆率の分母(比較対象とする show コマンドの表)を出力する")
-    scmd.add_argument("--format", choices=["markdown", "json"], default="markdown", help="出力形式(既定: markdown)")
-    scmd.add_argument("--output", metavar="PATH", help="標準出力ではなく、このファイルへ UTF-8 で書く")
-    mpat = sub.add_parser("mask-patterns", help="AI へ送る前に伏せる表(MSK)を出力する")
-    mpat.add_argument("--format", choices=["markdown", "json"], default="markdown", help="出力形式(既定: markdown)")
-    mpat.add_argument("--output", metavar="PATH", help="標準出力ではなく、このファイルへ UTF-8 で書く")
-    mcov = sub.add_parser("mask-coverage", help="伏せる表の被覆(そのまま送る/伏せる/伏せる対象なし/送らない)を測る")
-    mcov.add_argument("paths", nargs="+", metavar="PATH", help="config のファイル、またはディレクトリ(下の *.txt を読む)")
-    mcov.add_argument("--format", choices=["text", "json"], default="text", help="出力形式(既定: text)")
-    mcov.add_argument("--top", type=int, default=MASK_TOP, metavar="N", help=f"送らなかった形の上位件数(既定: {MASK_TOP})")
-    sub.add_parser("gui", help="比較画面を開く(要 pip install 'driftpilot[gui]')")
+    sub.add_parser("gui", help=_H["gui.help"])
     from driftpilot.cli import batch, llm_check, selfcheck  # batch と llm_check はこのモジュールを読むため、ここで読む
 
     batch.add_parser(sub)
@@ -336,20 +266,20 @@ def _run_mask_patterns(args: argparse.Namespace) -> int:
 
 def _run_mask_coverage(args: argparse.Namespace) -> int:
     if args.top < 0:
-        raise CliError("--top は 0 以上にしてください")
+        raise CliError(CLI_ERR_TOP_NEGATIVE)
     try:
         paths = mask_coverage.resolve_paths(args.paths)
     except FileNotFoundError as exc:
         raise CliError(str(exc)) from exc
     if not paths:
-        raise CliError("測定するファイルがありません")
+        raise CliError(CLI_ERR_NO_FILES)
     report = mask_coverage.measure(paths)
     if args.format == "json":
         write_machine(mask_coverage.to_json(report, args.top))
     else:
         print(mask_coverage.to_text(report, args.top), end="")
     if report.files == 0:
-        raise CliError("測定できたファイルがありません")
+        raise CliError(CLI_ERR_NO_FILE_MEASURED)
     return EXIT_SAME
 
 
@@ -359,7 +289,7 @@ def _write_output(args: argparse.Namespace, text: str) -> int:
             with open_machine_file(args.output, "w") as fh:
                 fh.write(text)
         except OSError as exc:
-            raise CliError(f"{args.output}: 書けません ({exc.strerror or exc})") from exc
+            raise CliError(cli_err_cannot_write(args.output, str(exc.strerror or exc))) from exc
     else:
         write_machine(text)  # 標準出力でも --output と同じバイト列にする(ADR-0023 決定1)
     return EXIT_SAME
@@ -367,20 +297,20 @@ def _write_output(args: argparse.Namespace, text: str) -> int:
 
 def _run_coverage(args: argparse.Namespace) -> int:
     if args.top < 0 or args.files < 0:
-        raise CliError("--top と --files は 0 以上にしてください")
+        raise CliError(CLI_ERR_TOP_FILES_NEGATIVE)
     try:
         inputs = resolve_inputs(args.paths, exposure=args.exposure)
     except InputError as exc:
         raise CliError(str(exc)) from exc
     if not inputs:
-        raise CliError("測定するファイルがありません")
+        raise CliError(CLI_ERR_NO_FILES)
     report = measure(inputs, platform=args.platform)
     if args.format == "json":
         write_machine(coverage_json(report, args.top))
     else:
         print(coverage_text(report, args.top, args.files), end="")
     if all(f.error is not None for f in report.files):
-        raise CliError("測定できたファイルがありません")
+        raise CliError(CLI_ERR_NO_FILE_MEASURED)
     return EXIT_SAME
 
 
@@ -392,13 +322,13 @@ def _run_show_commands(args: argparse.Namespace) -> int:
 def _run_coverage_show(args: argparse.Namespace) -> int:
     platform = args.platform.strip() if args.platform else None
     if platform and platform.lower() in coverage_show.REJECTED_PLATFORMS:
-        raise CliError(f"--platform {platform} は使えません。{coverage_show.REJECTED_PLATFORMS[platform.lower()]}")
+        raise CliError(cli_err_platform_rejected(platform, coverage_show.REJECTED_PLATFORMS[platform.lower()]))
     try:
         inputs = coverage_show.resolve_inputs(args.paths)
     except InputError as exc:
         raise CliError(str(exc)) from exc
     if not inputs:
-        raise CliError("測定するファイルがありません")
+        raise CliError(CLI_ERR_NO_FILES)
     report = coverage_show.measure(inputs, platform or None)
     if args.format == "json":
         write_machine(coverage_show.to_json(report))
@@ -406,7 +336,7 @@ def _run_coverage_show(args: argparse.Namespace) -> int:
         print(coverage_show.to_text(report), end="")
     # 1区間も特定できなくても 0(0% を返す)。測れたファイルが無いときだけエラー
     if report.files == 0:
-        raise CliError("測定できたファイルがありません")
+        raise CliError(CLI_ERR_NO_FILE_MEASURED)
     return EXIT_SAME
 
 
@@ -451,7 +381,7 @@ def _check_raw_options(args: argparse.Namespace) -> bool:
     """
     problems = check_raw_options(_raw_options(args))
     for line in raw_option_problem_lines(problems):
-        print(f"エラー: {line}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{line}", file=sys.stderr)
     return not problems
 
 
@@ -464,9 +394,9 @@ def check_llm_args(args: argparse.Namespace) -> None:
     """--llm-max-diffs と --llm-no-premise の検査(compare と batch で共通)。"""
     if args.llm_max_diffs is not None:
         if not (args.llm or args.llm_dry_run):
-            raise CliError("--llm-max-diffs は --llm か --llm-dry-run と一緒に指定してください")
+            raise CliError(CLI_ERR_LLM_MAX_DIFFS_ALONE)
         if args.llm_max_diffs < 1:
-            raise CliError("--llm-max-diffs は 1 以上にしてください(無制限の指定はありません)")
+            raise CliError(CLI_ERR_LLM_MAX_DIFFS_RANGE)
     if getattr(args, "llm_no_premise", False) and not (args.llm or args.llm_dry_run):
         raise CliError(LLM_NO_PREMISE_ALONE)
 
@@ -494,7 +424,7 @@ def add_llm_profile_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--llm-profile",
         metavar="NAME",
-        help="この実行のあいだだけ使う AI プロファイルの名前(大文字・小文字を区別しない)。使うプロファイルの設定は変えない",
+        help=_H["llm_profile"],
     )
 
 
@@ -503,10 +433,7 @@ def add_llm_prompt_profile_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--llm-prompt-profile",
         metavar="NAME",
-        help=(
-            "この実行のあいだだけ使うプロンプトのプロファイルの名前(大文字・小文字を区別しない。省くと使用中のもの)。"
-            "無い名前なら比較も送信もせずに終わる"
-        ),
+        help=_H["llm_prompt_profile"],
     )
 
 
@@ -559,12 +486,12 @@ def _llm_request(args: argparse.Namespace) -> LlmRequest | None:
 def check_all_segments_llm_args(args: argparse.Namespace) -> None:
     """--confirm と --llm-max-total-diffs の検査(REQ-122 §5)。どちらも --all-segments の LLM 解析のときだけ使える。"""
     if args.confirm and not (args.all_segments and args.llm):
-        raise CliError("--confirm は --all-segments と --llm と一緒に指定してください")
+        raise CliError(CLI_ERR_CONFIRM_ALONE)
     if args.llm_max_total_diffs is not None:
         if not (args.all_segments and (args.llm or args.llm_dry_run)):
-            raise CliError("--llm-max-total-diffs は --all-segments と、--llm か --llm-dry-run と一緒に指定してください")
+            raise CliError(CLI_ERR_LLM_MAX_TOTAL_DIFFS_ALONE)
         if args.llm_max_total_diffs < 1:
-            raise CliError("--llm-max-total-diffs は 1 以上にしてください(無制限の指定はありません)")
+            raise CliError(CLI_ERR_LLM_MAX_TOTAL_DIFFS_RANGE)
 
 
 def _compare_all_with_llm(request: CompareRequest, plan: Any) -> tuple[MultiCompareOutcome, Any]:
@@ -600,7 +527,7 @@ def _save_all(args: argparse.Namespace, outcome: MultiCompareOutcome) -> bool:
     書けなかったら偽(終了コードを 2 にする)。組が無ければ書かない。
     """
     if not outcome.pairs:
-        print(f"エラー: {COMPARE_MULTI_NOTHING_TO_SAVE}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{COMPARE_MULTI_NOTHING_TO_SAVE}", file=sys.stderr)
         return False
     paths = {"before": str(Path(args.before).absolute()), "after": str(Path(args.after).absolute())}
     saved_at = datetime.now(timezone.utc).astimezone()
@@ -611,7 +538,7 @@ def _save_all(args: argparse.Namespace, outcome: MultiCompareOutcome) -> bool:
     try:
         written = write_records(records, target)
     except ResultsWriteError as exc:
-        print(f"エラー: {exc}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{exc}", file=sys.stderr)
         return False
     print(saved_notice(written), file=sys.stderr)
     if outcome.unpaired:
@@ -632,13 +559,13 @@ def _run_compare_all(args: argparse.Namespace) -> int:
         ("--show-command", args.show_command is not None),
     )
     if used := [name for name, given in conflicts if given]:
-        raise CliError(f"--all-segments と {'・'.join(used)} は同時に使えません")
+        raise CliError(cli_err_all_segments_conflict(used))
     if not _check_raw_options(args):
         return EXIT_ERROR
     check_llm_args(args)
     check_all_segments_llm_args(args)
     if args.save is not None and not args.save:
-        raise CliError("--save には保存先を指定してください")
+        raise CliError(CLI_ERR_SAVE_NEEDS_PATH)
     plan = None
     if args.llm or args.llm_dry_run:
         from driftpilot.cli import batch  # cli.batch はこのモジュールを読むため、ここで読む
@@ -651,7 +578,7 @@ def _run_compare_all(args: argparse.Namespace) -> int:
             raise
         # 読み込みの失敗も JSON の契約(schema_version と status)に載せる。メッセージは標準エラーにも出す
         write_machine(to_json_all(MultiCompareOutcome("error", [], [])) + "\n")
-        print(f"エラー: {exc}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{exc}", file=sys.stderr)
         return EXIT_BY_STATUS["error"]
     preview = None
     if plan is None:
@@ -663,14 +590,14 @@ def _run_compare_all(args: argparse.Namespace) -> int:
     elif body := to_text_all(outcome):
         print(body)
     if not outcome.pairs and not outcome.unpaired:
-        print("エラー: 比較できる区間がありません", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{CLI_ERR_NO_SEGMENTS}", file=sys.stderr)
     for index, pair in enumerate(outcome.pairs, start=1):
         result = pair.outcome
         if result.status == "needs_selection":
-            message = result.selection_detail.get("message", "区間を選べませんでした")
-            print(f"エラー: [{pair_label(index, pair)}] {message}", file=sys.stderr)
+            message = result.selection_detail.get("message", CLI_ERR_SEGMENT_NOT_SELECTED)
+            print(f"{CLI_ERROR_PREFIX}[{pair_label(index, pair)}] {message}", file=sys.stderr)
         elif result.error:
-            print(f"エラー: [{pair_label(index, pair)}] {result.error.message}", file=sys.stderr)
+            print(f"{CLI_ERROR_PREFIX}[{pair_label(index, pair)}] {result.error.message}", file=sys.stderr)
     if args.llm and not args.confirm and preview is not None and preview.jobs and not preview.over_limit:
         print(compare_llm_confirm_hint(), file=sys.stderr)
     if gave_up := gave_up_count(outcome.pairs):
@@ -704,7 +631,7 @@ def _run_compare(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     check_all_segments_llm_args(args)
     if args.save is not None and not args.save:
-        raise CliError("--save には保存先を指定してください")
+        raise CliError(CLI_ERR_SAVE_NEEDS_PATH)
     llm = _llm_request(args)
     try:
         request = _request(args)
@@ -714,7 +641,7 @@ def _run_compare(args: argparse.Namespace) -> int:
         # 読み込みの失敗も JSON の契約(schema_version と status)に載せる。メッセージは標準エラーにも出す
         error = CompareError("input_error", "read_input", str(exc))
         write_machine(to_json(CompareOutcome(status="error", mode=args.mode, error=error)) + "\n")
-        print(f"エラー: {exc}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{exc}", file=sys.stderr)
         return EXIT_BY_STATUS["error"]
     # API が返したエラーの文と待つ秒(ADR-0168 決定5)。送る要求のときだけ集め、標準エラーにだけ出す(標準出力・JSON・保存には入れない)
     notes: list[ApiErrorText] = []
@@ -730,14 +657,11 @@ def _run_compare(args: argparse.Namespace) -> int:
         print(line, file=sys.stderr)
     if outcome.status == "needs_selection":
         if outcome.selection_reason == "ambiguous_format":
-            print(f"エラー: {outcome.selection_detail['message']}", file=sys.stderr)
+            print(f"{CLI_ERROR_PREFIX}{outcome.selection_detail['message']}", file=sys.stderr)
         else:
-            print(
-                "エラー: 区間が複数あります。--before-segment / --after-segment などで区間を指定してください",
-                file=sys.stderr,
-            )
+            print(f"{CLI_ERROR_PREFIX}{CLI_ERR_SEGMENTS_AMBIGUOUS}", file=sys.stderr)
     elif outcome.error:
-        print(f"エラー: {outcome.error.message}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{outcome.error.message}", file=sys.stderr)
     if args.save is not None:
         paths = {"before": str(Path(args.before).absolute()), "after": str(Path(args.after).absolute())}
         try:
@@ -745,7 +669,7 @@ def _run_compare(args: argparse.Namespace) -> int:
         except StorageError as exc:
             # 保存の失敗は、比較結果の終了コード(1 や 3)より優先して 2 にする。
             # 保存を頼まれたのに残らなかったことを、差分ありの 1 に紛れさせないため
-            print(f"エラー: {exc}", file=sys.stderr)
+            print(f"{CLI_ERROR_PREFIX}{exc}", file=sys.stderr)
             return EXIT_ERROR
         print(saved_notice(saved), file=sys.stderr)
     return EXIT_BY_STATUS[outcome.status]
@@ -802,5 +726,5 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run(args)
     except (CliError, ValueError) as exc:
-        print(f"エラー: {exc}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{exc}", file=sys.stderr)
         return EXIT_ERROR

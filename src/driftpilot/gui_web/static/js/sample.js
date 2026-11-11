@@ -26,13 +26,19 @@ const DIALOG_TEXTS = [
 ];
 
 // data-text の鍵の文を messages.py から取って入れる（HTML には文を書かない）。読むだけの欄の文は data-value の鍵。取れなければ null。
+// <html lang> に入れる言語の鍵（ADR-0190。"en"・"ja"）
+const PAGE_LANG = "page.lang";
+
 async function fillTexts() {
   const elements = Array.from(document.querySelectorAll("[data-text]"));
   const values = Array.from(document.querySelectorAll("[data-value]"));
   const keys = Array.from(
     new Set([...elements.map((el) => el.dataset.text), ...values.map((el) => el.dataset.value), READY, ...DIALOG_TEXTS]),
   );
-  const result = await call("messages", keys);
+  const result = await call("messages", [...keys, PAGE_LANG]);
+  if (result.ok) {
+    document.documentElement.lang = result.messages[PAGE_LANG];
+  }
   if (!result.ok) {
     text(status, result.message);
     return null;

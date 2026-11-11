@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from driftpilot import i18n
 from driftpilot.llm_analyzer.client import LLMConnectionError, LLMResponseError
 from driftpilot.llm_analyzer.http_json import (
     DeltaRecord,
@@ -37,6 +38,11 @@ from driftpilot.llm_analyzer.wire import (
     responses_thinking_event,
     with_query,
 )
+
+# 利用者に見える文(日本語・英語。REQ-258)。鍵の組と差し込みの名前は両方で同じ
+_TEXTS_JA = {"api_format_invalid": "api_format は {formats} にしてください", "or_join": " か "}
+_TEXTS_EN = {"api_format_invalid": "api_format must be {formats}", "or_join": " or "}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 _PATHS = {CHAT_COMPLETIONS: "/chat/completions", RESPONSES: "/responses"}
 
@@ -71,7 +77,7 @@ class OpenAIApiKeyClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         if api_format not in _PATHS:
-            raise ValueError(f"api_format は {' か '.join(_PATHS)} にしてください")
+            raise ValueError(_T["api_format_invalid"].format(formats=_T["or_join"].join(_PATHS)))
         self._model = model
         self._api_key = api_key
         self._api_format = api_format

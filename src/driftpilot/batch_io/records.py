@@ -14,6 +14,7 @@ from typing import Any, TextIO
 from driftpilot.core import BatchSummary, JobResult, PairResult, job_pair_results
 from driftpilot.core.batch import STATUSES
 from driftpilot.core.types import SIDES
+from driftpilot.messages import BATCHIO_TEXTS as _T
 from driftpilot.messages import multi_pair_name
 from driftpilot.storage import JOB_KEY, build_record, default_filename
 
@@ -120,10 +121,10 @@ class ResultsWriteError(Exception):
 def _write_error(target: Path, exc: OSError) -> ResultsWriteError:
     """書けなかったときの文(_write_new と write_new_bytes で同じ文にする)。"""
     if isinstance(exc, FileExistsError):
-        return ResultsWriteError(f"{target}: 既にあります。上書きしません")
+        return ResultsWriteError(_T["results_exists"].format(target=target))
     if isinstance(exc, FileNotFoundError):
-        return ResultsWriteError(f"{target}: 書き出し先のフォルダがありません(自動では作りません)")
-    return ResultsWriteError(f"{target}: 書けません ({exc.strerror or exc})")
+        return ResultsWriteError(_T["results_no_folder"].format(target=target))
+    return ResultsWriteError(_T["results_cannot_write"].format(target=target, reason=exc.strerror or exc))
 
 
 def _write_new(path: str | os.PathLike[str], write: Any) -> Path:

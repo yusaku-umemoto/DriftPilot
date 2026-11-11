@@ -33,10 +33,16 @@ const shown = {
 };
 
 // data-text の鍵の文を messages.py から取って入れる（HTML には文を書かない）。取れなければ false。
+// <html lang> に入れる言語の鍵（ADR-0190。"en"・"ja"）
+const PAGE_LANG = "page.lang";
+
 async function fillTexts() {
   const elements = Array.from(document.querySelectorAll("[data-text]"));
   const keys = Array.from(new Set(elements.map((el) => el.dataset.text)));
-  const result = await call("messages", keys);
+  const result = await call("messages", [...keys, PAGE_LANG]);
+  if (result.ok) {
+    document.documentElement.lang = result.messages[PAGE_LANG];
+  }
   if (!result.ok) {
     text(status, result.message);
     return false;
@@ -393,6 +399,9 @@ function renderDisplay(display) {
     for (const radio of document.querySelectorAll('input[name="theme"]')) {
       radio.checked = radio.value === display.theme;
     }
+    for (const radio of document.querySelectorAll('input[name="language"]')) {
+      radio.checked = radio.value === display.language;
+    }
   }
   $("save-display").disabled = !display.can_save;
 }
@@ -401,6 +410,12 @@ function renderDisplay(display) {
 function chosenTheme() {
   const radio = document.querySelector('input[name="theme"]:checked');
   return radio === null ? "system" : radio.value;
+}
+
+// 選んでいる画面の言語（何も選ばれていなければ "en"）。Python が 3 つ以外を断る（ADR-0190）
+function chosenLanguage() {
+  const radio = document.querySelector('input[name="language"]:checked');
+  return radio === null ? "en" : radio.value;
 }
 
 // 「更新」のタブ（REQ-252 §4）。文はどれも textContent だけで描く（変更の内容も HTML として読まない）。
@@ -586,9 +601,9 @@ bind("save-raw", async () => {
     await handle(await call("save_raw_defaults", readRawOptions()));
   }
 });
-// 「表示」のタブ（REQ-256 §4）。「保存」は [gui] の theme だけを書き、開いている窓すべてに色を当てる。
-// 「更新」のタブの「保存」と同じく form() も渡す（ほかのタブの打ちかけの欄を残すため）
-bind("save-display", () => act("save_display_settings", chosenTheme()));
+// 「表示」のタブ（REQ-256 §4・REQ-257 §4）。「保存」は [gui] の theme と language を書き、開いている窓すべてに色を当てる（言語は開き直すと効く）。
+// 「更新」のタブの「保存」と同じく form() も渡す（ほかのタブの打ちかけの欄を残すため）。選んだ値は form() に入れず別の引数で渡す
+bind("save-display", () => act("save_display_settings", chosenTheme(), chosenLanguage()));
 // 「更新」のタブ（REQ-252 §4）。確かめと「Releases のページを開く」は欄の値を渡さない（開く URL は Python が決める）。
 // 「保存」は [gui] の auto_update_check だけを書く（今の 2 つの「保存」とは別）。ほかの操作と同じく form() も渡すので、
 // ほかのタブで打ちかけた欄は保存の後も残る（タブの切り替えは Python を呼ばないため、渡さないと Python が打ちかけを知らない）

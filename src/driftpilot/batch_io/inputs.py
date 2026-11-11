@@ -6,10 +6,12 @@ from pathlib import Path
 from driftpilot.core import CompareRequest, Job, JobInputError, request_for
 from driftpilot.core.types import SIDES
 from driftpilot.diff_engine import NormalizationRule
+from driftpilot.messages import BATCHIO_SIDE_LABEL
+from driftpilot.messages import BATCHIO_TEXTS as _T
 from driftpilot.messages import unreadable_utf8
 from driftpilot.segmentation.input_forms import InputDecodeError, InputNote, read_config_input
 
-_LABEL = {"before": "変更前", "after": "変更後"}
+_LABEL = BATCHIO_SIDE_LABEL
 
 
 def make_prepare(rules: Mapping[Path, list[NormalizationRule]]) -> Callable[[Job], CompareRequest]:
@@ -34,7 +36,7 @@ def make_prepare(rules: Mapping[Path, list[NormalizationRule]]) -> Callable[[Job
                 messages.append(f"{_LABEL[side]}: {unreadable_utf8(path, exc.hints)}")
             except OSError as exc:
                 failed.append(side)
-                messages.append(f"{_LABEL[side]}: {path}: 読めません ({exc.strerror or exc})")
+                messages.append(_T["cannot_read_input"].format(label=_LABEL[side], path=path, reason=exc.strerror or exc))
         request = request_for(
             job,
             texts["before"],

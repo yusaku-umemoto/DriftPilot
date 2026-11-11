@@ -7,11 +7,29 @@ from ntc_templates.parse import ParsingException, parse_output
 from textfsm import TextFSMError
 from textfsm.clitable import CliTableError
 
+from driftpilot import i18n
 from driftpilot.diff_engine.normalization import NormalizationRule
 from driftpilot.diff_engine.raw import RawCompareResult, compare_raw
 from driftpilot.raw_keys import DEFAULT_RAW_OPTIONS, RawOptions
 
 Row = dict[str, Any]
+
+# 単純比較へ回した理由の文。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)
+_TEXTS_JA = {
+    "side_before": "変更前",
+    "side_after": "変更後",
+    "no_platform_command": "機種とコマンドが指定されていません",
+    "ntc_failed": "ntc-templates で構造化できません: {error}",
+    "no_rows": "{side}の出力からテンプレートで行を抽出できませんでした",
+}
+_TEXTS_EN = {
+    "side_before": "Before",
+    "side_after": "After",
+    "no_platform_command": "The platform and the command are not specified",
+    "ntc_failed": "Cannot structure it with ntc-templates: {error}",
+    "no_rows": "No rows could be extracted from the {side} output with the template",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 
 @dataclass
@@ -90,16 +108,16 @@ def compare_show(
         return ShowCompareResult(method="raw", fallback_reason=reason, raw=raw)
 
     if not platform or not command:
-        return fallback("機種とコマンドが指定されていません")
+        return fallback(_T["no_platform_command"])
     try:
         rows_before = parse_output(platform=platform, command=command, data=before)
         rows_after = parse_output(platform=platform, command=command, data=after)
     except (ParsingException, CliTableError, TextFSMError) as exc:
         # テンプレートなし(index に組がない)もここに来る
-        return fallback(f"ntc-templates で構造化できません: {exc}")
+        return fallback(_T["ntc_failed"].format(error=exc))
     # 非空の入力から1件も取れないのは、テンプレートが合っていない可能性がある。差分なしと報告しない
-    for side, text, rows in (("変更前", before, rows_before), ("変更後", after, rows_after)):
+    for side, text, rows in ((_T["side_before"], before, rows_before), (_T["side_after"], after, rows_after)):
         if text.strip() and not rows:
-            return fallback(f"{side}の出力からテンプレートで行を抽出できませんでした")
+            return fallback(_T["no_rows"].format(side=side))
     diffs, key = _compare_rows(rows_before, rows_after)
     return ShowCompareResult(method="structured", diffs=diffs, key_field=key)

@@ -11,6 +11,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from driftpilot import i18n as _i18n
+
 # 上限の既定値と印の名前(ほかのモジュールを読み込まない小さなモジュール。比較の部品は読まない。ADR-0167)
 from driftpilot.llm_constants import DEFAULT_MAX_DIFFS, DEFAULT_MAX_TOTAL_DIFFS, PROMPT_MARKS
 
@@ -3521,3 +3523,831 @@ def selfcheck_signature(marks: list[tuple[str, str]]) -> str:
 def selfcheck_signature_failed(what: str) -> str:
     """署名の確かめが合わないとき(what は確かめたものの名前)。"""
     return f"署名の確かめが合いません: {what}"
+
+
+# --- 画面の言語(ADR-0190 / REQ-257)。「表示」のタブの言語の選択と、HTML の lang ---
+# HTML の lang の値(言語が "ja" のとき "ja"、"en" のとき "en")
+HTML_LANG = "ja"
+
+
+def gui_language_invalid(path: object) -> str:
+    """[gui] の language を書けないとき(3 つのどれでもない値。ADR-0190)。"""
+    return f"{path}: gui.language は en, ja, system のどれかにしてください"
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "page.lang": HTML_LANG,
+        "settings.display.language_title": "言語",
+        "settings.display.language_en": "English",
+        "settings.display.language_ja": "日本語",
+        "settings.display.language_system": "システム設定に合わせる",
+        "settings.note.display_language": "言語の変更は、DriftPilot を開き直すと効きます",
+    }
+)
+
+
+# --- 一括比較の画面の論理(screen_model/batch_model.py・batch_edit.py)・比較画面の Python 側(gui_web/compare_api.py)の言葉 ---
+SMB_SOURCE_FOLDERS = "フォルダを2つ選んで、同じ名前のファイルを組にする"
+SMB_SOURCE_MANIFEST = "組のファイルを使う"
+SMB_MANIFEST_VALUES = "組のファイルに書かれた値を使います(この画面では変えられません)"
+SMB_LLM_CHECK_LABEL = "AI で解析する(送る前に、全部の組をまとめて1回確認します)"
+SMB_TEXT_WILDCARD = "テキスト (*.txt)|*.txt"
+SMB_SAVE_ONLY_FOLDER_PAIRS = "フォルダから作った組だけを保存できます"
+
+
+def smb_side_selection(before: str, after: str) -> str:
+    """前後で選んだ区間が違うときの表の文。"""
+    return f"変更前 {before} / 変更後 {after}"
+
+
+def smb_manifest_error(count: int) -> str:
+    """組のファイルを読めないときの1行目。"""
+    return f"組のファイルを読めません({count} 件)。1件も比較していません"
+
+
+def smb_default_url(url: str) -> str:
+    """設定が空のときの接続先に「既定」を添える。"""
+    return f"{url}(既定)"
+
+
+def smb_unparsed_counts(before: int, after: int) -> str:
+    """構造化できなかった行数の表の文。"""
+    return f"前 {before} / 後 {after}"
+
+
+def smb_unknown_key(allowed: str) -> str:
+    """窓では直せないキーのときの文。allowed は直せるキーを ", " でつないだもの。"""
+    return f"この窓では直せないキーです(直せるキー: {allowed})"
+
+
+CAPI_INPUT_FILE_TYPES = ("テキスト (*.txt;*.log;*.cfg;*.conf)", "すべてのファイル (*.*)")
+CAPI_OPEN_RESULT_FILE_TYPES = ("保存した結果 (*.json;*.jsonl)",)
+
+# --- gui_web の補い(gui_web/__init__.py・batch_api.py) ---
+GW_ERROR_PREFIX = "エラー: "
+BAPI_SENTENCE_BREAK = "。"
+
+
+# --- 設定画面の論理(screen_model/settings_model.py)の利用者向けの文 ---
+SMS_ENV_SOURCE_LABEL = "環境変数"
+SMS_KEY_SOURCE_KEYRING = "OS の保管庫"
+SMS_KEY_SOURCE_USER_CONFIG = "設定ファイル"
+SMS_KEY_SOURCE_NONE = "未設定"
+SMS_FILE_SOURCE_WORKDIR = "作業フォルダの設定ファイル"
+SMS_FILE_SOURCE_USER_CONFIG = "利用者ごとの設定ファイル"
+SMS_NOT_SET = "(未設定)"
+SMS_DEFAULT_MARK = "(既定)"
+SMS_UNREADABLE = "(設定を読めません)"
+SMS_SECRET_WORDS_NOTE = "この語を含む行は AI に送る前に伏せます"
+SMS_PATTERN_TABLE_A = "読む表(Cisco 系・Arista = A型)"
+SMS_PATTERN_TABLE_FUJITSU_SIR = "読む表(富士通 Si-R)"
+SMS_PATTERN_TABLE_FORTINET = "読む表(FortiGate)"
+SMS_MASKING_TABLE = "伏せる表"
+SMS_AZURE_BASE_URL_EXAMPLE = "https://<リソース名>.openai.azure.com/openai/v1"
+SMS_CONFIG_ABSENT = "なし"
+SMS_NOT_INSTALLED = "(入っていません)"
+SMS_UNKNOWN_TEMPLATE = "ひな形の種類が違います"
+
+
+def sms_config_present(stamp: str) -> str:
+    """設定ファイルがあるときの状態(stamp は更新日時の文字)。"""
+    return f"あり(更新 {stamp})"
+
+
+def sms_secret_words(words: "list[str]") -> str:
+    """いま効いている伏せる語の要約(件数と語の並び)。"""
+    return f"{len(words)} 語" + (f": {', '.join(words)}" if words else "")
+
+
+def sms_default_destination(url: str) -> str:
+    """接続先が未指定のとき、既定の接続先を括弧で添えた文。"""
+    return f"既定（{url}）"
+
+
+def sms_no_profile(path: Path) -> str:
+    return f"{path}: 指定した id のプロファイルがありません"
+
+
+def sms_no_prompt_profile(path: Path) -> str:
+    return f"{path}: 指定した id のプロンプトのプロファイルがありません"
+
+
+def sms_template_exists(path: Path) -> str:
+    return f"{path}: 既にあります。上書きしません"
+
+
+def sms_append_note(message: str, note: str) -> str:
+    """文のあとに注記の文を続ける。"""
+    return f"{message}。{note}"
+
+
+# --- screen_model/model.py の画面の言葉(SM_ / sm_) ---
+SM_SIDE_LABEL = {"before": "変更前", "after": "変更後"}
+SM_MODE_BOTH = "両方"
+SM_MODE_STRUCTURED = "構造化"
+SM_MODE_RAW = "単純"
+# 種類が config のときの機種の先頭(指定なし)
+SM_PLATFORM_UNSPECIFIED = "Cisco 系・Arista(指定なし)"
+SM_PASTED_NAME = {"before": "貼り付け(変更前)", "after": "貼り付け(変更後)"}
+# 進捗の工程名の表示(core の STAGES と同じ並び)
+SM_STAGE_LABEL = {
+    "split": "区間を切り分けています",
+    "select": "区間を選んでいます",
+    "detect_kind": "入力の種類を判定しています",
+    "compare": "比較しています",
+    "safety_checks": "安全網を確認しています",
+    "llm": "AI 解析をしています",
+    "done": "表示しています",
+}
+SM_PICK_SEGMENT = "(選んでください)"
+SM_UNKNOWN_COMMAND = "(コマンド不明)"
+SM_WHOLE_ROW = "(行全体)"
+SM_NO_INPUT = "未選択"
+SM_CANCELLED = "中止しました"
+SM_STALE_RESULT = "入力か設定を変えました。表示中の結果は前の入力のものです。保存するには、もう一度比較してください"
+# 比較の設定の要約で、config の機種が「指定なし」のときの短い名前と、つなぎの印
+SM_DEFAULT_PLATFORM_SHORT = "Cisco 系"
+SM_SUMMARY_SEPARATOR = "・"
+# 単純比較の設定の要約(無視した行・同じとみなした行・移動・比べ方)をつなぐ印
+SM_SET_ASIDE_SEPARATOR = "・"
+# 単純比較の差分の行を「全部」のタブに出すときのカテゴリ
+SM_ALL_RAW_CATEGORY = "(行)"
+# 状態の文の内訳の「構造化」
+SM_BREAKDOWN_STRUCTURED = "構造化"
+SM_RAW_OFF_BY_MODE = "比較方式が「構造化」のため、単純比較をしていません"
+SM_UNPARSED_OFF = "構造化比較をしていないため、対象外です"
+SM_UNPARSED_NOTE = "一覧は、変更前と変更後で違う構造化不可の行だけです。両側で同じ構造化不可の行は、見出しの件数にだけ含まれます"
+SM_SELECT_KIND_PROMPT = "入力の種類を判定できません。「機種」と「show のコマンド」を入力するか、種類を config か show にして、もう一度比較してください"
+
+
+def sm_input_lines(count: int) -> str:
+    """入力欄の横の行数。"""
+    return f"{count:,} 行"
+
+
+def sm_input_sections(count: int) -> str:
+    """入力欄の横の行数の後ろに足す区間数。"""
+    return f" / {count} 区間"
+
+
+def sm_count_structured(count: int) -> str:
+    return f"構造化 {count}"
+
+
+def sm_count_show(count: int) -> str:
+    return f"show 構造化 {count}"
+
+
+def sm_count_raw(count: int) -> str:
+    return f"単純 {count}"
+
+
+def sm_unparsed_pair(before: int, after: int) -> str:
+    """構造化不可の行の前後の件数。"""
+    return f"前 {before} / 後 {after}"
+
+
+def sm_count_unparsed(before: int, after: int) -> str:
+    return f"構造化不可の行 前 {before} / 後 {after}"
+
+
+def sm_count_warnings(count: int) -> str:
+    return f"警告 {count}"
+
+
+def sm_count_notices(count: int) -> str:
+    return f"注意 {count}"
+
+
+def sm_show_fell_back(reason: str) -> str:
+    """show をテンプレートで読めず、単純比較にしたとき。"""
+    return f"show のテンプレートで読めないため、単純比較にしました: {reason}"
+
+
+def sm_select_segment_prompt(side_labels: list[str]) -> str:
+    """区間が複数ある側の名前(変更前・変更後)を並べた、区間を選ぶ案内。"""
+    return f"{'・'.join(side_labels)}に区間が複数あります。比較する区間を選んで、もう一度比較してください"
+
+
+def sm_auto_decided_config(platform: str) -> str:
+    """機種が自動で、入力が config と判定されたときの要約の頭。"""
+    return f"{AUTO_PLATFORM_LABEL}（config{SM_SUMMARY_SEPARATOR}{platform}）"
+
+
+def sm_auto_decided_show() -> str:
+    """機種が自動で、入力が show と判定されたときの要約の頭。"""
+    return f"{AUTO_PLATFORM_LABEL}（show）"
+
+
+def sm_preview_summary(sent: int, total: int) -> str:
+    """送る前のプレビューの先頭の文(送る差分の件数と全部の件数)。"""
+    return f"送る差分 {sent} 件(差分は全部で {total} 件)"
+
+
+# --- コマンドの共通の頭(REQ-258) ---
+CLI_ERROR_PREFIX = "エラー: "
+CLI_WARNING_PREFIX = "警告: "
+
+
+# --- コマンドの説明(argparse の description・help。REQ-258)。`{default}` は使う側が .format で埋める ---
+CLI_HELP = {
+    "main.description": "ネットワーク機器の設定の差分を調べる",
+    "main.version": "版を表示して終わる",
+    "format_text": "出力形式(既定: text)",
+    "format_markdown": "出力形式(既定: markdown)",
+    "output": "標準出力ではなく、このファイルへ UTF-8 で書く",
+    "compare.help": "2つのファイルを比較する",
+    "compare.before": "変更前のファイル",
+    "compare.after": "変更後のファイル",
+    "compare.mode": "比較方式(既定: both)",
+    "compare.kind": "入力の種類。auto は内容から判定する(既定: config)",
+    "compare.platform": (
+        "config では、既定でないパーサーの系統を選ぶ。fujitsu_sir を指定すると平坦 config のパーサー、"
+        "fortinet を指定すると FortiGate のパーサーを使う"
+        "(--show-command は不要。省略や他の名前は Cisco 系で、指定は要らない)。"
+        "show では、機種を ntc-templates の platform 名で指定する(例: cisco_ios)。--show-command と一緒に指定する。"
+        "auto は config の中身から機種を決める(--show-command は不要。show では機種なしの単純比較になる)"
+    ),
+    "compare.show_command": "show のコマンド(例: 'show ip interface brief')",
+    "compare.before_command": "変更前の区間を、コマンドの原文の部分一致で選ぶ",
+    "compare.before_segment": "変更前の区間を、順番(1始まり)で選ぶ",
+    "compare.after_command": "変更後の区間を、コマンドの原文の部分一致で選ぶ",
+    "compare.after_segment": "変更後の区間を、順番(1始まり)で選ぶ",
+    "compare.all_segments": (
+        "両側の区間をコマンドで組にして全部比べる。設定のコマンド(running-config など)の組は config、"
+        "ほかは show として比べ、--kind はコマンドが分からない組にだけ効く。"
+        "--save は組ごとに1行の JSON Lines で書く(相手なしの区間は入れない)。"
+        "--llm は一括比較と同じく、送る内容の要約を出すだけで、送るのは --confirm を付けたときだけ。"
+        "--before-segment・--after-segment・--before-command・--after-command・--show-command とは同時に使えない"
+    ),
+    "compare.confirm": "--all-segments --llm で、要約を確かめた後に AI への送信を実行する(--all-segments と --llm と一緒に使う)",
+    "compare.llm_max_total_diffs": (
+        "--all-segments で、全部の組で AI に送る差分の合計の上限。超えたら1件も送らない。1 以上"
+        "(既定: 利用者ごとの設定ファイル config.toml の llm.max_total_diffs、無ければ {default})"
+    ),
+    "compare.prompt": "プロンプト文字列(自己校正を上書きする。両側に適用)",
+    "compare.rules": (
+        "正規化ルールのファイル。省略すると同梱の機種のルールを使う(--platform fortinet の config では、"
+        "ENC の付く値を比較対象外にするルールなど2つが既定で効き、外した件数を結果に出す)。"
+        "この既定を外すには、そのルールを含まないか default_enabled: false にした自分のルールファイルを --rules で渡す"
+    ),
+    "compare.enable_rule": "有効にするルール ID(繰り返し可)。指定すると既定で有効なルールは使わず、ここに書いた ID だけを使う",
+    "compare.save": "比較結果を JSON で保存する。既存のディレクトリなら名前を自動で付ける。上書きはしない(既定: 保存しない)",
+    "compare.llm": "差分を AI に送り、意味の説明を注釈として付ける(認証情報は伏せる。差分は変わらない)",
+    "compare.llm_dry_run": "AI に送る内容(マスク後)と、送らない行の形を出す。送信はしない",
+    "compare.llm_max_diffs": (
+        "AI に送る差分の件数の上限。1 以上"
+        "(既定: 利用者ごとの設定ファイル config.toml の llm.max_diffs、無ければ {default})。無制限の指定は無い"
+    ),
+    "compare.ignore_line": (
+        "単純比較で、この正規表現に当たる行を比べない(繰り返し可)。"
+        "単純比較だけに効く。構造化比較は変えない。既定の設定のファイル(設定画面の『単純比較』)は読まない"
+    ),
+    "compare.replace": "単純比較で、行の REGEX に当たる部分を TEXT に置き換えてから比べる(繰り返し可。上から順に当てる)",
+    "compare.ignore_space": "単純比較で、空白の違いを無視する。trailing は行末、amount は数、all はすべて(既定: off)",
+    "compare.ignore_blank_lines": "単純比較で、空行を比べない",
+    "compare.ignore_case": "単純比較で、大文字と小文字を区別しない",
+    "compare.detect_moves": "単純比較で、3 行以上の塊が別の場所へ動いたものを「移動」として示す(移動も差分として数える)",
+    "compare.diff_algorithm": (
+        "単純比較の比べ方。minimal は変更の行がいちばん少ない差分(変更が 1,000 行を超えると standard)、"
+        "patience は両側に 1 回ずつある行を目印にする(既定: standard)"
+    ),
+    "llm_profile": "この実行のあいだだけ使う AI プロファイルの名前(大文字・小文字を区別しない)。使うプロファイルの設定は変えない",
+    "llm_prompt_profile": (
+        "この実行のあいだだけ使うプロンプトのプロファイルの名前(大文字・小文字を区別しない。省くと使用中のもの)。"
+        "無い名前なら比較も送信もせずに終わる"
+    ),
+    "patterns.help": "config パーサーの対応一覧(パターン表)を出力する",
+    "patterns.platform": "平坦 config・FortiGate の表を出す(省略時は Cisco 系の表。docs/notes/flat-patterns.md、fortinet-patterns.md)",
+    "coverage.help": "config パーサーの被覆率を測る",
+    "coverage.paths": "config のファイル、または切り出し済みのディレクトリ(_index.tsv を読む)",
+    "coverage.exposure": "ファイルを直接渡したときの区分(既定: normal)。ディレクトリは _index.tsv の command 列で決まる",
+    "coverage.platform": "平坦 config・FortiGate のパーサーで測る(省略時は Cisco 系のパーサー)",
+    "coverage.top": "未解釈の形と、FortiGate の汎用の形の行が多いブロックの上位件数(既定: {default})",
+    "coverage.files": "text に出すファイル行の件数(既定: {default})",
+    "coverage_show.help": "show 側の被覆率(特定率とテンプレート保有率)を測る",
+    "coverage_show.paths": "端末ログのファイル、または切り出し済みのディレクトリ(_index.tsv を読む)",
+    "coverage_show.platform": "ntc-templates の platform 名(例: cisco_ios)。省略時はテンプレート保有率を「測定不能」とする",
+    "show_commands.help": "show 側の被覆率の分母(比較対象とする show コマンドの表)を出力する",
+    "mask_patterns.help": "AI へ送る前に伏せる表(MSK)を出力する",
+    "mask_coverage.help": "伏せる表の被覆(そのまま送る/伏せる/伏せる対象なし/送らない)を測る",
+    "mask_coverage.paths": "config のファイル、またはディレクトリ(下の *.txt を読む)",
+    "mask_coverage.top": "送らなかった形の上位件数(既定: {default})",
+    "gui.help": "比較画面を開く(要 pip install 'driftpilot[gui]')",
+    "llm_check.help": "AI に決まった短い文を1回だけ送り、キーとモデルでつながるかを確かめる(ごく少額の料金がかかりうる)",
+    "llm_check.yes": "送る前の確認を飛ばす(入力が端末でないときは必須)",
+}
+
+# --- コマンドの誤りの文(「エラー: 」の後ろ。REQ-258) ---
+CLI_ERR_TOP_NEGATIVE = "--top は 0 以上にしてください"
+CLI_ERR_TOP_FILES_NEGATIVE = "--top と --files は 0 以上にしてください"
+CLI_ERR_NO_FILES = "測定するファイルがありません"
+CLI_ERR_NO_FILE_MEASURED = "測定できたファイルがありません"
+CLI_ERR_NO_SEGMENTS = "比較できる区間がありません"
+CLI_ERR_SEGMENT_NOT_SELECTED = "区間を選べませんでした"
+CLI_ERR_SEGMENTS_AMBIGUOUS = "区間が複数あります。--before-segment / --after-segment などで区間を指定してください"
+CLI_ERR_SAVE_NEEDS_PATH = "--save には保存先を指定してください"
+CLI_ERR_LLM_MAX_DIFFS_ALONE = "--llm-max-diffs は --llm か --llm-dry-run と一緒に指定してください"
+CLI_ERR_LLM_MAX_DIFFS_RANGE = "--llm-max-diffs は 1 以上にしてください(無制限の指定はありません)"
+CLI_ERR_CONFIRM_ALONE = "--confirm は --all-segments と --llm と一緒に指定してください"
+CLI_ERR_LLM_MAX_TOTAL_DIFFS_ALONE = "--llm-max-total-diffs は --all-segments と、--llm か --llm-dry-run と一緒に指定してください"
+CLI_ERR_LLM_MAX_TOTAL_DIFFS_RANGE = "--llm-max-total-diffs は 1 以上にしてください(無制限の指定はありません)"
+
+
+def cli_err_cannot_write(path: str, reason: str) -> str:
+    """出力のファイルを書けなかったときの文。"""
+    return f"{path}: 書けません ({reason})"
+
+
+def cli_err_platform_rejected(platform: str, reason: str) -> str:
+    """coverage-show の --platform に使えない名前を渡したときの文。reason は使えない理由。"""
+    return f"--platform {platform} は使えません。{reason}"
+
+
+def cli_err_all_segments_conflict(names: list[str]) -> str:
+    """--all-segments と一緒に使えない指定(names)を渡したときの文。"""
+    return f"--all-segments と {'・'.join(names)} は同時に使えません"
+
+
+# --- 自己診断の区切りと名前(REQ-258) ---
+SELFCHECK_CISCO_FAMILY = "Cisco 系"
+SELFCHECK_PART_SEPARATOR = "・"
+SELFCHECK_ITEM_SEPARATOR = "、"
+
+# --- 保管庫の名前と文(REQ-258) ---
+KEYSTORE_NAME_WINDOWS = "Windows 資格情報マネージャー"
+KEYSTORE_NAME_MAC = "Mac キーチェーン"
+KEYSTORE_NAME_OTHER = "OS の保管庫"
+KEYSTORE_BAD_PROFILE_ID = "プロファイルの id の形が違います"
+KEYSTORE_KEY_REMAINS = "キーが残っています"
+
+# --- 画面の起動の引数の説明(python -m driftpilot.gui_web。REQ-258) ---
+GUIARG_SAMPLE = "部品の見本のページを開く"
+GUIARG_SETTINGS = "設定の画面だけを開く"
+GUIARG_BATCH = "一括比較の画面だけを開く"
+
+
+# --- driftpilot batch の説明・出力・誤り(REQ-258) ---
+# argparse の説明。--llm-max-diffs・--llm-max-total-diffs の {default} は、使う側が既定の件数で埋める
+CLI_BATCH_HELP = {
+    "command": "組のファイルに書いた比較の組を順に実行する(1件1行の JSON Lines)",
+    "manifest": "組のファイル（マニフェスト。YAML）のパス",
+    "output": "JSON Lines の出力先(既定: 標準出力)。既にあるファイルは上書きしない",
+    "summary": "サマリを JSON で書く(終了コードを含む)。既にあるファイルは上書きしない",
+    "quiet": "標準エラーへのサマリの表示を抑える",
+    "dry_run": "解釈して比較の予定を一覧に出すだけ。比較しない(終了コード 0)",
+    "save": "各 job の結果を、このディレクトリに1件1ファイルで保存する(既定: 保存しない)",
+    "pair_by_name": "直下のファイル名が完全一致するものを対にし、一覧を出す(比較しない)",
+    "confirm": "--pair-by-name の対で比較を実行する。--llm では、要約を確かめた後に AI への送信を実行する",
+    "write_manifest": "--pair-by-name の対を組のファイルとして書いて終わる",
+    "llm": "各組の差分を AI に送り、注釈を付ける。--confirm が無ければ、送る内容の要約を出すだけで送らない",
+    "llm_dry_run": "AI に送る内容(マスク後)と、送る前の要約を出す。送信はしない",
+    "llm_max_diffs": "1組あたり AI に送る差分の件数の上限。1 以上(既定: 利用者ごとの設定ファイル config.toml の llm.max_diffs、無ければ {default})",
+    "llm_max_total_diffs": "全組で AI に送る差分の合計の上限。超えたら1件も送らない。1 以上(既定: 利用者ごとの設定ファイル config.toml の llm.max_total_diffs、無ければ {default})",
+}
+
+# 引数の組み合わせの誤り
+CLI_BATCH_ERR_ONE_SOURCE = "MANIFEST か --pair-by-name BEFORE_DIR AFTER_DIR のどちらか一方を指定してください"
+CLI_BATCH_ERR_CONFIRM_WITH_WRITE = "--confirm と --write-manifest は一緒に使えません"
+CLI_BATCH_ERR_WRITE_NEEDS_PAIR = "--write-manifest は --pair-by-name と一緒に使ってください"
+CLI_BATCH_ERR_CONFIRM_NEEDS = "--confirm は --pair-by-name か --llm と一緒に使ってください"
+CLI_BATCH_ERR_PAIR_NO_DRY_RUN = "--pair-by-name は単独で一覧を出すだけです(--dry-run は要りません)"
+CLI_BATCH_ERR_TOTAL_NEEDS_LLM = "--llm-max-total-diffs は --llm か --llm-dry-run と一緒に指定してください"
+CLI_BATCH_ERR_TOTAL_MIN = "--llm-max-total-diffs は 1 以上にしてください(無制限の指定はありません)"
+CLI_BATCH_ERR_LLM_ONLY_COMPARING = "--llm と --llm-dry-run は比較を実行するときだけ使えます(--dry-run・--write-manifest とは一緒に使えません)"
+CLI_BATCH_ERR_SAME_PATH = "--output と --summary には別のパスを指定してください"
+CLI_BATCH_NO_PAIRS = "対になったファイルがありません"
+CLI_BATCH_PAIR_NOT_RUN = "比較は実行していません。この対で実行するには --confirm、組のファイルとして保存するには --write-manifest PATH を付けてください"
+CLI_BATCH_SAVE_STOPPED = "中断したため保存していません"
+CLI_BATCH_NONE = "(なし)"
+
+
+def cli_batch_err_only_when_comparing(names: str) -> str:
+    """比較を実行しないのに出力先を指定したときの誤り。names は「--output, --summary」のように並べた名前。"""
+    return f"{names} は比較を実行するときだけ使えます"
+
+
+def cli_batch_err_path_needed(name: str) -> str:
+    """出力先の指定が空のときの誤り。"""
+    return f"{name} にはパスを指定してください"
+
+
+def cli_batch_err_save_dir(path: str) -> str:
+    """--save のディレクトリが無いときの誤り。"""
+    return f"--save {path}: 既存のディレクトリを指定してください(自動では作りません)"
+
+
+def cli_batch_err_exists(name: str, path: str) -> str:
+    """出力先がすでにあるときの誤り。"""
+    return f"{name} {path}: 既にあります。上書きしません"
+
+
+def cli_batch_err_cannot_write(name: str, path: str, reason: str) -> str:
+    """出力先に書けないときの誤り。"""
+    return f"{name} {path}: 書けません ({reason})"
+
+
+def cli_batch_err_write_result(reason: str) -> str:
+    """JSON Lines の結果を書けないときの誤り。"""
+    return f"結果を書けません ({reason})"
+
+
+def cli_batch_manifest_failed(count: int) -> str:
+    """組のファイルを読めないときの 1 行目(エラー: の後)。"""
+    return f"組のファイルを読めません({count} 件)。1件も実行していません"
+
+
+def cli_batch_save_cut(target: str, partial_left: bool) -> str:
+    """保存の途中で中断したときの文。partial_left は、書きかけのファイルが残っているか。"""
+    leftover = f"。書きかけの {target} が残っている場合があります" if partial_left else ""
+    return f"保存の途中で中断しました{leftover}"
+
+
+def cli_batch_file_state(found: bool) -> str:
+    """--dry-run の一覧の、ファイルの有無。"""
+    return "あり" if found else "見つかりません"
+
+
+def cli_batch_dry_head(path: str) -> str:
+    """--dry-run の一覧の 1 行目。"""
+    return f"一括比較の予定(比較は実行していません): {path}"
+
+
+def cli_batch_dry_side(before: bool, path: str, state: str, selection: str) -> str:
+    """--dry-run の一覧の、変更前・変更後のファイルの行。before が False なら変更後。"""
+    label = "変更前" if before else "変更後"
+    return f"  {label}: {path} ({state})  区間: {selection}"
+
+
+def cli_batch_dry_total(total: int, missing: int) -> str:
+    """--dry-run の一覧の最後の行。"""
+    return f"合計 {total} 件。見つからないファイル {missing} 件"
+
+
+def cli_batch_manifest_written(path: str) -> str:
+    """組のファイルを書いたときの文。"""
+    return f"組のファイルを {path} に書きました。比較は実行していません"
+
+
+# --- コマンドの text の出力(cli/render.py。REQ-258) ---
+CLI_RENDER_SIDE_BEFORE = "変更前"
+CLI_RENDER_SIDE_AFTER = "変更後"
+CLI_RENDER_NO_DIFF = "差分なし"
+CLI_RENDER_NONE = "なし"
+CLI_RENDER_NO_PROMPT = "なし(切り分けなし)"
+CLI_RENDER_UNKNOWN_COMMAND = "(コマンド不明)"
+CLI_RENDER_UNPAIRED_HEAD = "=== 相手なし ==="
+
+
+def cli_render_unparsed(before: int, after: int) -> str:
+    """構造化できなかった行の数(変更前・変更後)。"""
+    return f"構造化不可の行数: 変更前 {before} / 変更後 {after}"
+
+
+def cli_render_enabled_rules(rule_ids: list[str]) -> str:
+    """単純比較で有効にした正規化ルールの一覧。無ければ「なし」。"""
+    return "有効なルール: " + (", ".join(rule_ids) or CLI_RENDER_NONE)
+
+
+def cli_render_applied(before: bool, rule_id: str, count: int) -> str:
+    """正規化ルールを適用した行数。before が False なら変更後。"""
+    label = CLI_RENDER_SIDE_BEFORE if before else CLI_RENDER_SIDE_AFTER
+    return f"適用 ({label}): {rule_id} {count} 行"
+
+
+def cli_render_show_fallback(reason: str) -> str:
+    """show の比較を raw 比較に切り替えたとき。"""
+    return f"raw 比較にフォールバックしました: {reason}"
+
+
+def cli_render_split_head(label: str, name: str, prompt: str, source: str) -> str:
+    """区間の一覧の、1 側の見出し(ファイル名とプロンプト)。"""
+    return f"{label}: {name}  プロンプト: {prompt} ({source})"
+
+
+def cli_render_segment_line(mark: str, number: int, command: str, line_count: int) -> str:
+    """区間の一覧の 1 行。mark は選ばれた区間なら「*」、ほかは空白。"""
+    return f"  {mark} {number}. {command}  {line_count} 行"
+
+
+def cli_render_preamble(text: str) -> str:
+    """区間の前置きの行。"""
+    return f"      前置き: {text}"
+
+
+def cli_render_select(label: str, count: int) -> str:
+    """区間が複数ある側の案内。label は変更前・変更後。"""
+    return f"{label}は {count} 区間あります。選択してください:"
+
+
+def cli_render_pair_head(label: str, before_number: int, after_number: int) -> str:
+    """--all-segments の、組ごとの見出し。label は「1. show version」の形。"""
+    return f"=== {label} (変更前 区間 {before_number} / 変更後 区間 {after_number}) ==="
+
+
+def cli_render_unpaired_line(before: bool, number: int, command: str, line_count: int) -> str:
+    """--all-segments の、相手なしの区間の行。before が False なら変更後。"""
+    label = CLI_RENDER_SIDE_BEFORE if before else CLI_RENDER_SIDE_AFTER
+    return f"{label} 区間 {number}: {command}  {line_count} 行"
+
+
+def cli_render_exposure(before_state: str, after_state: str) -> str:
+    """既定値込みの判定の行。状態は normal・exposed・unknown(ほかは「不明」)。"""
+    states = {"normal": "通常版", "exposed": "既定値込み版", "unknown": "不明"}
+    return (
+        "既定値込みの判定: "
+        f"{CLI_RENDER_SIDE_BEFORE} {states.get(before_state, states['unknown'])} / "
+        f"{CLI_RENDER_SIDE_AFTER} {states.get(after_state, states['unknown'])}"
+    )
+
+
+# --- AI の接続のプロファイル(llm-profiles.json・llm_profiles.py。REQ-258)。誤りの文は {名前} を .format で埋める。値は文に入れない ---
+# 1 件目を新しく作るときだけ、この名前が書かれる(すでにあるファイルの名前は変えない)
+LLM_DEFAULT_PROFILE_NAME = "既定"
+# 選べる値を並べるときの区切り(「a か b」)
+LLMP_CHOICE_SEPARATOR = " か "
+# 接続先に利用者名やパスワードがあるときの文(値は入れない。REQ-199 §2)
+LLMP_URL_CREDENTIALS_RULE = "base_url に利用者名やパスワードは書けません(キーは保管庫に保存してください)"
+# env_suffix の形の決まり(「…env_suffix」の後ろに続ける)
+LLMP_ENV_SUFFIX_RULE = "は英大文字・数字・_ の 1〜40 文字にしてください"
+
+LLMP_ERRORS = {
+    # ファイルを読む・書く(プロンプトのプロファイル・まとめたファイル・設定のファイルとも共通)
+    "unreadable": "{path}: 読めません ({reason})",
+    "not_utf8": "{path}: UTF-8 として読めません",
+    "not_json": "{path}: JSON として読めません",
+    "unwritable": "{path}: 書けません ({reason})",
+    "top_not_object": "{path}: 一番外は表(オブジェクト)にしてください",
+    "schema_version": "{path}: schema_version は {version} にしてください",
+    "already_exists": "{path}: 既にあります。上書きしません",
+    "where_not_object": "{where} は表(オブジェクト)にしてください",
+    # 送り方の値(prefix は「<場所>: profiles[i].」などの頭)
+    "base_url_extras": "{prefix}base_url に ? と # は書けません(問い合わせの値は query に書いてください)",
+    "auth_header": "{prefix}auth_header は {choices} にしてください",
+    "wire_shape": "{prefix}wire の形が違います",
+    "max_output_tokens": "{prefix}max_output_tokens は 1 以上の整数にしてください",
+    "wire_names_name": "{prefix}wire_names の送る名前は空でない文字列にしてください",
+    "thinking": "{prefix}thinking は {choices} にしてください",
+    "thinking_param_name": "{prefix}thinking_param の name は空でない文字列にしてください",
+    "query_shape": "{prefix}query は、空でない文字列のキーから文字列の値への表にしてください",
+    "wire_reserved": "{prefix}{field} に予約された名前は使えません",
+    "wire_keylike": "{prefix}{field} にキーらしい名前は書けません(キーは保管庫に保存してください)",
+    # custom
+    "custom_missing": "{prefix}custom がありません({format_name} には送り先・認証・本文・回答の位置の定義が要ります)",
+    "custom_auth_choice": "auth は {choices} にしてください",
+    "custom_other": "{field} の形が違います",
+    "custom_table": "{where} は {fields} の5つの欄の表にしてください",
+    "custom_headers_table": "{where}.headers は、文字列から文字列への表にしてください",
+    "custom_string_field": "{where}.{name} は文字列にしてください",
+    "custom_body_object": "{where}.body は JSON のオブジェクトにしてください",
+    "custom_file_shape": "{path}: {mark} と {fields} だけの表にしてください",
+    "custom_file_version": "{path}: {mark} は {version} にしてください",
+    # CLI の欄
+    "cli_path": "{prefix}cli_path は空でない文字列にしてください",
+    "timeout_seconds": "{prefix}timeout_seconds は 1 以上の整数にしてください",
+    "cli_effort_not_cli": "{prefix}cli_effort は CLI の形式(codex-cli・claude-code-cli)のときだけ書けます",
+    "cli_effort_choice": "{prefix}cli_effort は {choices} にしてください",
+    # ファイルの欄
+    "wire_names_shape": '{where}.wire_names は {{"{token}": "<送る名前>"}} の形にしてください',
+    "thinking_param_shape": '{where}.thinking_param は {{"name": <送る名前>, "on": <値>, "off": <値>}} の形にしてください',
+    "where_query_shape": "{where}.query は、空でない文字列のキーから文字列の値への表にしてください",
+    "where_max_output_tokens": "{where}.max_output_tokens は 1 以上の整数にしてください",
+    "id_form": '{where}.id は "default" か 32 桁の16進にしてください',
+    "where_name": "{where}.name は空でない文字列にしてください",
+    "where_api_format": "{where}.api_format は {choices} にしてください",
+    "where_model": "{where}.model は文字列にしてください",
+    "where_base_url": "{where}.base_url は空でない文字列か null にしてください",
+    # 重なり・全体
+    "dup_id": "{path}: profiles[{index}].id が重複しています",
+    "dup_name": "{path}: profiles[{index}].name が重複しています(大文字・小文字は区別しません)",
+    "dup_env_suffix": "{path}: profiles[{index}].env_suffix が重複しています",
+    "profiles_array": "{path}: profiles は空でない配列にしてください",
+    "active_id": "{path}: active は profiles の中の id にしてください",
+    # 書く(設定画面用)
+    "missing_file": "{path}: ありません。先に1件目を作ってください",
+    "no_such_profile": "{path}: 指定した id のプロファイルがありません",
+    "name_required": "{path}: name は空でない文字列にしてください",
+    "api_format": "{path}: api_format は {choices} にしてください",
+    "model_string": "{path}: model は文字列にしてください",
+    "base_url_form": "{path}: base_url は空でない文字列か null にしてください",
+    "name_duplicate": "{path}: name が重複しています(大文字・小文字は区別しません)",
+    "env_suffix_duplicate": "{path}: env_suffix が重複しています",
+    "last_profile": "{path}: 最後のプロファイルは消せません",
+    "active_profile": "{path}: 使っているプロファイルは消せません。先に別のプロファイルを使ってください",
+}
+
+# custom の決まりに反したときの文(どの欄かだけ。値は入れない。.format は使わない)。鍵は (欄, 種類)
+LLMP_CUSTOM_PROBLEMS = {
+    ("url", "empty"): "url は空でない文字列にしてください",
+    ("url", "fragment"): "url に # は書けません",
+    ("url", "invalid"): "url は空白や ASCII でない文字を含まない URL にしてください",
+    ("url", "scheme"): "url は https にしてください(http は localhost だけ)",
+    ("url", "keylike"): "url の問い合わせにキーらしい名前は書けません(キーは保管庫に保存してください)",
+    ("headers", "shape"): "headers は、文字列から文字列への表にしてください",
+    ("headers", "name_empty"): "headers の名前は空にできません",
+    ("headers", "name"): "headers の名前に使えない文字があります",
+    ("headers", "value"): "headers の値は、改行などを含まない ASCII の文字列にしてください",
+    ("headers", "repeated"): "headers に同じ名前が2回あります(大文字・小文字は区別しません)",
+    ("headers", "keylike"): "headers にキーらしい名前は書けません(キーは保管庫に保存してください)",
+    ("headers", "own"): "headers に DriftPilot が付ける見出し(Content-Type など)は書けません",
+    ("body", "object"): "body は JSON のオブジェクトにしてください",
+    ("body", "unknown_mark"): "body に知らない差し込みの印があります({{model}}・{{prompt}}・{{max_output_tokens}} だけ使えます)",
+    ("body", "no_prompt"): "body に {{prompt}} がありません",
+    ("answer_path", "empty"): "answer_path は空にできません",
+    ("answer_path", "shape"): "answer_path は choices.0.message.content の形にしてください",
+}
+
+
+# --- 指示文のプロファイル(prompt-profiles.json)・まとめたファイル(profile_bundle.py)・設定のファイル(llm_settings.py)の誤りの文(REQ-258)。.format で埋める。値は文に入れない ---
+PROMPTP_ERRORS = {
+    "id_form": "{where}.id は 32 桁の16進にしてください",
+    "profiles_array": "{path}: profiles は配列にしてください",
+    "active_id": "{path}: active は最初から入っているプロンプトの id か、profiles の中の id にしてください",
+    "no_such_profile": "{path}: 指定した id のプロンプトのプロファイルがありません",
+    "builtin_readonly": "{path}: 最初から入っているプロンプトは変えられません(複製してから直してください)",
+    "active_not_deletable": "{path}: 使っているプロンプトは消せません。先に別のプロンプトを使ってください",
+}
+
+# まとめたファイルの、ならべる語の区切り
+BUNDLE_LIST_SEPARATOR = "・"
+# 書き出す内容を確かめるときの場所の名前
+BUNDLE_EXPORT_PLACE = "書き出す内容"
+# 場所が一番外のときの言い方
+BUNDLE_OUTERMOST = "一番外"
+# キーらしいものの種類と、断るときの文(値と、ファイルにある項目の名前は入れない)
+BUNDLE_KEY_KINDS = {
+    "name": "にキーらしい名前の項目があります",
+    "value": "にキーらしい値（sk- で始まる値・「Bearer 」を含む値）があります",
+    "header": "の headers に認証の見出しがあります",
+}
+BUNDLE_NOT_ALLOWED = "API キー・cli_path・env_suffix・id・active は入れられません"
+BUNDLE_ERRORS = {
+    "too_deep": "{where}: 入れ子が深すぎます",
+    "key_found": "{where}: {place} {detail}。API キーはファイルに入れられません",
+    "too_big": "{path}: 大きすぎます（5MB まで）",
+    "top_fields": "{path}: 一番外は {fields} だけの表にしてください（{not_allowed}）",
+    "format": "{path}: format は {format_name} にしてください",
+    "version": "{path}: version は {version} にしてください",
+    "array": "{path}: {name} は配列にしてください",
+    "unknown_field": "{where} に知らない項目があります（{not_allowed}）",
+    "missing": "{where} に {names} がありません",
+    "wire_table": "{where}.wire は {fields} の中だけの表にしてください",
+    "prompt_table": "{path}: prompts[{index}] は {fields} だけの表にしてください",
+    "dup_name": "{path}: {label}[{index}].name が重複しています(大文字・小文字は区別しません)",
+    "changed": "{source}: 確かめた後に変わりました",
+    "names_changed": "{source}: 確かめた後に、今のプロファイルの名前が変わりました",
+}
+
+# 設定のファイル(config.toml)の誤り。section は [llm] などの表の名前
+LLMSET_UNSET = "(未設定)"
+LLMSET_ERRORS = {
+    "not_toml": "{path}: TOML として読めません",
+    "section_not_table": "{path}: [{section}] は表にしてください",
+    "non_empty_string": "{path}: {section}.{key} は空でない文字列にしてください",
+    "extra_secret_words": "{path}: {section}.extra_secret_words は、空白を含まない語のリストにしてください",
+    "positive_int": "{path}: {section}.{key} は 1 以上の整数にしてください",
+    "api_key_string": "{path}: {section}.api_key は空でない文字列にしてください",
+}
+
+
+# --- 保存の記録(storage/record.py)の誤りの文(REQ-258)。使う側が .format で埋める ---
+STORE_TEXTS = {
+    "none_label": "(なし)",
+    "top_level": "(最上位)",
+    "version_mismatch": "保存ファイルの版が違うため読みません({where}: {shown}、このツールが読める版: {expected})。変換して読むと、欠けた項目を「無い」と誤読するおそれがあるためです",
+    "source_path_empty": "source_paths[{side!r}] が空です。パスが無いときは None にしてください",
+    "source_paths_keys": "source_paths のキーは before / after にしてください: {names}",
+    "unread_sides_keys": "unread_sides は before / after にしてください: {names}",
+    "unread_sides_mismatch": "unread_sides は、入力を読めなかった結果(error.stage が read_input)の error.detail.sides と一致させてください(unread_sides: {unread}、detail.sides: {declared})",
+    "saved_at_timezone": "saved_at はタイムゾーン付きの日時にしてください",
+    "exists": "{target}: 既にあります。上書きしません",
+    "no_folder": "{target}: 保存先のフォルダがありません(自動では作りません)",
+    "cannot_write": "{target}: 書けません ({reason})",
+    "not_utf8": "{path}: UTF-8 として読めません",
+    "cannot_read": "{path}: 読めません ({reason})",
+    "not_json": "{path}: JSON として読めません: {error}",
+    "file_not_object": "保存ファイルの最上位がオブジェクトではありません",
+    "file_missing_items": "保存ファイルに項目がありません: {names}",
+    "date_unreadable": "日時として読めません: {value!r}",
+    "no_timezone": "タイムゾーンがありません",
+    "sha_line_both": "sha256 と line_count は、両方 null(入力を読めなかった側)か両方とも値にしてください",
+    "null_only_unread": "null にできるのは、入力を読めなかった結果(error.stage が read_input)の error.detail.sides にある側だけです",
+    "hash_on_unread": "error.detail.sides で読めなかった側なのに、ハッシュがあります",
+    "str_or_null": "文字列か null にしてください: {value!r}",
+    "raw_options_bad": "単純比較の設定の形が違うか、使えない設定です",
+    "not_object": "オブジェクトではありません",
+    "missing_turns": "項目がありません: turns",
+    "not_array": "配列ではありません",
+    "missing_items": "項目がありません: {names}",
+    "unexpected_value": "想定外の値です: {value!r}",
+    "no_type_matches": "どの型にも合いません: {value!r}",
+    "count_differs": "要素の数が違います({actual} 件、想定 {expected} 件)",
+    "not_bool": "真偽値ではありません",
+    "not_int": "整数ではありません",
+    "not_str": "文字列ではありません",
+    "unsupported_type": "読み込みが対応していない型です: {tp!r}",
+}
+
+
+# --- 更新(update/)の誤りの文・plan.json を断る理由の名前(REQ-258)。使う側が .format で埋める ---
+UPDATE_TEXTS = {
+    "plan_name": "名前",
+    "plan_unreadable": "読めない",
+    "plan_too_large": "大きすぎる",
+    "plan_not_json": "JSON でない",
+    "plan_missing_field": "欄が無い",
+    "plan_type": "型",
+    "plan_kind": "入れ方",
+    "plan_version": "版",
+    "plan_version_form": "版の形",
+    "plan_location": "場所",
+    "plan_location_file": "plan.json の場所",
+    "plan_staging_name": "準備のフォルダーの名前",
+    "plan_staging_location": "準備のフォルダーの場所",
+    "no_new_content": "新しい中身がありません",
+    "ditto_failed": "ditto が {code} で終わりました",
+    "url_not_api": "GitHub の API でない URL にはつなぎません",
+    "redirect_not_https": "https でない転送先には進みません",
+}
+
+# --- 前提のファイル(premise.py)の誤りの文 ---
+PREMISE_TEXTS = {
+    "too_long": "{path}: 前提は {limit} 文字までです",
+    "cannot_read": "{path}: 読めません ({reason})",
+    "not_utf8": "{path}: UTF-8 として読めません",
+    "cannot_write": "{path}: 書けません ({reason})",
+}
+
+# --- 単純比較の既定の設定のファイル(raw_settings.py)の誤りの文 ---
+RAWSET_TEXTS = {
+    "cannot_read": "{path}: 読めません ({reason})",
+    "not_utf8": "{path}: UTF-8 として読めません",
+    "not_json": "{path}: JSON として読めません",
+    "not_object": "{path}: 一番外は表(オブジェクト)にしてください",
+    "schema_version": "{path}: schema_version は {version} にしてください",
+    "no_raw_options": "{path}: raw_options がありません",
+    "context_lines": "{path}: context_lines は 0 から {maximum} の整数にしてください",
+    "kinds_separator": "・",
+    "bad_options": "{path}: raw_options に使えない設定があります({kinds})",
+    "form_error": "{path}: {error}",
+    "cannot_write": "{path}: 書けません ({reason})",
+}
+
+# --- 一括比較の入出力(batch_io/)の文 ---
+BATCHIO_SIDE_LABEL = {"before": "変更前", "after": "変更後"}
+BATCHIO_TEXTS = {
+    "cannot_read_input": "{label}: {path}: 読めません ({reason})",
+    "not_utf8": "UTF-8 として読めません",
+    "cannot_read": "読めません ({reason})",
+    "not_yaml": "YAML として読めません: {error}",
+    "rules_not_utf8": "正規化ルールのファイルを UTF-8 として読めません",
+    "rules_cannot_read": "正規化ルールのファイルを読めません ({reason})",
+    "manifest_exists": "{target}: 既にあります。上書きしません",
+    "manifest_no_folder": "{target}: 書き出し先のフォルダがありません(自動では作りません)",
+    "manifest_cannot_write": "{target}: 書けません ({reason})",
+    "no_directory": "{folder}: ディレクトリがありません",
+    "folder_cannot_read": "{folder}: 読めません ({reason})",
+    "results_exists": "{target}: 既にあります。上書きしません",
+    "results_no_folder": "{target}: 書き出し先のフォルダがありません(自動では作りません)",
+    "results_cannot_write": "{target}: 書けません ({reason})",
+}
+
+# --- 設定のファイルの書き込み(user_config_writer.py)の誤りの文 ---
+UCW_TEXTS = {
+    "not_writable_item": "設定画面から書けない項目です: {names}",
+    "not_removable_item": "設定画面から消せない項目です: {key}",
+    "extra_secret_words": "{path}: {section}.extra_secret_words は、空白を含まない語のリストにしてください",
+    "positive_integer": "{path}: {section}.{key} は 1 以上の整数にしてください",
+    "toml_unreadable": "{path}: TOML として読めません",
+    "not_table": "{path}: [{name}] は表にしてください",
+    "cannot_write": "{path}: 書けません ({reason})",
+    "one_of": "{path}: {section}.{key} は {choices} のどれかにしてください",
+    "true_or_false": "{path}: {section}.{key} は true か false にしてください",
+}
+
+# --- 画面の論理(screen_model/model.py)の、画面の欄の値の形の誤りの文 ---
+SMODEL_TEXTS = {
+    "raw_form_shape": "単純比較の設定の形が違います",
+    "raw_ignore_shape": "無視する行の形が違います",
+    "raw_replace_shape": "置き換えの形が違います",
+    "raw_whitespace_shape": "空白の違いの形が違います",
+    "raw_blank_case_shape": "空行・大文字と小文字の形が違います",
+    "raw_moves_shape": "行の移動の形が違います",
+    "raw_algorithm_shape": "比べ方の形が違います",
+    "no_plan_or_preview": "送信できる計画とプレビューがありません",
+    "export_kind": "出力の形が違います: {kind!r}",
+}
+
+
+# --- 英語の版(ADR-0190 決定2)。言語が "en" のとき、messages_en.py の同じ名前の値でこのモジュールの名前を置き換える ---
+# ★ ここより後ろに文を足さない(足した名前は英語に置き換わらない)。英語の版が無い名前を残さないことは tests/test_req257_english_ui.py が確かめる。
+# ほかのモジュールの「from driftpilot.messages import X」は、この置き換えの後の値を受け取る(このモジュールを読み込み終えてから取るため)
+if _i18n.current_language() == _i18n.EN:
+    from driftpilot import messages_en as _messages_en
+
+    globals().update(
+        {name: value for name, value in vars(_messages_en).items() if not name.startswith("__") and name in globals()}
+    )
+    del _messages_en
+del _i18n

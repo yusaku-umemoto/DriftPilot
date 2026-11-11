@@ -9,6 +9,31 @@ from typing import Any, Literal
 
 import yaml
 
+from driftpilot import i18n
+
+# 利用者に見える誤りの文。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)
+_TEXTS_JA = {
+    "unit": "{name} は 0〜1 の数値にしてください: {value}",
+    "settings_dict": "設定は辞書にしてください",
+    "signatures_dict": "signatures は辞書にしてください",
+    "features_list": "signatures.{name}.features はリストにしてください",
+    "pattern_string": "{where}.pattern は文字列にしてください",
+    "pattern_invalid": "{where}.pattern が不正です: {error}",
+    "settings_unreadable": "設定を読めません: {error}",
+    "ambiguous": "判定が曖昧です。--platform と --show-command を指定してください (スコア: {scores})",
+}
+_TEXTS_EN = {
+    "unit": "{name} must be a number from 0 to 1: {value}",
+    "settings_dict": "The settings must be a mapping",
+    "signatures_dict": "signatures must be a mapping",
+    "features_list": "signatures.{name}.features must be a list",
+    "pattern_string": "{where}.pattern must be a string",
+    "pattern_invalid": "{where}.pattern is invalid: {error}",
+    "settings_unreadable": "Cannot read the settings: {error}",
+    "ambiguous": "The detection is ambiguous. Specify --platform and --show-command (scores: {scores})",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+
 Verdict = Literal["config", "show", "ambiguous"]
 
 __all__ = [
@@ -56,32 +81,32 @@ class Detection:
 
 def _unit(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
-        raise ValueError(f"{name} は 0〜1 の数値にしてください: {value!r}")
+        raise ValueError(_T["unit"].format(name=name, value=repr(value)))
     return float(value)
 
 
 def _parse_settings(data: Any) -> DetectSettings:
     if not isinstance(data, dict):
-        raise ValueError("設定は辞書にしてください")
+        raise ValueError(_T["settings_dict"])
     threshold = _unit(data.get("threshold"), "threshold")
     margin = _unit(data.get("margin"), "margin")
     raw_sigs = data.get("signatures", {})
     if not isinstance(raw_sigs, dict):
-        raise ValueError("signatures は辞書にしてください")
+        raise ValueError(_T["signatures_dict"])
     sigs: dict[str, list[tuple[str, float]]] = {}
     for name, body in raw_sigs.items():
         features = body.get("features") if isinstance(body, dict) else None
         if not isinstance(features, list):
-            raise ValueError(f"signatures.{name}.features はリストにしてください")
+            raise ValueError(_T["features_list"].format(name=name))
         parsed = []
         for i, feat in enumerate(features):
             where = f"signatures.{name}.features[{i}]"
             if not isinstance(feat, dict) or not isinstance(feat.get("pattern"), str):
-                raise ValueError(f"{where}.pattern は文字列にしてください")
+                raise ValueError(_T["pattern_string"].format(where=where))
             try:
                 re.compile(feat["pattern"])
             except re.error as exc:
-                raise ValueError(f"{where}.pattern が不正です: {exc}") from exc
+                raise ValueError(_T["pattern_invalid"].format(where=where, error=exc)) from exc
             parsed.append((feat["pattern"], _unit(feat.get("weight"), f"{where}.weight")))
         sigs[str(name)] = parsed
     return DetectSettings(threshold=threshold, margin=margin, signatures=sigs)
@@ -96,7 +121,7 @@ def load_settings(path: str | Path | None = None) -> DetectSettings:
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ValueError(f"設定を読めません: {exc}") from exc
+        raise ValueError(_T["settings_unreadable"].format(error=exc)) from exc
     return _parse_settings(data)
 
 
@@ -154,4 +179,4 @@ def detect_format(
     if platform and command:
         return Detection("show", result, overridden=True)
     scores = ", ".join(f"{k}={v:.2f}" for k, v in result.scores.items())
-    raise AmbiguousFormatError(f"判定が曖昧です。--platform と --show-command を指定してください (スコア: {scores})", result.scores)
+    raise AmbiguousFormatError(_T["ambiguous"].format(scores=scores), result.scores)

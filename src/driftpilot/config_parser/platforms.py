@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from driftpilot import i18n
 from driftpilot.config_parser import fortinet, fujitsu_sir, registry
 from driftpilot.config_parser.flat_scopes import SIR_SCOPES, FlatScope
 from driftpilot.config_parser.flat_tree import DuplicateLine, FlatTree
@@ -82,9 +83,13 @@ FLAT_PLATFORMS: dict[str, FlatPlatform] = {
     ),
 }
 # 系統は B型だが表が無い機種 → 理由
-UNSUPPORTED_CONFIG_PLATFORMS: dict[str, str] = {
+_UNSUPPORTED_CONFIG_PLATFORMS_JA: dict[str, str] = {
     "fujitsu_srs": "fujitsu_srs の config の表はまだありません(実機の config 待ち。ADR-0024 Action Item 5)",
 }
+_UNSUPPORTED_CONFIG_PLATFORMS_EN: dict[str, str] = {
+    "fujitsu_srs": "There is no config table for fujitsu_srs yet (waiting for a config from a real device. ADR-0024 Action Item 5)",
+}
+UNSUPPORTED_CONFIG_PLATFORMS: dict[str, str] = i18n.choose(_UNSUPPORTED_CONFIG_PLATFORMS_JA, _UNSUPPORTED_CONFIG_PLATFORMS_EN)
 # kind=config で意味を持つ名前(「--show-command と両方指定」の検査を外すのはこれだけ)
 CONFIG_PLATFORM_NAMES = frozenset(FLAT_PLATFORMS) | frozenset(UNSUPPORTED_CONFIG_PLATFORMS)
 # 利用者が選べる config の系統(CLI の --platform の choices と GUI の機種の選択肢)。表が未作成の機種は含めない

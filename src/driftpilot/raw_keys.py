@@ -16,6 +16,35 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
+# 利用者に見える誤りの文。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)。
+# このファイルは標準ライブラリだけを読む決まり(tests/test_req227_raw_keys.py が import 文を確かめる)なので、
+# 同じく標準ライブラリだけを読む driftpilot.i18n は import 文ではなく importlib で読む
+_TEXTS_JA = {
+    "invalid_settings": "単純比較の設定に誤りがあります({count} 件)",
+    "shape": "{where} {reason}",
+    "must_be_table": "は表(オブジェクト)にしてください",
+    "unknown_keys": "に知らないキーがあります",
+    "string_array": "は文字列の配列にしてください",
+    "array": "は配列にしてください",
+    "replacement_table": "は pattern と replacement の文字列だけの表にしてください",
+    "string": "は文字列にしてください",
+    "boolean": "は true か false にしてください",
+    "unusable_contents": "raw_options の中身が使えません({kinds})",
+}
+_TEXTS_EN = {
+    "invalid_settings": "The plain comparison settings have errors ({count})",
+    "shape": "{where} {reason}",
+    "must_be_table": "must be a table (object)",
+    "unknown_keys": "has unknown keys",
+    "string_array": "must be an array of strings",
+    "array": "must be an array",
+    "replacement_table": "must be a table with only the strings pattern and replacement",
+    "string": "must be a string",
+    "boolean": "must be true or false",
+    "unusable_contents": "The contents of raw_options cannot be used ({kinds})",
+}
+_T = importlib.import_module("driftpilot.i18n").choose(_TEXTS_JA, _TEXTS_EN)
+
 WhitespaceMode = Literal["off", "trailing", "amount", "all"]
 WHITESPACE_MODES: tuple[str, ...] = get_args(WhitespaceMode)
 # 比べ方(ADR-0166 決定7。REQ-228 §4)。standard は difflib の SequenceMatcher(autojunk=False。今までと同じ)
@@ -241,7 +270,7 @@ def require_valid(options: RawOptions) -> None:
     """誤りがあれば RawOptionsError(入口で先に止める。ここは守り)。"""
     problems = check_raw_options(options)
     if problems:
-        raise RawOptionsError(f"単純比較の設定に誤りがあります({len(problems)} 件)", problems)
+        raise RawOptionsError(_T["invalid_settings"].format(count=len(problems)), problems)
 
 
 # --- 保存・設定ファイルの形(§2.3) ---
@@ -261,22 +290,22 @@ def options_to_plain(options: RawOptions) -> dict[str, Any]:
 
 
 def _shape_error(where: str, reason: str) -> RawOptionsError:
-    return RawOptionsError(f"{where} {reason}")
+    return RawOptionsError(_T["shape"].format(where=where, reason=reason))
 
 
 def options_from_plain(data: object) -> RawOptions:
     """§2.3 の形を読む。無いキーは既定。形が違う・中身に誤りがあれば RawOptionsError(式は文に入れない)。"""
     if not isinstance(data, Mapping):
-        raise _shape_error("raw_options", "は表(オブジェクト)にしてください")
+        raise _shape_error("raw_options", _T["must_be_table"])
     unknown = [k for k in data if k not in _PLAIN_KEYS]
     if unknown:
-        raise _shape_error("raw_options", "に知らないキーがあります")
+        raise _shape_error("raw_options", _T["unknown_keys"])
     ignore = data.get("ignore_lines", [])
     if not isinstance(ignore, list) or not all(isinstance(x, str) for x in ignore):
-        raise _shape_error("raw_options.ignore_lines", "は文字列の配列にしてください")
+        raise _shape_error("raw_options.ignore_lines", _T["string_array"])
     items = data.get("replacements", [])
     if not isinstance(items, list):
-        raise _shape_error("raw_options.replacements", "は配列にしてください")
+        raise _shape_error("raw_options.replacements", _T["array"])
     replacements: list[Replacement] = []
     for i, item in enumerate(items):
         if (
@@ -284,19 +313,19 @@ def options_from_plain(data: object) -> RawOptions:
             or set(item) != set(_REPLACEMENT_KEYS)
             or not all(isinstance(item[k], str) for k in _REPLACEMENT_KEYS)
         ):
-            raise _shape_error(f"raw_options.replacements[{i}]", "は pattern と replacement の文字列だけの表にしてください")
+            raise _shape_error(f"raw_options.replacements[{i}]", _T["replacement_table"])
         replacements.append(Replacement(item["pattern"], item["replacement"]))
     whitespace = data.get("whitespace", "off")
     if not isinstance(whitespace, str):
-        raise _shape_error("raw_options.whitespace", "は文字列にしてください")
+        raise _shape_error("raw_options.whitespace", _T["string"])
     algorithm = data.get("algorithm", "standard")
     if not isinstance(algorithm, str):
-        raise _shape_error("raw_options.algorithm", "は文字列にしてください")
+        raise _shape_error("raw_options.algorithm", _T["string"])
     flags = {}
     for key in ("ignore_blank_lines", "ignore_case", "detect_moves"):
         value = data.get(key, False)
         if type(value) is not bool:
-            raise _shape_error(f"raw_options.{key}", "は true か false にしてください")
+            raise _shape_error(f"raw_options.{key}", _T["boolean"])
         flags[key] = value
     options = RawOptions(
         ignore_lines=tuple(ignore),
@@ -308,7 +337,7 @@ def options_from_plain(data: object) -> RawOptions:
     problems = check_raw_options(options)
     if problems:
         kinds = sorted({p.kind for p in problems})
-        raise RawOptionsError(f"raw_options の中身が使えません({', '.join(kinds)})", problems)
+        raise RawOptionsError(_T["unusable_contents"].format(kinds=", ".join(kinds)), problems)
     return options
 
 

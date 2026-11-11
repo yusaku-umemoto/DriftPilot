@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+from driftpilot import i18n
 from driftpilot.config_parser.family_hint import AUTO_PLATFORM
 from driftpilot.config_parser.platforms import CONFIG_PLATFORM_NAMES
 from driftpilot.core.batch import _LlmPerJob
@@ -38,6 +39,10 @@ from driftpilot.llm_analyzer import LlmAnalysis, LlmRequest, WholeSection
 from driftpilot.llm_analyzer.analyze import analyze_whole_sent
 from driftpilot.llm_analyzer.follow_up import same_sent_whole_body
 from driftpilot.segmentation import Segment, SegmentPair, has_repeats, pair_segments, pair_within, split_log
+
+_TEXTS_JA = {"unexpected": "予期しないエラーで比較できませんでした: {error_type}: {error}"}
+_TEXTS_EN = {"unexpected": "The comparison failed with an unexpected error: {error_type}: {error}"}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 # この語をコマンドの名前に含む組は config として比べる(REQ-121 §3)
 CONFIG_WORDS = ("running-config", "startup-config", "current-configuration", "full-configuration")
@@ -357,7 +362,7 @@ def _run_one(
     except Exception as exc:  # noqa: BLE001 - 1組の失敗で全体を止めない(REQ-121 §3)
         stage = stages[-1] if stages else "split"
         detail: dict[str, Any] = {"stage": stage, "error_type": type(exc).__name__, "error": str(exc)}
-        message = f"予期しないエラーで比較できませんでした: {type(exc).__name__}: {exc}"
+        message = _T["unexpected"].format(error_type=type(exc).__name__, error=exc)
         return CompareOutcome(
             status="error", mode=request.mode, error=CompareError("unexpected_error", stage, message, detail)
         )

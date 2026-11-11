@@ -46,7 +46,7 @@ export function ready() {
 export async function call(name, ...args) {
   const api = await ready();
   if (typeof api[name] !== "function") {
-    throw new Error(`js_api に ${name} がありません`);
+    throw new Error(`js_api has no method: ${name}`);
   }
   return api[name](...args);
 }

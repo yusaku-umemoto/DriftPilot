@@ -45,12 +45,21 @@ from driftpilot.llm_profiles import (
 )
 from driftpilot.llm_profiles import add_imported_profiles as _add_profiles
 from driftpilot.llm_settings import SettingsError
-from driftpilot.messages import imported_profile_name
+from driftpilot.messages import (
+    BUNDLE_ERRORS,
+    BUNDLE_EXPORT_PLACE,
+    BUNDLE_KEY_KINDS,
+    BUNDLE_LIST_SEPARATOR,
+    BUNDLE_NOT_ALLOWED,
+    BUNDLE_OUTERMOST,
+    LLMP_ERRORS,
+    imported_profile_name,
+)
 from driftpilot.prompt_profiles import (
-    BUILTIN_PROFILES,
     PromptProfile,
     PromptProfiles,
     add_imported_prompt_profiles,
+    builtin_name_variants,
     load_prompt_profiles,
     prompt_from_item,
 )
@@ -65,12 +74,26 @@ CONNECTION_REQUIRED = ("name", "api_format", "model")
 WIRE_FIELDS = ("max_output_tokens", "wire_names", "thinking", "thinking_param", "query")
 PROMPT_FIELDS = ("name", "template")
 # キーらしいものの種類と、断るときの文(値と、ファイルにある項目の名前は入れない)
-_KEY_TEXT = {
-    "name": "にキーらしい名前の項目があります",
-    "value": "にキーらしい値（sk- で始まる値・「Bearer 」を含む値）があります",
-    "header": "の headers に認証の見出しがあります",
-}
-_NOT_ALLOWED = "API キー・cli_path・env_suffix・id・active は入れられません"
+_KEY_TEXT = BUNDLE_KEY_KINDS
+_NOT_ALLOWED = BUNDLE_NOT_ALLOWED
+
+
+def _err(key: str, **values: object) -> str:
+    """誤りの文(messages.BUNDLE_ERRORS)の {名前} を埋める。値と、ファイルにある項目の名前は文に入れない。"""
+    return BUNDLE_ERRORS[key].format(**values)
+
+
+def _llm_err(key: str, **values: object) -> str:
+    """接続のプロファイルと共通の誤りの文(messages.LLMP_ERRORS)。"""
+    return LLMP_ERRORS[key].format(**values)
+
+
+def _reason(exc: OSError) -> str:
+    return exc.strerror or type(exc).__name__
+
+
+def _join(names: object) -> str:
+    return BUNDLE_LIST_SEPARATOR.join(names)  # type: ignore[arg-type]
 
 
 class BundleChanged(SettingsError):
@@ -157,10 +180,10 @@ def check_keys(data: Any, where: str) -> None:
     try:
         found = _find_key(data)
     except RecursionError:
-        raise SettingsError(f"{where}: 入れ子が深すぎます") from None
+        raise SettingsError(_err("too_deep", where=where)) from None
     if found is not None:
         place, kind = found
-        raise SettingsError(f"{where}: {place or '一番外'} {_KEY_TEXT[kind]}。API キーはファイルに入れられません")
+        raise SettingsError(_err("key_found", where=where, place=place or BUNDLE_OUTERMOST, detail=_KEY_TEXT[kind]))
 
 
 # --- 書き出し ---
@@ -200,7 +223,7 @@ def bundle_data(*, llm_path: Path, prompt_path: Path) -> dict[str, Any]:
         "connections": [_connection_json(p) for p in (profiles.profiles if profiles is not None else ())],
         "prompts": [{"name": p.name, "template": p.template} for p in prompts.profiles],
     }
-    check_keys(data, "書き出す内容")
+    check_keys(data, BUNDLE_EXPORT_PLACE)
     return data
 
 
@@ -219,7 +242,7 @@ def _write_text(path: Path, text: str) -> None:
         os.replace(tmp, path)
         tmp = None
     except OSError as exc:
-        raise SettingsError(f"{path}: 書けません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_llm_err("unwritable", path=path, reason=_reason(exc))) from None
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
@@ -241,38 +264,38 @@ def _read_bytes(path: Path) -> bytes:
         with path.open("rb") as fh:
             raw = fh.read(MAX_BYTES + 1)
     except OSError as exc:
-        raise SettingsError(f"{path}: 読めません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_llm_err("unreadable", path=path, reason=_reason(exc))) from None
     if len(raw) > MAX_BYTES:
-        raise SettingsError(f"{path}: 大きすぎます（5MB まで）")
+        raise SettingsError(_err("too_big", path=path))
     return raw
 
 
 def _check_names(data: Any, path: Path) -> None:
     """項目の名前の範囲と、format・version。違えば SettingsError(ファイルにある項目の名前は入れない)。"""
     if not isinstance(data, dict) or set(data) != set(TOP_FIELDS):
-        raise SettingsError(f"{path}: 一番外は {'・'.join(TOP_FIELDS)} だけの表にしてください（{_NOT_ALLOWED}）")
+        raise SettingsError(_err("top_fields", path=path, fields=_join(TOP_FIELDS), not_allowed=_NOT_ALLOWED))
     if data["format"] != FORMAT:
-        raise SettingsError(f"{path}: format は {FORMAT} にしてください")
+        raise SettingsError(_err("format", path=path, format_name=FORMAT))
     if type(data["version"]) is not int or data["version"] != VERSION:
-        raise SettingsError(f"{path}: version は {VERSION} にしてください")
+        raise SettingsError(_err("version", path=path, version=VERSION))
     for name in ("connections", "prompts"):
         if not isinstance(data[name], list):
-            raise SettingsError(f"{path}: {name} は配列にしてください")
+            raise SettingsError(_err("array", path=path, name=name))
     for index, item in enumerate(data["connections"]):
         where = f"{path}: connections[{index}]"
         if not isinstance(item, dict):
-            raise SettingsError(f"{where} は表(オブジェクト)にしてください")
+            raise SettingsError(_llm_err("where_not_object", where=where))
         if set(item) - set(CONNECTION_FIELDS):
-            raise SettingsError(f"{where} に知らない項目があります（{_NOT_ALLOWED}）")
+            raise SettingsError(_err("unknown_field", where=where, not_allowed=_NOT_ALLOWED))
         if missing := [name for name in CONNECTION_REQUIRED if name not in item]:
-            raise SettingsError(f"{where} に {'・'.join(missing)} がありません")
+            raise SettingsError(_err("missing", where=where, names=_join(missing)))
         if "wire" in item and (not isinstance(item["wire"], dict) or set(item["wire"]) - set(WIRE_FIELDS)):
-            raise SettingsError(f"{where}.wire は {'・'.join(WIRE_FIELDS)} の中だけの表にしてください")
+            raise SettingsError(_err("wire_table", where=where, fields=_join(WIRE_FIELDS)))
         if "custom" in item and (not isinstance(item["custom"], dict) or set(item["custom"]) != set(CUSTOM_FIELDS)):
-            raise SettingsError(f"{where}.custom は {', '.join(CUSTOM_FIELDS)} の5つの欄の表にしてください")
+            raise SettingsError(_llm_err("custom_table", where=f"{where}.custom", fields=", ".join(CUSTOM_FIELDS)))
     for index, item in enumerate(data["prompts"]):
         if not isinstance(item, dict) or set(item) != set(PROMPT_FIELDS):
-            raise SettingsError(f"{path}: prompts[{index}] は {'・'.join(PROMPT_FIELDS)} だけの表にしてください")
+            raise SettingsError(_err("prompt_table", path=path, index=index, fields=_join(PROMPT_FIELDS)))
 
 
 def _connection(item: dict[str, Any], where: str) -> LlmProfile:
@@ -286,7 +309,7 @@ def _check_unique(names: list[str], label: str, path: Path) -> None:
     seen: set[str] = set()
     for index, name in enumerate(names):
         if _name_key(name) in seen:
-            raise SettingsError(f"{path}: {label}[{index}].name が重複しています(大文字・小文字は区別しません)")
+            raise SettingsError(_err("dup_name", path=path, label=label, index=index))
         seen.add(_name_key(name))
 
 
@@ -300,13 +323,13 @@ def read_bundle(path: Path) -> Bundle:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        raise SettingsError(f"{path}: UTF-8 として読めません") from None
+        raise SettingsError(_llm_err("not_utf8", path=path)) from None
     try:
         ok, data = parse_json_text(text)
     except RecursionError:  # 入れ子が深すぎる
         ok = False
     if not ok:
-        raise SettingsError(f"{path}: JSON として読めません")
+        raise SettingsError(_llm_err("not_json", path=path))
     _check_names(data, path)
     check_keys(data, str(path))
     connections = [_connection(item, f"{path}: connections[{i}]") for i, item in enumerate(data["connections"])]
@@ -346,7 +369,7 @@ def plan_names(
         existing = [DEFAULT_PROFILE_NAME] if bundle.connections else []
     return (
         _free_names(tuple(p.name for p in bundle.connections), existing),
-        _free_names(tuple(p.name for p in bundle.prompts), [p.name for p in (*BUILTIN_PROFILES, *prompts.profiles)]),
+        _free_names(tuple(p.name for p in bundle.prompts), [*builtin_name_variants(), *(p.name for p in prompts.profiles)]),
     )
 
 
@@ -368,14 +391,14 @@ def import_bundle(
     """
     bundle = read_bundle(source)
     if bundle.digest != digest:
-        raise BundleChanged(f"{source}: 確かめた後に変わりました")
+        raise BundleChanged(_err("changed", source=source))
     profiles = load_profiles(llm_path)
     prompts = load_prompt_profiles(prompt_path)
     if plan_names(bundle, profiles, prompts) != names:
-        raise BundleChanged(f"{source}: 確かめた後に、今のプロファイルの名前が変わりました")
+        raise BundleChanged(_err("names_changed", source=source))
     if bundle.connections and profiles is None:
         if ensure_first is None:
-            raise SettingsError(f"{llm_path}: ありません。先に1件目を作ってください")
+            raise SettingsError(_llm_err("missing_file", path=llm_path))
         ensure_first()
     connection_names, prompt_names = names
     added: tuple[LlmProfile, ...] = ()

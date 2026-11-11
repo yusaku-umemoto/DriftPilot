@@ -7,8 +7,14 @@
 
 import unicodedata
 
+from driftpilot import i18n
+
 THINKING_MAX_CHARS = 20_000
-THINKING_CUT_NOTE = "（長いため、ここから先は出しません）"
+# 切ったときに画面が最後に出す断り書き(日本語・英語。REQ-258)
+_TEXTS_JA = {"cut_note": "（長いため、ここから先は出しません）"}
+_TEXTS_EN = {"cut_note": "(Too long: the rest is not shown)"}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+THINKING_CUT_NOTE = _T["cut_note"]
 
 _KEEP = frozenset({"\n", "\t"})
 _HIDDEN_CATEGORIES = frozenset({"Cc", "Cf"})

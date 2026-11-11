@@ -26,6 +26,7 @@ from typing import Any
 from driftpilot import __version__
 from driftpilot.llm_analyzer.http_json import ssl_context
 from driftpilot.messages import UPDATE_REASON_UNREACHABLE
+from driftpilot.messages import UPDATE_TEXTS as _T
 from driftpilot.update.check import INSTALL_MAC_APP, INSTALL_WINDOWS_ZIP, _http_reason
 from driftpilot.update.errors import ContentError, DownloadError, IntegrityError, UpdateCancelled
 
@@ -81,7 +82,7 @@ class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201 - urllib の形のまま
         if not isinstance(newurl, str) or not newurl.lower().startswith("https://"):
-            raise urllib.error.HTTPError(req.full_url, code, "https でない転送先には進みません", headers, fp)
+            raise urllib.error.HTTPError(req.full_url, code, _T["redirect_not_https"], headers, fp)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 

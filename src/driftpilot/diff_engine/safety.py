@@ -13,12 +13,32 @@ import re
 
 from hier_config import HConfig
 
+from driftpilot import i18n
 from driftpilot.config_parser.ir import IR
 from driftpilot.diff_engine.types import Diff, SafetyWarning, Side
 
 # interfaces.switchport の判定は、interface ブロックがこの数以上あるときだけ行う(1個だけの機器でのノイズを避ける)
 _MIN_INTERFACE_BLOCKS = 2
 _VLAN_LINE = re.compile(r"vlan \d")
+
+# 警告の文に入る「何を見たか」の名前。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)
+_TEXTS_JA = {
+    "switchport": "switchport の行",
+    "ip_address": "ip address の行",
+    "vlan": "vlan のブロック",
+    "ospf": "router ospf のブロック",
+    "bgp": "router bgp のブロック",
+    "ntp": "ntp server の行",
+}
+_TEXTS_EN = {
+    "switchport": "switchport lines",
+    "ip_address": "ip address lines",
+    "vlan": "vlan blocks",
+    "ospf": "router ospf blocks",
+    "bgp": "router bgp blocks",
+    "ntp": "ntp server lines",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 
 def _top_lines(tree: HConfig, *prefixes: str) -> list[str]:
@@ -56,16 +76,16 @@ def check_empty_categories(tree: HConfig, ir: IR, side: Side) -> list[SafetyWarn
         or sw["trunk_allowed_vlan"]
     )
     if blocks >= _MIN_INTERFACE_BLOCKS and switchport_lines and readable == 0:
-        warnings.append(_warning(side, "interfaces.switchport", switchport_lines, readable, "switchport の行"))
+        warnings.append(_warning(side, "interfaces.switchport", switchport_lines, readable, _T["switchport"]))
 
     _, ip_lines = _interface_child_lines(tree, "ip address ")
     ip_read = sum(1 for itf in interfaces if itf["ip_address"] is not None)
     if ip_lines and ip_read == 0:
-        warnings.append(_warning(side, "interfaces.ip_address", ip_lines, ip_read, "ip address の行"))
+        warnings.append(_warning(side, "interfaces.ip_address", ip_lines, ip_read, _T["ip_address"]))
 
     vlan_lines = [line for line in _top_lines(tree, "vlan ") if _VLAN_LINE.match(line)]
     if vlan_lines and not ir["vlans"]:
-        warnings.append(_warning(side, "vlans", len(vlan_lines), 0, "vlan のブロック"))
+        warnings.append(_warning(side, "vlans", len(vlan_lines), 0, _T["vlan"]))
 
     acl_lines = _top_lines(tree, "ip access-list ", "access-list ")
     if acl_lines and not ir["acls"]:
@@ -73,15 +93,15 @@ def check_empty_categories(tree: HConfig, ir: IR, side: Side) -> list[SafetyWarn
 
     ospf_lines = _top_lines(tree, "router ospf ")
     if ospf_lines and not ir["ospf"]:
-        warnings.append(_warning(side, "ospf", len(ospf_lines), 0, "router ospf のブロック"))
+        warnings.append(_warning(side, "ospf", len(ospf_lines), 0, _T["ospf"]))
 
     bgp_lines = _top_lines(tree, "router bgp ")
     if bgp_lines and ir["bgp"] is None:
-        warnings.append(_warning(side, "bgp", len(bgp_lines), 0, "router bgp のブロック"))
+        warnings.append(_warning(side, "bgp", len(bgp_lines), 0, _T["bgp"]))
 
     ntp_lines = [node.text for node in tree.all_children() if node.text.startswith("ntp server ")]
     if ntp_lines and not ir["global"]["ntp_servers"]:
-        warnings.append(_warning(side, "global.ntp_servers", len(ntp_lines), 0, "ntp server の行"))
+        warnings.append(_warning(side, "global.ntp_servers", len(ntp_lines), 0, _T["ntp"]))
 
     return warnings
 

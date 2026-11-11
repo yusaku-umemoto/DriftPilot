@@ -19,6 +19,7 @@ from pathlib import Path
 from driftpilot import llm_settings
 from driftpilot.llm_analyzer import normalize_newlines
 from driftpilot.llm_settings import SettingsError
+from driftpilot.messages import PREMISE_TEXTS as _T
 
 PREMISE_NAME = "llm-premise.txt"
 PREMISE_MAX_CHARS = 4_000  # follow_up.MAX_QUESTION_CHARS と同じ値(テストで同じことを確かめる)
@@ -38,7 +39,7 @@ def user_config_path(*, platform: str | None = None, env: Mapping[str, str] | No
 
 
 def _too_long(path: Path) -> SettingsError:
-    return SettingsError(f"{path}: 前提は {PREMISE_MAX_CHARS:,} 文字までです")
+    return SettingsError(_T["too_long"].format(path=path, limit=f"{PREMISE_MAX_CHARS:,}"))
 
 
 def load_premise(path: Path) -> str | None:
@@ -48,11 +49,11 @@ def load_premise(path: Path) -> str | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise SettingsError(f"{path}: 読めません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_T["cannot_read"].format(path=path, reason=exc.strerror or type(exc).__name__)) from None
     try:
         text = raw.decode("utf-8-sig")  # 先頭の BOM を外す
     except UnicodeDecodeError:
-        raise SettingsError(f"{path}: UTF-8 として読めません") from None
+        raise SettingsError(_T["not_utf8"].format(path=path)) from None
     text = normalize_newlines(text).strip()
     if not text:
         return None
@@ -84,7 +85,7 @@ def write_premise(path: Path, text: str) -> None:
         os.replace(tmp, path)
         tmp = None
     except OSError as exc:
-        raise SettingsError(f"{path}: 書けません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_T["cannot_write"].format(path=path, reason=exc.strerror or type(exc).__name__)) from None
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)

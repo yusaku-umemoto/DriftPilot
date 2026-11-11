@@ -23,14 +23,21 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from driftpilot import i18n
+
 MAX_ERROR_BODY_BYTES = 65_536  # HTTP のエラーの本文を読む上限
 MAX_API_MESSAGE_CHARS = 500  # 出す文の上限(掃除の後)
 MAX_API_MESSAGE_LINES = 10  # 見る行の上限
 MAX_RETRY_AFTER_SECONDS = 86_400
 LONG_RUN_CHARS = 32  # この長さ以上の切れ目の無い並びを伏せる
-KEY_MARK = "<キー>"
-LONG_RUN_MARK = "<長い語>"
-CUT_MARK = "…（以下略）"
+# 利用者に見える印と、repr の語(日本語・英語。REQ-258)。鍵の組は両方で同じ。
+# 英語の印は秘密の語(key・token など)を含めない: for_display が掃除した文をもう一度掃除するので、含めると 2 回目に判定される
+_TEXTS_JA = {"key_mark": "<キー>", "long_run_mark": "<長い語>", "cut_mark": "…（以下略）", "has_text": "文あり", "no_text": "文なし"}
+_TEXTS_EN = {"key_mark": "<credential>", "long_run_mark": "<long string>", "cut_mark": "... (rest omitted)", "has_text": "has text", "no_text": "no text"}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+KEY_MARK = _T["key_mark"]
+LONG_RUN_MARK = _T["long_run_mark"]
+CUT_MARK = _T["cut_mark"]
 
 _CODE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
 _LONG_RUN = re.compile(r"[A-Za-z0-9+/=_.\-]{%d,}" % LONG_RUN_CHARS)
@@ -46,7 +53,7 @@ class ApiErrorText:
     retry_after: int | None
 
     def __repr__(self) -> str:  # 文を出さない(ログ・例外の文に載っても中身が出ないように)
-        has_text = "文あり" if self.message else "文なし"
+        has_text = _T["has_text"] if self.message else _T["no_text"]
         return f"ApiErrorText({has_text}, retry_after={self.retry_after})"
 
 

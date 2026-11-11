@@ -65,11 +65,11 @@ from driftpilot.messages import (
     EXPORT_STRUCTURED,
     FOLLOW_UP_ANSWER_LABEL,
     FOLLOW_UP_QUESTION_LABEL,
+    HTML_LANG,
     NO_COUNT,
     OP_ADDED,
     OP_CHANGED,
     OP_REMOVED,
-    STATUS_LABEL,
     export_omitted,
 )
 
@@ -215,13 +215,15 @@ p.text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   details.pair::details-content { content-visibility: visible; display: block; }
 }
 """
-# 状態の札の class(ADR-0180 決定1)。STATUS_LABEL の言葉で選び、どれでもなければ灰色(other)
+# 状態の札の class(ADR-0180 決定1)。STATUS_LABEL の鍵(status_key。言語によらない)で選び、鍵が無ければ灰色(other)
 _BADGE = {"difference": "diff", "no_difference": "same", "needs_selection": "wait", "error": "err"}
 _BADGE_OTHER = "other"
 # まとめた枠の状態の重さ(重い順に 失敗 > 選択待ち > 差分あり > 差分なし。ADR-0180 決定1 の 5)
 _WEIGHT = {"no_difference": 0, "difference": 1, "needs_selection": 2, "error": 3}
-# 構造化比較の表の行の色(操作の言葉から選ぶ)
-_OP_ROW = {OP_ADDED: "add", OP_REMOVED: "del", OP_CHANGED: "chg"}
+# 構造化比較の表の行の色(操作の鍵から選ぶ。ADR-0190)
+_OP_ROW = {"added": "add", "removed": "del", "changed": "chg"}
+# 構造化比較の表の操作の欄の文(RedactedDiff の op は言語によらない鍵。文はここで引く。ADR-0190)
+_OP_TEXT = {"added": OP_ADDED, "removed": OP_REMOVED, "changed": OP_CHANGED}
 # 題の頭の「DriftPilot」を地の色の文字で出す
 _APP = "DriftPilot"
 # 違う文字の印の開きタグ(REQ-226 §5)。決まった文字だけを書く
@@ -255,6 +257,10 @@ class ReportPair:
     group: str | None = None
     # 最初の依頼の文(ADR-0179 決定1)。比較の窓で答えが届いた組だけ。AI の答えの見出しの後、答えの前に出す。ほかは None
     first_request: str | None = None
+    # status の STATUS_LABEL の鍵(札の色・いちばん重い状態・枠を開くかを、文ではなく鍵で決める。ADR-0190)。無ければ None(灰色)
+    status_key: str | None = None
+    # まとめて比べた組(group がある組)のコマンド。枠の中の小見出しに出す(名前の形に左右されない。ADR-0190)。空なら名前を出す
+    command: str = ""
 
 
 @dataclass(frozen=True)
@@ -262,8 +268,9 @@ class Report:
     """出力の全体。before_name と after_name は入力のファイル名だけ(一括比較は空で、組ごとに持つ)。
 
     multiple は組が複数ある形(まとめて比較・一括比較)。組の列と組の一覧を出す。
-    status_counts は状態ごとの (言葉, 数) で、一括比較だけ(状態の文と同じ数。STATUS_LABEL の順)。HTML のまとめのカードの
-    件数の箱にする(REQ-243 判断の記録 2)。ほかの出力は空で、状態の札を出す。
+    status_counts は状態ごとの (STATUS_LABEL の鍵, 言葉, 数) で、一括比較だけ(状態の文と同じ数。STATUS_LABEL の順)。HTML のまとめのカードの
+    件数の箱にする(REQ-243 判断の記録 2)。箱の色は鍵で選ぶ。ほかの出力は空で、状態の札を出す。
+    status_key は status の STATUS_LABEL の鍵(1 組の比較の札の色。ADR-0190)。無ければ None(灰色)。
     """
 
     title: str
@@ -273,7 +280,8 @@ class Report:
     multiple: bool
     before_name: str = ""
     after_name: str = ""
-    status_counts: tuple[tuple[str, int], ...] = ()
+    status_counts: tuple[tuple[str, str, int], ...] = ()
+    status_key: str | None = None
 
     @property
     def omitted_lines(self) -> int:
@@ -400,18 +408,9 @@ def _number(value: int | None) -> str:
     return NO_COUNT if value is None else str(value)
 
 
-def _status_key(text: str) -> str | None:
-    """状態の文の頭の言葉の STATUS_LABEL のキー(「差分あり（3 組中 2 組）」なら difference)。どれでもなければ None。"""
-    for key, label in STATUS_LABEL.items():
-        if text.startswith(label):
-            return key
-    return None
-
-
-def _badge(text: str, big: bool = False) -> str:
-    """状態の札。class は _BADGE の決まった文字だけから選び、文字は _e を通す。"""
-    key = _status_key(text)
-    cls = _BADGE[key] if key is not None else _BADGE_OTHER
+def _badge(text: str, key: str | None, big: bool = False) -> str:
+    """状態の札。class は _BADGE の決まった文字だけから、鍵(status_key)で選び、文字は _e を通す。"""
+    cls = _BADGE.get(key, _BADGE_OTHER) if key is not None else _BADGE_OTHER
     return f'<span class="badge {cls}{" big" if big else ""}">{_e(text)}</span>'
 
 
@@ -426,7 +425,7 @@ def _pairs_table(report: Report, numbers: Sequence[int]) -> list[str]:
         BATCH_COL_LLM,
     ]
     rows = [
-        f'<tr><td><a href="#pair-{int(number)}">{_e(pair.name)}</a></td><td>{_badge(pair.status)}</td>'
+        f'<tr><td><a href="#pair-{int(number)}">{_e(pair.name)}</a></td><td>{_badge(pair.status, pair.status_key)}</td>'
         + _td(_number(pair.structured), "num")
         + _td(_number(pair.raw), "num")
         + _td(pair.unparsed, "")
@@ -448,9 +447,9 @@ def _structured_table(redacted: RedactedResult) -> list[str]:
         before: Any = d.before
         after: Any = d.after
         # 変更の行で、送らない形(omitted)でない行だけ、違う文字に印を付ける(伏せた後の文字で求める。REQ-226 §5)
-        if d.op == OP_CHANGED and not d.omitted:
+        if d.op == "changed" and not d.omitted:
             before, after = budget.pair(d.before, d.after)
-        cells = [(d.op, "op"), (d.category, ""), (d.target, "text"), (d.item, "text"), (before, "text"), (after, "text")]
+        cells = [(_OP_TEXT.get(d.op, d.op), "op"), (d.category, ""), (d.target, "text"), (d.item, "text"), (before, "text"), (after, "text")]
         rows.append(_row(cells, _OP_ROW.get(d.op, "")))
     return [*out, *_table(_head(head), rows)]
 
@@ -569,19 +568,18 @@ def _frames(pairs: Sequence[ReportPair]) -> list[list[ReportPair]]:
     return frames
 
 
-def _heaviest(statuses: Sequence[str]) -> str:
-    """まとめた枠の状態。中の組の一番重い状態(失敗 > 選択待ち > 差分あり > 差分なし)。ほかの文は一番軽い扱い。"""
-    def weight(text: str) -> int:
-        key = _status_key(text)
-        return _WEIGHT[key] if key is not None and text == STATUS_LABEL[key] else -1
+def _heaviest(pairs: Sequence[ReportPair]) -> ReportPair:
+    """まとめた枠の状態を持つ組。中の組の一番重い状態(失敗 > 選択待ち > 差分あり > 差分なし)。鍵が無い組は一番軽い扱い。"""
 
-    return max(statuses, key=weight)
+    def weight(pair: ReportPair) -> int:
+        return _WEIGHT.get(pair.status_key, -1) if pair.status_key is not None else -1
+
+    return max(pairs, key=weight)
 
 
 def _command_of(pair: ReportPair) -> str:
-    """まとめた枠の中の小見出しのコマンドの文。組の名前が「<group>: 」で始まればその残り、ほかは組の名前のまま。"""
-    head = f"{pair.group}: "
-    return pair.name[len(head) :] if pair.group is not None and pair.name.startswith(head) else pair.name
+    """まとめた枠の中の小見出しのコマンドの文。組が持つコマンド(command)。空なら組の名前のまま。"""
+    return pair.command or pair.name
 
 
 def _frame_html(number: int, pairs: Sequence[ReportPair]) -> list[str]:
@@ -592,12 +590,13 @@ def _frame_html(number: int, pairs: Sequence[ReportPair]) -> list[str]:
     first = pairs[0]
     grouped = first.group is not None
     name = first.group if grouped else first.name
-    status = _heaviest([pair.status for pair in pairs]) if grouped else first.status
-    opened = "" if status == STATUS_LABEL["no_difference"] else " open"
+    heaviest = _heaviest(pairs) if grouped else first
+    status, status_key = heaviest.status, heaviest.status_key
+    opened = "" if status_key == "no_difference" else " open"
     meta = "　".join(text for text in ([_files_text(first)] if grouped else [_counts_text(first), _files_text(first)]) if text)
     out = [
         f'<details class="pair" id="pair-{int(number)}"{opened}>',
-        "<summary>" + _el("span", name, "name") + _badge(status) + (_el("span", meta, "meta") if meta else "") + "</summary>",
+        "<summary>" + _el("span", name, "name") + _badge(status, status_key) + (_el("span", meta, "meta") if meta else "") + "</summary>",
         '<div class="pair-body">',
     ]
     if not grouped:
@@ -610,7 +609,7 @@ def _frame_html(number: int, pairs: Sequence[ReportPair]) -> list[str]:
                 '<div class="cmd">'
                 + _el("code", _command_of(pair))
                 + _el("span", kind, "kind")
-                + _badge(pair.status)
+                + _badge(pair.status, pair.status_key)
                 + (_el("span", counts, "meta") if counts else "")
                 + "</div>"
             )
@@ -632,13 +631,12 @@ def _card_html(report: Report) -> list[str]:
     if report.status_counts:
         out.append('<div class="status">' + _el("span", EXPORT_STATUS, "label") + "</div>")
         boxes = []
-        for label, count in report.status_counts:
-            key = next((k for k, text in STATUS_LABEL.items() if text == label), None)
-            cls = _BADGE[key] if key is not None else _BADGE_OTHER
+        for key, label, count in report.status_counts:
+            cls = _BADGE.get(key, _BADGE_OTHER)
             boxes.append(f'<div class="count {cls}">' + _el("b", int(count)) + _el("span", label) + "</div>")
         out.append('<div class="counts">' + "".join(boxes) + "</div>")
     else:
-        out.append('<div class="status">' + _el("span", EXPORT_STATUS, "label") + _badge(report.status, big=True) + "</div>")
+        out.append('<div class="status">' + _el("span", EXPORT_STATUS, "label") + _badge(report.status, report.status_key, big=True) + "</div>")
         if report.counts:
             out.append(_el("p", f"{EXPORT_COUNTS}: {report.counts}"))
     if report.before_name or report.after_name:
@@ -664,7 +662,7 @@ def render_html(report: Report, *, saved_at: datetime) -> str:
     """
     out = [
         "<!DOCTYPE html>",
-        '<html lang="ja">',
+        f'<html lang="{HTML_LANG}">',
         "<head>",
         '<meta charset="utf-8">',
         "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">",
@@ -742,7 +740,7 @@ def render_diffs_csv(report: Report) -> bytes:
             continue
         lead = [pair.name] if report.multiple else []
         for d in pair.redacted.diffs:
-            rows.append([*lead, EXPORT_KIND_STRUCTURED, d.op, d.category, d.target, d.item, d.before, d.after, NO_COUNT, NO_COUNT])
+            rows.append([*lead, EXPORT_KIND_STRUCTURED, _OP_TEXT.get(d.op, d.op), d.category, d.target, d.item, d.before, d.after, NO_COUNT, NO_COUNT])
         for r in pair.redacted.raw_rows:
             if not r.is_diff:
                 continue

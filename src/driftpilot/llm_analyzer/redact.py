@@ -23,6 +23,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from driftpilot import i18n
 from driftpilot.diff_engine import CompareResult, RawCompareResult, ShowCompareResult
 from driftpilot.diff_engine.types import Diff
 from driftpilot.llm_analyzer.masking import Masker, normalize_words
@@ -39,10 +40,26 @@ from driftpilot.llm_analyzer.payload import (
     _value_path,
 )
 
-# llm_analyzer は messages を読まないので、payload の「(判定不能のため省略)」と同じくここに書く
-OMITTED = "（秘密を含むかもしれないため出力しません）"
-# show の差分でキーの無い行の対象(payload の _show_body と同じ文字)
-_WHOLE_ROW = "(行全体)"
+# llm_analyzer は messages を読まないので、利用者に見える文はここに持つ(日本語・英語。REQ-258)。鍵の組と差し込みの名前は両方で同じ
+_TEXTS_JA = {
+    "omitted": "（秘密を含むかもしれないため出力しません）",
+    # show の差分でキーの無い行の対象。画面の言葉(messages.SM_WHOLE_ROW)と同じ
+    "whole_row": "(行全体)",
+    "show_gate_shape": "[show] 列 {column} の値が秘密語を含む …",
+    "no_section_rows": "区間の行が無いため、伏せる判定ができません",
+}
+_TEXTS_EN = {
+    "omitted": "(not output because it may contain a secret)",
+    # messages_en.SM_WHOLE_ROW と同じ
+    "whole_row": "(whole line)",
+    "show_gate_shape": "[show] column {column} has a value containing a secret word ...",
+    "no_section_rows": "The masking judgment cannot be made because the lines of the section are missing",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+
+OMITTED = _T["omitted"]
+# show の差分でキーの無い行の対象
+_WHOLE_ROW = _T["whole_row"]
 # show の差分を構造化比較の表に出すときのカテゴリ(画面の表と同じ)
 _SHOW_CATEGORY = "show"
 # 構造化不可の行の祖先をつなぐ文字(payload の _structured_line と同じ)
@@ -150,7 +167,7 @@ def _show_row(diff: dict[str, Any], masker: Masker, rec: _Recorder) -> RedactedD
     op = diff["op"]
     found = _show_gate(diff, masker)
     if found is not None:
-        rec.line(f"[show] 列 {found} の値が秘密語を含む …")
+        rec.line(_T["show_gate_shape"].format(column=found))
         return _omitted_diff(op, _SHOW_CATEGORY)
     target = diff.get("key") if diff.get("key") is not None else _WHOLE_ROW
     if op == "changed":
@@ -201,7 +218,7 @@ def redact_result(
     )
     if before_body is None or after_body is None:
         if has_diffs:
-            raise RedactError("区間の行が無いため、伏せる判定ができません")
+            raise RedactError(_T["no_section_rows"])
         before_body, after_body = (), ()
     masker = _masker(secret_words)
     sides = _Sides(before_body, after_body, None, None, masker)

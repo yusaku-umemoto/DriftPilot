@@ -15,6 +15,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from driftpilot import i18n
 from driftpilot.config_parser import FlatNode, FlatTree, InterpretedLines, parse_config_traced
 from driftpilot.config_parser.fortinet_tree import PLATFORM as FORTINET
 from driftpilot.config_parser.platforms import config_patterns
@@ -26,6 +27,22 @@ EXPOSURES = ("normal", "exposed", "unknown")
 INDEX_NAME = "_index.tsv"
 # 区間のコマンドを持たないことを示す _index.tsv の値(廃止した試作 split_terminal_log.py が書いた値)。判定の対象外なので unknown にする
 NO_PROMPT = "(プロンプト行なし)"
+# 入力の誤りの文(REQ-258。開発者向けのコマンドの誤りだが、英語のときに日本語を混ぜない)
+_TEXTS_JA = {
+    "index_missing": "{raw}: {index_name} が見つかりません(切り出し済みのディレクトリを指定してください)",
+    "unreadable_input": "{raw}: 読めません(存在しないか、ファイルでもディレクトリでもありません)",
+    "unreadable_index": "{index}: 読めません ({error})",
+    "unreadable_file": "読めません ({error})",
+    "parse_failed": "解析失敗 ({error})",
+}
+_TEXTS_EN = {
+    "index_missing": "{raw}: {index_name} was not found (give a directory that has been split up)",
+    "unreadable_input": "{raw}: cannot be read (it does not exist, or is neither a file nor a directory)",
+    "unreadable_index": "{index}: cannot be read ({error})",
+    "unreadable_file": "Cannot be read ({error})",
+    "parse_failed": "Parsing failed ({error})",
+}
+INPUT_TEXTS = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 # 解釈済み率がこれ未満のファイルには「パーサー対象外の可能性」の印を付ける
 OUT_OF_SCOPE_RATIO = 0.10
 
@@ -153,13 +170,13 @@ def resolve_inputs(paths: list[str], exposure: str = "normal") -> list[InputFile
         if path.is_dir():
             indexes = sorted(path.rglob(INDEX_NAME))
             if not indexes:
-                raise InputError(f"{raw}: {INDEX_NAME} が見つかりません(切り出し済みのディレクトリを指定してください)")
+                raise InputError(INPUT_TEXTS["index_missing"].format(raw=raw, index_name=INDEX_NAME))
             for index in indexes:
                 inputs.extend(_read_index(index))
         elif path.is_file():
             inputs.append(InputFile(path, exposure))
         else:
-            raise InputError(f"{raw}: 読めません(存在しないか、ファイルでもディレクトリでもありません)")
+            raise InputError(INPUT_TEXTS["unreadable_input"].format(raw=raw))
     return inputs
 
 
@@ -168,7 +185,7 @@ def _read_index(index: Path) -> list[InputFile]:
         with index.open(encoding="utf-8", newline="") as fh:
             rows = list(csv.DictReader(fh, delimiter="\t"))
     except (OSError, UnicodeDecodeError) as exc:
-        raise InputError(f"{index}: 読めません ({exc})") from exc
+        raise InputError(INPUT_TEXTS["unreadable_index"].format(index=index, error=exc)) from exc
     result: list[InputFile] = []
     for row in rows:
         name = row.get("file")
@@ -261,11 +278,11 @@ def measure_file(item: InputFile, platform: str | None = None) -> FileResult:
     try:
         text = item.path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        return FileResult(str(item.path), item.exposure, error=f"読めません ({type(exc).__name__})")
+        return FileResult(str(item.path), item.exposure, error=INPUT_TEXTS["unreadable_file"].format(error=type(exc).__name__))
     try:
         return measure_text(text, str(item.path), item.exposure, platform)
     except Exception as exc:  # noqa: BLE001 - 1ファイルの解析失敗で全体を止めない
-        return FileResult(str(item.path), item.exposure, error=f"解析失敗 ({type(exc).__name__})")
+        return FileResult(str(item.path), item.exposure, error=INPUT_TEXTS["parse_failed"].format(error=type(exc).__name__))
 
 
 def measure(inputs: list[InputFile], platform: str | None = None) -> CoverageReport:

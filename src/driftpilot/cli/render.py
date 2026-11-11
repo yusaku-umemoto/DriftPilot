@@ -17,11 +17,31 @@ from typing import Any
 from driftpilot.llm_analyzer import LlmAnalysis
 from driftpilot.llm_analyzer.answer_format import plain_answer
 from driftpilot.messages import (
+    CLI_ERROR_PREFIX,
+    CLI_RENDER_NO_DIFF,
+    CLI_RENDER_NO_PROMPT,
+    CLI_RENDER_SIDE_AFTER,
+    CLI_RENDER_SIDE_BEFORE,
+    CLI_RENDER_UNKNOWN_COMMAND,
+    CLI_RENDER_UNPAIRED_HEAD,
+    CLI_WARNING_PREFIX,
+    RAW_MOVES_SKIPPED_CLI,
+    SM_WHOLE_ROW,
     auto_platform_line,
+    cli_render_applied,
+    cli_render_enabled_rules,
+    cli_render_exposure,
+    cli_render_pair_head,
+    cli_render_preamble,
+    cli_render_segment_line,
+    cli_render_select,
+    cli_render_show_fallback,
+    cli_render_split_head,
+    cli_render_unpaired_line,
+    cli_render_unparsed,
     exclusion_line,
     llm_section_lines,
     notice_line,
-    RAW_MOVES_SKIPPED_CLI,
     raw_ignored_counts_line,
     raw_move_cli_line,
     raw_options_summary_text,
@@ -32,7 +52,7 @@ from driftpilot.core import SCHEMA_VERSION, CompareOutcome, MultiCompareOutcome,
 from driftpilot.diff_engine import CompareResult, RawCompareResult, SafetyWarning, ShowCompareResult
 from driftpilot.segmentation import Segment
 
-SIDES = (("before", "変更前"), ("after", "変更後"))
+SIDES = (("before", CLI_RENDER_SIDE_BEFORE), ("after", CLI_RENDER_SIDE_AFTER))
 
 
 def _plain(value: Any) -> Any:
@@ -62,34 +82,34 @@ def _structured_text(result: CompareResult | None, error: str | None, warnings: 
     """warnings は結果全体の警告。structured が失敗したときだけ使う(安全網5の見立て。REQ-97)。"""
     lines = ["== structured =="]
     if result is None:
-        return [*lines, f"エラー: {error}", *(f"警告: {warning_message(w)}" for w in warnings)]
+        return [*lines, f"{CLI_ERROR_PREFIX}{error}", *(f"{CLI_WARNING_PREFIX}{warning_message(w)}" for w in warnings)]
     if not result.diffs:
-        lines.append("差分なし")
+        lines.append(CLI_RENDER_NO_DIFF)
     for d in result.diffs:
         where = d["category"] + (f" {d['name']}" if d["name"] else "")
         path = " > ".join(d["path"])
         before, after = _diff_value(d, "before"), _diff_value(d, "after")
         lines.append(f"[{d['op']}] {where}{' / ' + path if path else ''}: {before} -> {after}")
     counts = result.unparsed_counts
-    lines.append(f"構造化不可の行数: 変更前 {counts['before']} / 変更後 {counts['after']}")
-    lines.extend(f"警告: {warning_message(w)}" for w in result.warnings)
+    lines.append(cli_render_unparsed(counts["before"], counts["after"]))
+    lines.extend(f"{CLI_WARNING_PREFIX}{warning_message(w)}" for w in result.warnings)
     return lines
 
 
 def _raw_text(result: RawCompareResult) -> list[str]:
     lines = ["== raw =="]
     if not result.diffs:
-        lines.append("差分なし")
+        lines.append(CLI_RENDER_NO_DIFF)
     for d in result.diffs:
         if d["op"] == "removed":
             lines.append(f"- {d['before_line_no']}: {d['text']}")
         else:
             lines.append(f"+ {d['after_line_no']}: {d['text']}")
     rec = result.normalization
-    lines.append("有効なルール: " + (", ".join(rec.enabled_rule_ids) or "なし"))
-    for side, label in SIDES:
+    lines.append(cli_render_enabled_rules(list(rec.enabled_rule_ids)))
+    for side, _label in SIDES:
         for rule_id, count in rec.applied[side].items():
-            lines.append(f"適用 ({label}): {rule_id} {count} 行")
+            lines.append(cli_render_applied(side == "before", rule_id, count))
     if result.options is not None:
         # 単純比較の設定(ADR-0166)。既定の設定では出さない(今の text のまま)
         opt = result.options
@@ -108,11 +128,11 @@ def _raw_text(result: RawCompareResult) -> list[str]:
 def _show_text(result: ShowCompareResult) -> list[str]:
     lines = ["== show structured =="]
     if result.method == "raw":
-        return [*lines, f"raw 比較にフォールバックしました: {result.fallback_reason}"]
+        return [*lines, cli_render_show_fallback(result.fallback_reason)]
     if not result.diffs:
-        lines.append("差分なし")
+        lines.append(CLI_RENDER_NO_DIFF)
     for d in result.diffs:
-        label = d["key"] if d["key"] is not None else "(行全体)"
+        label = d["key"] if d["key"] is not None else SM_WHOLE_ROW
         if d["op"] == "changed":
             detail = ", ".join(f"{c}: {b!r} -> {a!r}" for c, (b, a) in d["fields"].items())
         else:
@@ -140,13 +160,14 @@ def _split_json(side: SideSegmentation) -> dict[str, Any]:
 
 def _split_text(label: str, side: SideSegmentation) -> list[str]:
     split = side.split
-    prompt = ", ".join(repr(p) for p in split.prompts) if split.prompts else "なし(切り分けなし)"
-    lines = [f"{label}: {side.name}  プロンプト: {prompt} ({split.prompt_source})"]
+    prompt = ", ".join(repr(p) for p in split.prompts) if split.prompts else CLI_RENDER_NO_PROMPT
+    lines = [cli_render_split_head(label, side.name, prompt, split.prompt_source)]
     for s in split.segments:
         mark = "*" if side.selected is not None and s.number == side.selected.number else " "
-        lines.append(f"  {mark} {s.number}. {s.command if s.command is not None else '(コマンド不明)'}  {s.line_count} 行")
+        command = s.command if s.command is not None else CLI_RENDER_UNKNOWN_COMMAND
+        lines.append(cli_render_segment_line(mark, s.number, command, s.line_count))
         if s.preamble:
-            lines.append("      前置き: " + " | ".join(p.strip() for p in s.preamble))
+            lines.append(cli_render_preamble(" | ".join(p.strip() for p in s.preamble)))
     return lines
 
 
@@ -232,22 +253,21 @@ def to_json_all(outcome: MultiCompareOutcome) -> str:
 
 def pair_label(index: int, pair: PairResult) -> str:
     """組の見出しの名前(「1. show version」)。標準エラーの文にも使う。"""
-    return f"{index}. {pair.command if pair.command is not None else '(コマンド不明)'}"
+    return f"{index}. {pair.command if pair.command is not None else CLI_RENDER_UNKNOWN_COMMAND}"
 
 
 def to_text_all(outcome: MultiCompareOutcome) -> str:
     """--all-segments の text。組ごとに見出しを付けて今の text を並べ、最後に相手なしの一覧を出す。"""
     out: list[str] = []
     for index, pair in enumerate(outcome.pairs, start=1):
-        out.append(f"=== {pair_label(index, pair)} (変更前 区間 {pair.before_number} / 変更後 区間 {pair.after_number}) ===")
+        out.append(cli_render_pair_head(pair_label(index, pair), pair.before_number, pair.after_number))
         if body := to_text(pair.outcome):
             out.append(body)
     if outcome.unpaired:
-        out.append("=== 相手なし ===")
-        labels = dict(SIDES)
+        out.append(CLI_RENDER_UNPAIRED_HEAD)
         for u in outcome.unpaired:
-            command = u.segment.command if u.segment.command is not None else "(コマンド不明)"
-            out.append(f"{labels[u.side]} 区間 {u.segment.number}: {command}  {u.segment.line_count} 行")
+            command = u.segment.command if u.segment.command is not None else CLI_RENDER_UNKNOWN_COMMAND
+            out.append(cli_render_unpaired_line(u.side == "before", u.segment.number, command, u.segment.line_count))
     return "\n".join(out)
 
 
@@ -262,7 +282,7 @@ def to_text(outcome: CompareOutcome) -> str:
         for side, label in SIDES:
             if side in waiting:
                 n = sum(1 for c in outcome.candidates if c.side == side)
-                out.append(f"{label}は {n} 区間あります。選択してください:")
+                out.append(cli_render_select(label, n))
             out += _split_text(label, seg[side])
         return "\n".join(out)
     if outcome.kind is None or seg is None:
@@ -279,14 +299,13 @@ def to_text(outcome: CompareOutcome) -> str:
         out += _raw_text(outcome.raw)
     if not structured_section:
         # 構造化の欄が無いとき(show・raw だけ)は、警告(ページ送りの印など。ADR-0134 決定2)をここに出す
-        out += [f"警告: {warning_message(w)}" for w in outcome.warnings]
+        out += [f"{CLI_WARNING_PREFIX}{warning_message(w)}" for w in outcome.warnings]
     out.append("== segmentation ==")
     for side, label in SIDES:
         out += _split_text(label, seg[side])
     exposure = outcome.default_exposure
     if exposure:
-        states = {"normal": "通常版", "exposed": "既定値込み版", "unknown": "不明"}
-        out.append("既定値込みの判定: " + " / ".join(f"{lb} {states[exposure[sd].state]}" for sd, lb in SIDES))
+        out.append(cli_render_exposure(exposure["before"].state, exposure["after"].state))
     out += [notice_line(n) for n in outcome.notices]
     out += [exclusion_line(e) for e in outcome.exclusions]
     if outcome.llm is not None and outcome.llm.reason != "disabled":

@@ -122,6 +122,7 @@ from driftpilot.messages import (
     BATCH_AI_REASON_NO_TARGET,
     BATCH_AI_REASON_NOT_RUN,
     BATCH_AI_REASON_RUNNING,
+    BAPI_SENTENCE_BREAK,
     BATCH_ALL_WAITING,
     BATCH_ALL_WAITING_TITLE,
     BATCH_APPROVAL_CLOSE,
@@ -1491,7 +1492,7 @@ class BatchApi(Api):
         self._result_revision += 1
         status = []
         if summary.cancelled:
-            status.append(f"{CANCELLED}。{batch_rest_not_run(summary.total - summary.executed)}")
+            status.append(f"{CANCELLED}{BAPI_SENTENCE_BREAK}{batch_rest_not_run(summary.total - summary.executed)}")
         if gave_up := gave_up_count(final):
             status.append(batch_llm_gave_up(gave_up))
         # 機種が自動で、config と決まったのに判定できなかった組の数(REQ-209 のとおり指定なしで比べた。REQ-212 §8)

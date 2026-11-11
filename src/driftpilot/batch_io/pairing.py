@@ -13,6 +13,7 @@ from typing import Any
 from driftpilot.core import MANIFEST_SCHEMA_VERSION
 from driftpilot.core.batch import DEFAULT_KIND, DEFAULT_MODE
 from driftpilot.core.types import Mode
+from driftpilot.messages import BATCHIO_TEXTS as _T
 from driftpilot.raw_keys import DEFAULT_RAW_OPTIONS, RawOptions, options_to_plain
 
 
@@ -33,11 +34,11 @@ class Pairing:
 
 def _names(folder: Path) -> set[str]:
     if not folder.is_dir():
-        raise PairingError(f"{folder}: ディレクトリがありません")
+        raise PairingError(_T["no_directory"].format(folder=folder))
     try:
         return {p.name for p in folder.iterdir() if p.is_file()}
     except OSError as exc:
-        raise PairingError(f"{folder}: 読めません ({exc.strerror or exc})") from exc
+        raise PairingError(_T["folder_cannot_read"].format(folder=folder, reason=exc.strerror or exc)) from exc
 
 
 def pair_by_name(before_dir: str | os.PathLike[str], after_dir: str | os.PathLike[str]) -> Pairing:

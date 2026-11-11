@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from driftpilot import i18n
 from driftpilot.llm_analyzer.client import LLMClient
 
 if TYPE_CHECKING:  # api_error は redact → payload → types を読む(循環を避けて型の注記だけ)
@@ -70,6 +71,24 @@ LlmSource = Literal["structured", "raw", "show", "whole"]
 UnsentKind = Literal["line", "pem_block"]
 
 
+# 利用者に見える誤りの文(日本語・英語。REQ-258)。鍵の組と差し込みの名前は両方で同じ。{value!r} は値の repr
+_TEXTS_JA = {
+    "max_diffs_invalid": "max_diffs は 1 以上の整数にしてください: {value!r}",
+    "prompt_template_invalid": "prompt_template が使えません: {problem}",
+    "extra_instruction_invalid": "extra_instruction は空でない文字列にしてください",
+    "premise_invalid": "premise は空でない {max_chars} 文字以下の文字列にしてください",
+    "no_client_reason": "client が無いときは unavailable に理由を入れてください",
+}
+_TEXTS_EN = {
+    "max_diffs_invalid": "max_diffs must be an integer of 1 or more: {value!r}",
+    "prompt_template_invalid": "prompt_template cannot be used: {problem}",
+    "extra_instruction_invalid": "extra_instruction must be a non-empty string",
+    "premise_invalid": "premise must be a non-empty string of at most {max_chars} characters",
+    "no_client_reason": "When there is no client, give the reason in unavailable",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+
+
 @dataclass(frozen=True)
 class LlmRequest:
     """入口が組み立てて core に渡す。client を作れなかったときは unavailable に理由を入れる。
@@ -108,28 +127,28 @@ class LlmRequest:
     def __post_init__(self) -> None:
         # 無制限の経路を作らない(0 や負の数を受け付けない)
         if type(self.max_diffs) is not int or self.max_diffs < 1:
-            raise ValueError(f"max_diffs は 1 以上の整数にしてください: {self.max_diffs!r}")
+            raise ValueError(_T["max_diffs_invalid"].format(value=self.max_diffs))
         if self.prompt_template is not None:
             from driftpilot.llm_analyzer.prompt import check_prompt_template  # prompt がこのモジュールを読むため
 
             problem = check_prompt_template(self.prompt_template)
             if problem is not None:
                 # 文にひな形の中身を入れない(理由の種類だけ)
-                raise ValueError(f"prompt_template が使えません: {problem}")
+                raise ValueError(_T["prompt_template_invalid"].format(problem=problem))
         if self.extra_instruction is not None and (
             not isinstance(self.extra_instruction, str) or not self.extra_instruction.strip()
         ):
             # 文に中身を入れない
-            raise ValueError("extra_instruction は空でない文字列にしてください")
+            raise ValueError(_T["extra_instruction_invalid"])
         if self.premise is not None:
             # 上限は追加の質問の1つの上限と同じ値(premise.PREMISE_MAX_CHARS。core は premise を読まないので follow_up から取る)
             from driftpilot.llm_analyzer.follow_up import MAX_QUESTION_CHARS  # follow_up がこのモジュールを読むため
 
             if not isinstance(self.premise, str) or not self.premise.strip() or len(self.premise) > MAX_QUESTION_CHARS:
                 # 文に中身を入れない
-                raise ValueError(f"premise は空でない {MAX_QUESTION_CHARS} 文字以下の文字列にしてください")
+                raise ValueError(_T["premise_invalid"].format(max_chars=MAX_QUESTION_CHARS))
         if not self.dry_run and self.client is None and self.unavailable is None:
-            raise ValueError("client が無いときは unavailable に理由を入れてください")
+            raise ValueError(_T["no_client_reason"])
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ import yaml
 
 from driftpilot.core import Manifest, ManifestError, parse_manifest
 from driftpilot.diff_engine import NormalizationRule, load_rules
+from driftpilot.messages import BATCHIO_TEXTS as _T
 
 
 class ManifestWriteError(Exception):
@@ -57,13 +58,13 @@ def _read_yaml(source: Path) -> Any:
     try:
         text = source.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
-        raise ManifestError([(str(source), "UTF-8 として読めません")]) from exc
+        raise ManifestError([(str(source), _T["not_utf8"])]) from exc
     except OSError as exc:
-        raise ManifestError([(str(source), f"読めません ({exc.strerror or exc})")]) from exc
+        raise ManifestError([(str(source), _T["cannot_read"].format(reason=exc.strerror or exc))]) from exc
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ManifestError([(str(source), f"YAML として読めません: {exc}")]) from exc
+        raise ManifestError([(str(source), _T["not_yaml"].format(error=exc))]) from exc
     return data
 
 
@@ -81,9 +82,9 @@ def load_job_rules(manifest: Manifest) -> dict[Path, list[NormalizationRule]]:
         try:
             rules[path] = load_rules(path)
         except UnicodeDecodeError:
-            problems.append((str(path), "正規化ルールのファイルを UTF-8 として読めません"))
+            problems.append((str(path), _T["rules_not_utf8"]))
         except OSError as exc:
-            problems.append((str(path), f"正規化ルールのファイルを読めません ({exc.strerror or exc})"))
+            problems.append((str(path), _T["rules_cannot_read"].format(reason=exc.strerror or exc)))
         except ValueError as exc:
             problems.append((str(path), str(exc)))
     if problems:
@@ -106,9 +107,9 @@ def write_manifest(data: dict[str, Any], path: str | os.PathLike[str]) -> Path:
         with open(target, "x", encoding="utf-8", newline="\n") as fh:
             fh.write(dump_manifest(data))
     except FileExistsError as exc:
-        raise ManifestWriteError(f"{target}: 既にあります。上書きしません") from exc
+        raise ManifestWriteError(_T["manifest_exists"].format(target=target)) from exc
     except FileNotFoundError as exc:
-        raise ManifestWriteError(f"{target}: 書き出し先のフォルダがありません(自動では作りません)") from exc
+        raise ManifestWriteError(_T["manifest_no_folder"].format(target=target)) from exc
     except OSError as exc:
-        raise ManifestWriteError(f"{target}: 書けません ({exc.strerror or exc})") from exc
+        raise ManifestWriteError(_T["manifest_cannot_write"].format(target=target, reason=exc.strerror or exc)) from exc
     return target

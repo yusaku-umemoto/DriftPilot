@@ -23,7 +23,9 @@ def available() -> bool:
 
 def print_error(text: str) -> None:
     """開けないときの文を標準エラーに出す(既定。`driftpilot gui` の出力の形)。"""
-    print(f"エラー: {text}", file=sys.stderr)
+    from driftpilot.messages import GW_ERROR_PREFIX
+
+    print(f"{GW_ERROR_PREFIX}{text}", file=sys.stderr)
 
 
 def main(
@@ -45,13 +47,13 @@ def main(
     (REQ-253 §7。packaging/gui_main.py が渡す)。渡されたときだけ、起動の知らせを app.run に渡す(launch)。
     update_failed は名前が last-failed.log のときだけ知らせに出す。
     """
-    from driftpilot.messages import gui_web_unavailable
+    from driftpilot.messages import GUIARG_BATCH, GUIARG_SAMPLE, GUIARG_SETTINGS, gui_web_unavailable
 
     parser = argparse.ArgumentParser(prog="python -m driftpilot.gui_web")
     page = parser.add_mutually_exclusive_group()
-    page.add_argument("--sample", action="store_true", help="部品の見本のページを開く")
-    page.add_argument("--settings", action="store_true", help="設定の画面だけを開く")
-    page.add_argument("--batch", action="store_true", help="一括比較の画面だけを開く")
+    page.add_argument("--sample", action="store_true", help=GUIARG_SAMPLE)
+    page.add_argument("--settings", action="store_true", help=GUIARG_SETTINGS)
+    page.add_argument("--batch", action="store_true", help=GUIARG_BATCH)
     args = parser.parse_args([] if argv is None else argv)
     if not available():
         (report or print_error)(gui_web_unavailable())

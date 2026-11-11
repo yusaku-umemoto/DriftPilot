@@ -67,16 +67,38 @@ from driftpilot.llm_analyzer.wire import (
     wire_problem,
 )
 from driftpilot.llm_settings import SettingsError, env_suffix_of, is_env_suffix, is_limit, user_config_path
+from driftpilot.messages import (
+    LLM_DEFAULT_PROFILE_NAME,
+    LLMP_CHOICE_SEPARATOR,
+    LLMP_CUSTOM_PROBLEMS,
+    LLMP_ENV_SUFFIX_RULE,
+    LLMP_ERRORS,
+    LLMP_URL_CREDENTIALS_RULE,
+)
 
 PROFILES_NAME = "llm-profiles.json"
 SCHEMA_VERSION = 1
-DEFAULT_PROFILE_NAME = "既定"
+# 1 件目を新しく作るときに書く名前(言語に合わせる。日本語は「既定」・英語は Default)。すでにあるファイルの名前は変えない
+DEFAULT_PROFILE_NAME = LLM_DEFAULT_PROFILE_NAME
 API_FORMATS = ("chat-completions", "responses", "anthropic-messages", CUSTOM_HTTP_JSON, CODEX_CLI, CLAUDE_CODE_CLI)
 # 定義のファイル(書き出し・読み込み)の印の欄と値(REQ-101 §4.3)
 CUSTOM_FILE_MARK = "driftpilot_custom_http_json"
 CUSTOM_FILE_VERSION = 1
 
 _UNSET: Any = object()  # update_profile で「渡していない」を None と区別する
+
+
+def _err(key: str, **values: object) -> str:
+    """誤りの文(messages.LLMP_ERRORS)の {名前} を埋める。値は文に入れない決まりなので、渡すのは場所と欄の名前だけ。"""
+    return LLMP_ERRORS[key].format(**values)
+
+
+def _reason(exc: OSError) -> str:
+    return exc.strerror or type(exc).__name__
+
+
+def _choices(values: Any) -> str:
+    return LLMP_CHOICE_SEPARATOR.join(values)
 
 
 @dataclass(frozen=True)
@@ -145,7 +167,7 @@ def has_url_extras(base_url: str) -> bool:
 
 
 # 接続先に利用者名やパスワードがあるときの文(値は入れない。REQ-199 §2)
-URL_CREDENTIALS_RULE = "base_url に利用者名やパスワードは書けません(キーは保管庫に保存してください)"
+URL_CREDENTIALS_RULE = LLMP_URL_CREDENTIALS_RULE
 
 
 def has_url_credentials(base_url: str) -> bool:
@@ -161,70 +183,52 @@ def _problem_text(prefix: str, problem: tuple[str, str]) -> str:
     """wire_problem の結果の文(場所と欄の名前だけ。値は入れない)。prefix は「<場所>: profiles[i].」か「<場所>: 」。"""
     field, kind = problem
     if kind == "reserved":
-        return f"{prefix}{field} に予約された名前は使えません"
-    return f"{prefix}{field} にキーらしい名前は書けません(キーは保管庫に保存してください)"
+        return _err("wire_reserved", prefix=prefix, field=field)
+    return _err("wire_keylike", prefix=prefix, field=field)
 
 
 def _check_send_options(base_url: str | None, auth_header: Any, wire: Any, prefix: str) -> None:
     """接続先の ? #・利用者名とパスワード・認証の見出し・送り方の値の決まり(読むときと書くときで同じ)。値は文に入れない。"""
     if base_url is not None and has_url_extras(base_url):
-        raise SettingsError(f"{prefix}base_url に ? と # は書けません(問い合わせの値は query に書いてください)")
+        raise SettingsError(_err("base_url_extras", prefix=prefix))
     if base_url is not None and has_url_credentials(base_url):
         raise SettingsError(f"{prefix}{URL_CREDENTIALS_RULE}")
     if auth_header not in AUTH_HEADERS:
-        raise SettingsError(f"{prefix}auth_header は {' か '.join(AUTH_HEADERS)} にしてください")
+        raise SettingsError(_err("auth_header", prefix=prefix, choices=_choices(AUTH_HEADERS)))
     if not isinstance(wire, WireOptions):
-        raise SettingsError(f"{prefix}wire の形が違います")
+        raise SettingsError(_err("wire_shape", prefix=prefix))
     if wire.max_output_tokens is not None and not is_limit(wire.max_output_tokens):
-        raise SettingsError(f"{prefix}max_output_tokens は 1 以上の整数にしてください")
+        raise SettingsError(_err("max_output_tokens", prefix=prefix))
     if wire.max_tokens_name is not None and (not isinstance(wire.max_tokens_name, str) or not wire.max_tokens_name.strip()):
-        raise SettingsError(f"{prefix}wire_names の送る名前は空でない文字列にしてください")
+        raise SettingsError(_err("wire_names_name", prefix=prefix))
     if wire.thinking not in THINKING_VALUES:
-        raise SettingsError(f"{prefix}thinking は {' か '.join(THINKING_VALUES)} にしてください")
+        raise SettingsError(_err("thinking", prefix=prefix, choices=_choices(THINKING_VALUES)))
     param = wire.thinking_param
     if param is not None and (not isinstance(param, ThinkingParam) or not isinstance(param.name, str) or not param.name.strip()):
-        raise SettingsError(f"{prefix}thinking_param の name は空でない文字列にしてください")
+        raise SettingsError(_err("thinking_param_name", prefix=prefix))
     if not all(isinstance(k, str) and k.strip() and isinstance(v, str) for k, v in wire.query):
-        raise SettingsError(f"{prefix}query は、空でない文字列のキーから文字列の値への表にしてください")
+        raise SettingsError(_err("query_shape", prefix=prefix))
     if (problem := wire_problem(wire)) is not None:
         raise SettingsError(_problem_text(prefix, problem))
 
 
-# custom の決まりに反したときの文(どの欄かだけ。値は入れない)
-_CUSTOM_PROBLEM_TEXT = {
-    ("url", "empty"): "url は空でない文字列にしてください",
-    ("url", "fragment"): "url に # は書けません",
-    ("url", "invalid"): "url は空白や ASCII でない文字を含まない URL にしてください",
-    ("url", "scheme"): "url は https にしてください(http は localhost だけ)",
-    ("url", "keylike"): "url の問い合わせにキーらしい名前は書けません(キーは保管庫に保存してください)",
-    ("auth", "choice"): f"auth は {' か '.join(CUSTOM_AUTHS)} にしてください",
-    ("headers", "shape"): "headers は、文字列から文字列への表にしてください",
-    ("headers", "name_empty"): "headers の名前は空にできません",
-    ("headers", "name"): "headers の名前に使えない文字があります",
-    ("headers", "value"): "headers の値は、改行などを含まない ASCII の文字列にしてください",
-    ("headers", "repeated"): "headers に同じ名前が2回あります(大文字・小文字は区別しません)",
-    ("headers", "keylike"): "headers にキーらしい名前は書けません(キーは保管庫に保存してください)",
-    ("headers", "own"): "headers に DriftPilot が付ける見出し(Content-Type など)は書けません",
-    ("body", "object"): "body は JSON のオブジェクトにしてください",
-    ("body", "unknown_mark"): "body に知らない差し込みの印があります({{model}}・{{prompt}}・{{max_output_tokens}} だけ使えます)",
-    ("body", "no_prompt"): "body に {{prompt}} がありません",
-    ("answer_path", "empty"): "answer_path は空にできません",
-    ("answer_path", "shape"): "answer_path は choices.0.message.content の形にしてください",
-}
+# custom の決まりに反したときの文(どの欄かだけ。値は入れない)。auth だけは選べる値を差し込むので、使うところで作る
+_CUSTOM_PROBLEM_TEXT = LLMP_CUSTOM_PROBLEMS
 
 
 def custom_problem_text(prefix: str, problem: CustomProblem) -> str:
     """custom_problem の結果の文(値は入れない)。prefix は「<場所>: profiles[i].custom.」などの頭。"""
-    return prefix + _CUSTOM_PROBLEM_TEXT.get((problem.field, problem.kind), f"{problem.field} の形が違います")
+    if (problem.field, problem.kind) == ("auth", "choice"):
+        return prefix + _err("custom_auth_choice", choices=_choices(CUSTOM_AUTHS))
+    text = _CUSTOM_PROBLEM_TEXT.get((problem.field, problem.kind))
+    return prefix + (text if text is not None else _err("custom_other", field=problem.field))
 
 
 def _check_custom(api_format: Any, custom: Any, prefix: str) -> None:
     """custom-http-json で定義が無い・定義が決まりに反する(形式に関係なく)ときは SettingsError。値は文に入れない。"""
     if custom is None:
         if api_format == CUSTOM_HTTP_JSON:
-            raise SettingsError(
-                f"{prefix}custom がありません({CUSTOM_HTTP_JSON} には送り先・認証・本文・回答の位置の定義が要ります)"
-            )
+            raise SettingsError(_err("custom_missing", prefix=prefix, format_name=CUSTOM_HTTP_JSON))
         return
     if (problem := custom_problem(custom)) is not None:
         raise SettingsError(custom_problem_text(f"{prefix}custom.", problem))
@@ -233,9 +237,9 @@ def _check_custom(api_format: Any, custom: Any, prefix: str) -> None:
 def _check_cli(cli_path: Any, timeout_seconds: Any, prefix: str) -> str | None:
     """CLI の欄の決まり(読むときと書くときで同じ)。場所は前後の空白を除いて返す。値は文に入れない。"""
     if cli_path is not None and (not isinstance(cli_path, str) or not cli_path.strip()):
-        raise SettingsError(f"{prefix}cli_path は空でない文字列にしてください")
+        raise SettingsError(_err("cli_path", prefix=prefix))
     if timeout_seconds is not None and not is_limit(timeout_seconds):
-        raise SettingsError(f"{prefix}timeout_seconds は 1 以上の整数にしてください")
+        raise SettingsError(_err("timeout_seconds", prefix=prefix))
     return cli_path.strip() if cli_path is not None else None
 
 
@@ -245,12 +249,12 @@ def _check_cli_effort(api_format: Any, cli_effort: Any, prefix: str) -> None:
         return
     choices = CLI_EFFORTS.get(api_format)
     if choices is None:
-        raise SettingsError(f"{prefix}cli_effort は CLI の形式(codex-cli・claude-code-cli)のときだけ書けます")
+        raise SettingsError(_err("cli_effort_not_cli", prefix=prefix))
     if not isinstance(cli_effort, str) or cli_effort not in choices:
-        raise SettingsError(f"{prefix}cli_effort は {' か '.join(choices)} にしてください")
+        raise SettingsError(_err("cli_effort_choice", prefix=prefix, choices=_choices(choices)))
 
 
-ENV_SUFFIX_RULE = "は英大文字・数字・_ の 1〜40 文字にしてください"
+ENV_SUFFIX_RULE = LLMP_ENV_SUFFIX_RULE
 
 
 def _checked_env_suffix(env_suffix: Any, prefix: str) -> str | None:
@@ -268,15 +272,15 @@ def _checked_env_suffix(env_suffix: Any, prefix: str) -> str | None:
 def _custom_from_json(raw: Any, where: str) -> CustomHttpJson:
     """JSON の表から定義を作る。欄はちょうど url・auth・headers・body・answer_path。形が違えば SettingsError(値は入れない)。"""
     if not isinstance(raw, dict) or set(raw) != set(CUSTOM_FIELDS):
-        raise SettingsError(f"{where} は {', '.join(CUSTOM_FIELDS)} の5つの欄の表にしてください")
+        raise SettingsError(_err("custom_table", where=where, fields=", ".join(CUSTOM_FIELDS)))
     headers = raw["headers"]
     if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
-        raise SettingsError(f"{where}.headers は、文字列から文字列への表にしてください")
+        raise SettingsError(_err("custom_headers_table", where=where))
     for name in ("url", "auth", "answer_path"):
         if not isinstance(raw[name], str):
-            raise SettingsError(f"{where}.{name} は文字列にしてください")
+            raise SettingsError(_err("custom_string_field", where=where, name=name))
     if not isinstance(raw["body"], dict):
-        raise SettingsError(f"{where}.body は JSON のオブジェクトにしてください")
+        raise SettingsError(_err("custom_body_object", where=where))
     return CustomHttpJson(
         url=raw["url"], auth=raw["auth"], headers=tuple(headers.items()), body=raw["body"], answer_path=raw["answer_path"]
     )
@@ -286,14 +290,14 @@ def _wire_of(item: dict[str, Any], where: str) -> WireOptions:
     """ファイルの欄から送り方の値を作る。欄が無ければ既定値。形が違えば SettingsError(値は入れない)。"""
     tokens = item.get("max_output_tokens")
     if tokens is not None and not is_limit(tokens):
-        raise SettingsError(f"{where}.max_output_tokens は 1 以上の整数にしてください")
+        raise SettingsError(_err("where_max_output_tokens", where=where))
     names = item.get("wire_names", {})
     if (
         not isinstance(names, dict)
         or set(names) - {MAX_OUTPUT_TOKENS}
         or not all(isinstance(v, str) and v.strip() for v in names.values())
     ):
-        raise SettingsError(f'{where}.wire_names は {{"{MAX_OUTPUT_TOKENS}": "<送る名前>"}} の形にしてください')
+        raise SettingsError(_err("wire_names_shape", where=where, token=MAX_OUTPUT_TOKENS))
     param = item.get("thinking_param")
     if param is not None and (
         not isinstance(param, dict)
@@ -301,10 +305,10 @@ def _wire_of(item: dict[str, Any], where: str) -> WireOptions:
         or not isinstance(param["name"], str)
         or not param["name"].strip()
     ):
-        raise SettingsError(f'{where}.thinking_param は {{"name": <送る名前>, "on": <値>, "off": <値>}} の形にしてください')
+        raise SettingsError(_err("thinking_param_shape", where=where))
     query = item.get("query", {})
     if not isinstance(query, dict) or not all(isinstance(k, str) and k.strip() and isinstance(v, str) for k, v in query.items()):
-        raise SettingsError(f"{where}.query は、空でない文字列のキーから文字列の値への表にしてください")
+        raise SettingsError(_err("where_query_shape", where=where))
     target = names.get(MAX_OUTPUT_TOKENS)
     return WireOptions(
         max_output_tokens=tokens,
@@ -318,9 +322,9 @@ def _wire_of(item: dict[str, Any], where: str) -> WireOptions:
 def _profile(item: Any, index: int, path: Path) -> LlmProfile:
     where = f"{path}: profiles[{index}]"
     if not isinstance(item, dict):
-        raise SettingsError(f"{where} は表(オブジェクト)にしてください")
+        raise SettingsError(_err("where_not_object", where=where))
     if not is_profile_id(item.get("id")):
-        raise SettingsError(f"{where}.id は \"default\" か 32 桁の16進にしてください")
+        raise SettingsError(_err("id_form", where=where))
     return replace(profile_from_item(item, where), id=item["id"])
 
 
@@ -331,18 +335,18 @@ def profile_from_item(item: Any, where: str) -> LlmProfile:
     形が違えば SettingsError(where と欄の名前だけ。値は入れない)。
     """
     if not isinstance(item, dict):
-        raise SettingsError(f"{where} は表(オブジェクト)にしてください")
+        raise SettingsError(_err("where_not_object", where=where))
     name = item.get("name")
     if not isinstance(name, str) or not name.strip():
-        raise SettingsError(f"{where}.name は空でない文字列にしてください")
+        raise SettingsError(_err("where_name", where=where))
     if item.get("api_format") not in API_FORMATS:
-        raise SettingsError(f"{where}.api_format は {' か '.join(API_FORMATS)} にしてください")
+        raise SettingsError(_err("where_api_format", where=where, choices=_choices(API_FORMATS)))
     model = item.get("model")
     if not isinstance(model, str):
-        raise SettingsError(f"{where}.model は文字列にしてください")
+        raise SettingsError(_err("where_model", where=where))
     base_url = item.get("base_url")
     if base_url is not None and (not isinstance(base_url, str) or not base_url.strip()):
-        raise SettingsError(f"{where}.base_url は空でない文字列か null にしてください")
+        raise SettingsError(_err("where_base_url", where=where))
     base_url = base_url.strip() if base_url is not None else None
     auth_header = item.get("auth_header", AUTH_BEARER)
     wire = _wire_of(item, where)
@@ -379,12 +383,12 @@ def _check_unique(profiles: list[LlmProfile], path: Path) -> None:
     suffixes: set[str] = set()
     for index, profile in enumerate(profiles):
         if profile.id in ids:
-            raise SettingsError(f"{path}: profiles[{index}].id が重複しています")
+            raise SettingsError(_err("dup_id", path=path, index=index))
         if _name_key(profile.name) in names:
-            raise SettingsError(f"{path}: profiles[{index}].name が重複しています(大文字・小文字は区別しません)")
+            raise SettingsError(_err("dup_name", path=path, index=index))
         if profile.env_suffix is not None and profile.env_suffix in suffixes:
             # 同じキーが2つの接続先へ送られないように断る(ADR-0077 決定1)
-            raise SettingsError(f"{path}: profiles[{index}].env_suffix が重複しています")
+            raise SettingsError(_err("dup_env_suffix", path=path, index=index))
         ids.add(profile.id)
         names.add(_name_key(profile.name))
         if profile.env_suffix is not None:
@@ -398,26 +402,26 @@ def load_profiles(path: Path) -> LlmProfiles | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise SettingsError(f"{path}: 読めません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_err("unreadable", path=path, reason=_reason(exc))) from None
     try:
         data = json.loads(raw.decode("utf-8"))
     except UnicodeDecodeError:
-        raise SettingsError(f"{path}: UTF-8 として読めません") from None
+        raise SettingsError(_err("not_utf8", path=path)) from None
     except ValueError:
-        raise SettingsError(f"{path}: JSON として読めません") from None
+        raise SettingsError(_err("not_json", path=path)) from None
     if not isinstance(data, dict):
-        raise SettingsError(f"{path}: 一番外は表(オブジェクト)にしてください")
+        raise SettingsError(_err("top_not_object", path=path))
     version = data.get("schema_version")
     if type(version) is not int or version != SCHEMA_VERSION:
-        raise SettingsError(f"{path}: schema_version は {SCHEMA_VERSION} にしてください")
+        raise SettingsError(_err("schema_version", path=path, version=SCHEMA_VERSION))
     items = data.get("profiles")
     if not isinstance(items, list) or not items:
-        raise SettingsError(f"{path}: profiles は空でない配列にしてください")
+        raise SettingsError(_err("profiles_array", path=path))
     profiles = [_profile(item, i, path) for i, item in enumerate(items)]
     _check_unique(profiles, path)
     active = data.get("active")
     if not isinstance(active, str) or active not in {p.id for p in profiles}:
-        raise SettingsError(f"{path}: active は profiles の中の id にしてください")
+        raise SettingsError(_err("active_id", path=path))
     return LlmProfiles(active=active, profiles=tuple(profiles))
 
 
@@ -497,7 +501,7 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
         os.replace(tmp, path)
         tmp = None
     except OSError as exc:
-        raise SettingsError(f"{path}: 書けません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_err("unwritable", path=path, reason=_reason(exc))) from None
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
@@ -506,14 +510,14 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 def _require(path: Path) -> LlmProfiles:
     profiles = load_profiles(path)
     if profiles is None:
-        raise SettingsError(f"{path}: ありません。先に1件目を作ってください")
+        raise SettingsError(_err("missing_file", path=path))
     return profiles
 
 
 def _require_profile(profiles: LlmProfiles, profile_id: str, path: Path) -> LlmProfile:
     profile = profiles.get(profile_id) if is_profile_id(profile_id) else None
     if profile is None:
-        raise SettingsError(f"{path}: 指定した id のプロファイルがありません")
+        raise SettingsError(_err("no_such_profile", path=path))
     return profile
 
 
@@ -523,13 +527,13 @@ def _checked(profile: LlmProfile, others: tuple[LlmProfile, ...], path: Path) ->
     環境変数の名前の続きは大文字にし、ほかのプロファイルと同じ値を断る(ADR-0077 決定1)。
     """
     if not isinstance(profile.name, str) or not profile.name.strip():
-        raise SettingsError(f"{path}: name は空でない文字列にしてください")
+        raise SettingsError(_err("name_required", path=path))
     if profile.api_format not in API_FORMATS:
-        raise SettingsError(f"{path}: api_format は {' か '.join(API_FORMATS)} にしてください")
+        raise SettingsError(_err("api_format", path=path, choices=_choices(API_FORMATS)))
     if profile.model is not None and not isinstance(profile.model, str):
-        raise SettingsError(f"{path}: model は文字列にしてください")
+        raise SettingsError(_err("model_string", path=path))
     if profile.base_url is not None and (not isinstance(profile.base_url, str) or not profile.base_url.strip()):
-        raise SettingsError(f"{path}: base_url は空でない文字列か null にしてください")
+        raise SettingsError(_err("base_url_form", path=path))
     base_url = profile.base_url.strip() if profile.base_url is not None else None
     _check_send_options(base_url, profile.auth_header, profile.wire, f"{path}: ")
     _check_custom(profile.api_format, profile.custom, f"{path}: ")
@@ -538,9 +542,9 @@ def _checked(profile: LlmProfile, others: tuple[LlmProfile, ...], path: Path) ->
     env_suffix = _checked_env_suffix(profile.env_suffix, f"{path}: ")
     name = profile.name.strip()
     if any(_name_key(o.name) == _name_key(name) for o in others if o.id != profile.id):
-        raise SettingsError(f"{path}: name が重複しています(大文字・小文字は区別しません)")
+        raise SettingsError(_err("name_duplicate", path=path))
     if env_suffix is not None and any(o.env_suffix == env_suffix for o in others if o.id != profile.id):
-        raise SettingsError(f"{path}: env_suffix が重複しています")
+        raise SettingsError(_err("env_suffix_duplicate", path=path))
     return replace(
         profile,
         name=name,
@@ -554,7 +558,7 @@ def _checked(profile: LlmProfile, others: tuple[LlmProfile, ...], path: Path) ->
 def create_first(path: Path, *, model: str | None, base_url: str | None) -> LlmProfiles:
     """1件目(移行)。今の設定のモデル・接続先で id="default"・名前「既定」を作り、active にする。既にあれば断る。"""
     if path.exists():
-        raise SettingsError(f"{path}: 既にあります。上書きしません")
+        raise SettingsError(_err("already_exists", path=path))
     first = LlmProfile(
         id=DEFAULT_PROFILE_ID, name=DEFAULT_PROFILE_NAME, api_format="chat-completions", model=model, base_url=base_url
     )
@@ -688,9 +692,9 @@ def delete_profile(path: Path, profile_id: str, *, platform: str | None = None) 
     profiles = _require(path)
     _require_profile(profiles, profile_id, path)
     if len(profiles.profiles) == 1:
-        raise SettingsError(f"{path}: 最後のプロファイルは消せません")
+        raise SettingsError(_err("last_profile", path=path))
     if profile_id == profiles.active:
-        raise SettingsError(f"{path}: 使っているプロファイルは消せません。先に別のプロファイルを使ってください")
+        raise SettingsError(_err("active_profile", path=path))
     _write(path, replace(profiles, profiles=tuple(p for p in profiles.profiles if p.id != profile_id)))
     return key_store.delete_key(profile_id=profile_id, platform=platform)
 
@@ -712,22 +716,22 @@ def read_custom_file(path: Path) -> tuple[CustomHttpJson, str]:
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        raise SettingsError(f"{path}: 読めません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_err("unreadable", path=path, reason=_reason(exc))) from None
     digest = hashlib.sha256(raw).hexdigest()
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        raise SettingsError(f"{path}: UTF-8 として読めません") from None
+        raise SettingsError(_err("not_utf8", path=path)) from None
     try:
         ok, data = parse_json_text(text)
     except RecursionError:  # 入れ子が深すぎる
         ok = False
     if not ok:
-        raise SettingsError(f"{path}: JSON として読めません")
+        raise SettingsError(_err("not_json", path=path))
     if not isinstance(data, dict) or set(data) != {CUSTOM_FILE_MARK, *CUSTOM_FIELDS}:
-        raise SettingsError(f"{path}: {CUSTOM_FILE_MARK} と {', '.join(CUSTOM_FIELDS)} だけの表にしてください")
+        raise SettingsError(_err("custom_file_shape", path=path, mark=CUSTOM_FILE_MARK, fields=", ".join(CUSTOM_FIELDS)))
     if type(data[CUSTOM_FILE_MARK]) is not int or data[CUSTOM_FILE_MARK] != CUSTOM_FILE_VERSION:
-        raise SettingsError(f"{path}: {CUSTOM_FILE_MARK} は {CUSTOM_FILE_VERSION} にしてください")
+        raise SettingsError(_err("custom_file_version", path=path, mark=CUSTOM_FILE_MARK, version=CUSTOM_FILE_VERSION))
     custom = _custom_from_json({name: data[name] for name in CUSTOM_FIELDS}, f"{path}: custom")
     if (problem := custom_problem(custom)) is not None:
         raise SettingsError(custom_problem_text(f"{path}: ", problem))

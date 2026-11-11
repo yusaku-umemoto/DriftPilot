@@ -24,6 +24,7 @@ config の中の `#` の行は変えない。
 import hashlib
 from dataclasses import dataclass
 
+from driftpilot import i18n
 from driftpilot.config_parser.flat_tree import DuplicateLine, FlatNode, FlatTree
 
 PLATFORM = "fortinet"
@@ -47,12 +48,39 @@ class FortinetStructureError(ValueError):
     """config / end、edit / next の対応が取れない、または引用符が閉じていない。
 
     reason は分岐に使える理由、line_no は問題の行(閉じていないものは開いた行)。文面に値は含めない。
+    文面は理由の鍵から作る(言語で日本語・英語を選ぶ。REQ-259。差し込む値は行番号・scope・closer だけで、どちらの言語でも同じに入れる)。
     """
 
-    def __init__(self, reason: str, line_no: int, message: str) -> None:
+    def __init__(self, reason: str, line_no: int, **fields: object) -> None:
         self.reason = reason
         self.line_no = line_no
-        super().__init__(f"FortiGate の config の {line_no} 行目: {message}")
+        super().__init__(_STRUCTURE["head"].format(line=line_no) + _STRUCTURE[reason].format(**fields))
+
+
+# 形の誤りの文(REQ-259 / ADR-0190 決定3)。理由の鍵 → 文の形。head は頭の文
+_STRUCTURE_JA = {
+    "head": "FortiGate の config の {line} 行目: ",
+    "unclosed_quote": "引用符が閉じていません(ファイルが途中で切れている可能性があります)",
+    "multiline_outside_set": "set 以外の行で、引用符が行をまたいでいます",
+    "edit_outside_config": "edit が config の直下にありません",
+    "unmatched_next": "対応する edit の無い next があります",
+    "next_in_config": "{opened_line} 行目の config の中に、edit の無い next があります",
+    "unmatched_end": "対応する config の無い end があります",
+    "end_in_edit": "{opened_line} 行目の edit を閉じる next がありません",
+    "unclosed_block": "この {scope} を閉じる {closer} がありません(ファイルが途中で切れている可能性があります)",
+}
+_STRUCTURE_EN = {
+    "head": "FortiGate config, line {line}: ",
+    "unclosed_quote": "a quotation mark is not closed (the file may have been cut off)",
+    "multiline_outside_set": "a quotation mark spans several lines on a line other than set",
+    "edit_outside_config": "edit is not directly under config",
+    "unmatched_next": "there is a next without a matching edit",
+    "next_in_config": "there is a next without an edit inside the config on line {opened_line}",
+    "unmatched_end": "there is an end without a matching config",
+    "end_in_edit": "the edit on line {opened_line} has no next that closes it",
+    "unclosed_block": "there is no {closer} that closes this {scope} (the file may have been cut off)",
+}
+_STRUCTURE = i18n.choose(_STRUCTURE_JA, _STRUCTURE_EN)
 
 
 @dataclass(frozen=True)
@@ -168,9 +196,7 @@ def build_fortinet_tree(text: str) -> FlatTree:
         while quotes.quote is not None:
             index += 1
             if index >= len(lines):
-                raise FortinetStructureError(
-                    "unclosed_quote", line_no, "引用符が閉じていません(ファイルが途中で切れている可能性があります)"
-                )
+                raise FortinetStructureError("unclosed_quote", line_no)
             quotes.feed("\n" + lines[index])
             logical += "\n" + lines[index]
         index += 1
@@ -184,43 +210,33 @@ def build_fortinet_tree(text: str) -> FlatTree:
         word = line.split(None, 1)[0]
         if "\n" in logical:
             if word != "set":
-                raise FortinetStructureError(
-                    "multiline_outside_set", line_no, "set 以外の行で、引用符が行をまたいでいます"
-                )
+                raise FortinetStructureError("multiline_outside_set", line_no)
             container._add(FlatNode(_embedded_text(logical, quotes), parent, line_no))
         elif word == CONFIG:
             stack.append(container._add(FlatNode(line, parent, line_no, scope_id=CONFIG)))
         elif word == EDIT:
             if parent is None or parent.scope_id != CONFIG:
-                raise FortinetStructureError("edit_outside_config", line_no, "edit が config の直下にありません")
+                raise FortinetStructureError("edit_outside_config", line_no)
             key = unquote(line.split(None, 1)[1].strip()) if " " in line else ""
             stack.append(container._add(FlatNode(f"{EDIT} {key}", parent, line_no, scope_id=EDIT)))
         elif line == "next":
             if parent is None:
-                raise FortinetStructureError("unmatched_next", line_no, "対応する edit の無い next があります")
+                raise FortinetStructureError("unmatched_next", line_no)
             if parent.scope_id != EDIT:
-                raise FortinetStructureError(
-                    "next_in_config", line_no, f"{parent.line_no} 行目の config の中に、edit の無い next があります"
-                )
+                raise FortinetStructureError("next_in_config", line_no, opened_line=parent.line_no)
             stack.pop()
         elif line == "end":
             if parent is None:
-                raise FortinetStructureError("unmatched_end", line_no, "対応する config の無い end があります")
+                raise FortinetStructureError("unmatched_end", line_no)
             if parent.scope_id != CONFIG:
-                raise FortinetStructureError(
-                    "end_in_edit", line_no, f"{parent.line_no} 行目の edit を閉じる next がありません"
-                )
+                raise FortinetStructureError("end_in_edit", line_no, opened_line=parent.line_no)
             stack.pop()
         else:
             container._add(FlatNode(line, parent, line_no))
     if stack:
         opened = stack[-1]
         closer = "end" if opened.scope_id == CONFIG else "next"
-        raise FortinetStructureError(
-            "unclosed_block",
-            opened.line_no or 0,
-            f"この {opened.scope_id} を閉じる {closer} がありません(ファイルが途中で切れている可能性があります)",
-        )
+        raise FortinetStructureError("unclosed_block", opened.line_no or 0, scope=opened.scope_id, closer=closer)
     tree.add_duplicates(find_duplicates(tree))
     return tree
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' data:">
@@ -505,9 +505,10 @@
       </details>
     </div>
 
-    <!-- 「表示」のタブ（REQ-256 §4 / ADR-0189）。画面の色（システム設定に合わせる・白モード・黒モード）を選ぶ。
-         この「保存」（save-display）は [gui] の theme だけを書き、開いている窓すべてに色を当てる（「更新」のタブと同じ形。
-         選んだ値は別の引数で渡す。form() はほかの操作と同じく渡し、打ちかけの欄を残す） -->
+    <!-- 「表示」のタブ（REQ-256 §4 / ADR-0189・REQ-257 §4 / ADR-0190）。画面の色（システム設定に合わせる・白モード・黒モード）と
+         言語（English・日本語・システム設定に合わせる）を選ぶ。この「保存」（save-display）は [gui] の theme と language を書き、
+         開いている窓すべてに色を当てる（言語は開き直すと効く。「更新」のタブと同じ形。選んだ値は別の引数で渡す。
+         form() はほかの操作と同じく渡し、打ちかけの欄を残す）。「保存」は面のいちばん下に 1 つだけ -->
     <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-display" aria-labelledby="settings-tab-display" hidden>
       <section class="pilot-group">
         <h2 class="pilot-group-title" id="display-title" data-text="settings.display.title"></h2>
@@ -517,6 +518,15 @@
           <label class="pilot-radio"><input class="pilot-check" type="radio" name="theme" id="theme-dark" value="dark"><span data-text="settings.display.dark"></span></label>
         </div>
         <p class="pilot-note pilot-lines" data-text="settings.note.display_frame"></p>
+      </section>
+      <section class="pilot-group">
+        <h2 class="pilot-group-title" id="language-title" data-text="settings.display.language_title"></h2>
+        <div class="pilot-row" role="radiogroup" aria-labelledby="language-title">
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="language" id="language-en" value="en"><span data-text="settings.display.language_en"></span></label>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="language" id="language-ja" value="ja"><span data-text="settings.display.language_ja"></span></label>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="language" id="language-system" value="system"><span data-text="settings.display.language_system"></span></label>
+        </div>
+        <p class="pilot-note pilot-lines" data-text="settings.note.display_language"></p>
         <div class="pilot-row">
           <span class="pilot-spacer"></span>
           <button type="button" class="pilot-button pilot-button--secondary" id="save-display" data-text="settings.button.save_config"></button>

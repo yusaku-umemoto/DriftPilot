@@ -97,19 +97,33 @@ from driftpilot.messages import (
     unpaired_tab_title,
 )
 
+from driftpilot.messages import (
+    BATCH_MANIFEST,
+    SMB_LLM_CHECK_LABEL,
+    SMB_MANIFEST_VALUES,
+    SMB_SAVE_ONLY_FOLDER_PAIRS,
+    SMB_SOURCE_FOLDERS,
+    SMB_SOURCE_MANIFEST,
+    SMB_TEXT_WILDCARD,
+    smb_default_url,
+    smb_manifest_error,
+    smb_side_selection,
+    smb_unparsed_counts,
+)
+
 Source = Literal["folders", "manifest"]
 SOURCE_CHOICES: tuple[tuple[Source, str], ...] = (
-    ("folders", "フォルダを2つ選んで、同じ名前のファイルを組にする"),
-    ("manifest", "組のファイルを使う"),
+    ("folders", SMB_SOURCE_FOLDERS),
+    ("manifest", SMB_SOURCE_MANIFEST),
 )
 # 種類は config に固定する(フォルダの組は config の比較。マニフェストではマニフェストの値を使う)
 KIND_LABEL = "config"
-MANIFEST_VALUES = "組のファイルに書かれた値を使います(この画面では変えられません)"
-MANIFEST_LABEL = "組のファイル"
-LLM_CHECK_LABEL = "AI で解析する(送る前に、全部の組をまとめて1回確認します)"
+MANIFEST_VALUES = SMB_MANIFEST_VALUES
+MANIFEST_LABEL = BATCH_MANIFEST
+LLM_CHECK_LABEL = SMB_LLM_CHECK_LABEL
 JSONL_WILDCARD = "JSON Lines (*.jsonl)|*.jsonl"
 MANIFEST_WILDCARD = "YAML (*.yaml;*.yml)|*.yaml;*.yml"
-TEXT_WILDCARD = "テキスト (*.txt)|*.txt"
+TEXT_WILDCARD = SMB_TEXT_WILDCARD
 
 
 class BatchSetupError(Exception):
@@ -180,7 +194,7 @@ class PreparedBatch:
 def _side_selection(job: Job) -> str:
     before = selection_text(job.before.selection, job.before.selection_source)
     after = selection_text(job.after.selection, job.after.selection_source)
-    return before if before == after else f"変更前 {before} / 変更後 {after}"
+    return before if before == after else smb_side_selection(before, after)
 
 
 def pair_rows(jobs: Iterable[Job]) -> list[PairRow]:
@@ -188,7 +202,7 @@ def pair_rows(jobs: Iterable[Job]) -> list[PairRow]:
 
 
 def _manifest_error_text(exc: ManifestError) -> str:
-    lines = [f"組のファイルを読めません({len(exc.problems)} 件)。1件も比較していません"]
+    lines = [smb_manifest_error(len(exc.problems))]
     lines += [f"  {where}: {message}" for where, message in exc.problems]
     return "\n".join(lines)
 
@@ -249,7 +263,7 @@ def prepare_manifest(path: str | Path) -> PreparedBatch:
 def save_pairing_manifest(prepared: PreparedBatch, target: str | Path) -> Path:
     """「この組をマニフェストとして保存」。書く位置からの相対パスで書く。上書きしない(ManifestWriteError)。"""
     if prepared.pairing is None:
-        raise ManifestWriteError("フォルダから作った組だけを保存できます")
+        raise ManifestWriteError(SMB_SAVE_ONLY_FOLDER_PAIRS)
     path = Path(target)
     data = pairing_manifest(prepared.pairing, path.absolute().parent, mode=prepared.mode, platform=prepared.platform)
     return write_manifest(data, path)
@@ -321,7 +335,7 @@ def result_row(result: JobResult) -> ResultRow:
         job_name(result.job),
         _count(structured),
         _count(raw),
-        NO_COUNT if unparsed is None else f"前 {unparsed['before']} / 後 {unparsed['after']}",
+        NO_COUNT if unparsed is None else smb_unparsed_counts(unparsed["before"], unparsed["after"]),
         llm_column(result.outcome.llm),
         result_platform(result),
     )
@@ -549,10 +563,12 @@ def batch_report(results: Sequence[JobResult], words: Sequence[str]) -> Report:
         group = redact_text(job_name(job), words)
         for pair in job_pair_results(result.multi):
             shown = pair_report(multi_pair_name(job_name(job), pair.command), pair.outcome, words, **names)
-            pairs.append(replace(shown, group=group))
+            # コマンドは組の名前の形に頼らず別に持つ(出力の小見出しに出す。ADR-0190)
+            command = redact_text(pair.command, words) if pair.command is not None else ""
+            pairs.append(replace(shown, group=group, command=command))
     counts = {status: sum(1 for r in results if r.outcome.status == status) for status in STATUS_LABEL}
-    # 件数の箱(REQ-243)は状態の文と同じ数から作る(STATUS_LABEL の順)
-    boxes = tuple((label, counts[status]) for status, label in STATUS_LABEL.items())
+    # 件数の箱(REQ-243)は状態の文と同じ数から作る(STATUS_LABEL の順)。(鍵, 文, 数)。箱の色は鍵で選ぶ(ADR-0190)
+    boxes = tuple((status, label, counts[status]) for status, label in STATUS_LABEL.items())
     return Report(EXPORT_TITLE_BATCH, status_counts_text(counts), "", tuple(pairs), True, status_counts=boxes)
 
 
@@ -726,7 +742,7 @@ class ApprovalView:
 
 
 def effective_base_url(settings: LlmSettings) -> str:
-    return settings.base_url or f"{default_base_url(settings.api_format)}(既定)"
+    return settings.base_url or smb_default_url(default_base_url(settings.api_format))
 
 
 def approval_view(preview: BatchLlmPreview, settings: LlmSettings) -> ApprovalView:

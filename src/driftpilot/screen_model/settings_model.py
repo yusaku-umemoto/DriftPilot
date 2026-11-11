@@ -105,7 +105,9 @@ from driftpilot.llm_settings import (
     CLAUDE_CODE_CLI,
     CODEX_CLI,
     CUSTOM_HTTP_JSON,
+    LANGUAGE_KEY,
     PROMPT_TEMPLATE_KEY,
+    THEME_KEY,
     RESPONSES,
     DEFAULT_PROFILE_ID,
     ENV_API_KEY,
@@ -272,6 +274,31 @@ from driftpilot.messages import (
     workdir_secret_words_line,
 )
 from driftpilot.messages import (
+    SMS_AZURE_BASE_URL_EXAMPLE,
+    SMS_CONFIG_ABSENT,
+    SMS_DEFAULT_MARK,
+    SMS_ENV_SOURCE_LABEL,
+    SMS_FILE_SOURCE_USER_CONFIG,
+    SMS_FILE_SOURCE_WORKDIR,
+    SMS_KEY_SOURCE_KEYRING,
+    SMS_KEY_SOURCE_NONE,
+    SMS_KEY_SOURCE_USER_CONFIG,
+    SMS_MASKING_TABLE,
+    SMS_NOT_INSTALLED,
+    SMS_NOT_SET,
+    SMS_PATTERN_TABLE_A,
+    SMS_PATTERN_TABLE_FORTINET,
+    SMS_PATTERN_TABLE_FUJITSU_SIR,
+    SMS_SECRET_WORDS_NOTE,
+    SMS_UNKNOWN_TEMPLATE,
+    SMS_UNREADABLE,
+    sms_append_note,
+    sms_config_present,
+    sms_default_destination,
+    sms_no_profile,
+    sms_no_prompt_profile,
+    sms_secret_words,
+    sms_template_exists,
     PREMISE_SAVED,
     PREMISE_SECRET_REFUSED,
     PREMISE_TOO_LONG,
@@ -304,31 +331,32 @@ from driftpilot.user_config_writer import (
     remove_api_key,
     update_gui_auto_send,
     update_gui_items,
+    update_gui_display,
     update_gui_theme,
     update_llm_items,
 )
 
 # キーの読み元の名前。保管庫は OS で名前を変える(画面では store_name を使う。ここは OS を問わない名前)。
 # "env" はプロファイルのファイルが無いとき(共通の変数を読む)の名前。プロファイルがあるときは、そのプロファイルの変数の名前を出す
-ENV_SOURCE_LABEL = "環境変数"
+ENV_SOURCE_LABEL = SMS_ENV_SOURCE_LABEL
 KEY_SOURCE_LABEL = {
     "env": f"{ENV_SOURCE_LABEL} {ENV_API_KEY}",
-    "keyring": "OS の保管庫",
-    "user_config": "設定ファイル",
-    None: "未設定",
+    "keyring": SMS_KEY_SOURCE_KEYRING,
+    "user_config": SMS_KEY_SOURCE_USER_CONFIG,
+    None: SMS_KEY_SOURCE_NONE,
 }
-FILE_SOURCE_LABEL = {"workdir": "作業フォルダの設定ファイル", "user_config": "利用者ごとの設定ファイル"}
-NOT_SET = "(未設定)"
-DEFAULT_MARK = "(既定)"
-UNREADABLE = "(設定を読めません)"
-SECRET_WORDS_NOTE = "この語を含む行は AI に送る前に伏せます"
+FILE_SOURCE_LABEL = {"workdir": SMS_FILE_SOURCE_WORKDIR, "user_config": SMS_FILE_SOURCE_USER_CONFIG}
+NOT_SET = SMS_NOT_SET
+DEFAULT_MARK = SMS_DEFAULT_MARK
+UNREADABLE = SMS_UNREADABLE
+SECRET_WORDS_NOTE = SMS_SECRET_WORDS_NOTE
 # 指紋の表。機種ごとに別々に出す(まとめて1つにしない。ADR-0029 Action Item 5)。(表示名, 機種。None は A型)
 PATTERN_TABLES: tuple[tuple[str, str | None], ...] = (
-    ("読む表(Cisco 系・Arista = A型)", None),
-    ("読む表(富士通 Si-R)", "fujitsu_sir"),
-    ("読む表(FortiGate)", "fortinet"),
+    (SMS_PATTERN_TABLE_A, None),
+    (SMS_PATTERN_TABLE_FUJITSU_SIR, "fujitsu_sir"),
+    (SMS_PATTERN_TABLE_FORTINET, "fortinet"),
 )
-MASKING_TABLE = "伏せる表"
+MASKING_TABLE = SMS_MASKING_TABLE
 # API の形式の選択肢(編集の欄。値, 表示名)
 FORMAT_CHOICES: list[tuple[str, str]] = [(f, API_FORMAT_CHOICE[f]) for f in API_FORMATS]
 # 認証の見出しと thinking の選択肢(値, 表示名。REQ-100 §6.1)
@@ -367,7 +395,7 @@ class ProfileTemplate:
 PROFILE_TEMPLATES: dict[str, ProfileTemplate] = {
     "openai": ProfileTemplate(CHAT_COMPLETIONS, "https://api.openai.com/v1"),
     "openai-responses": ProfileTemplate(RESPONSES, "https://api.openai.com/v1"),
-    "azure-openai": ProfileTemplate(CHAT_COMPLETIONS, "https://<リソース名>.openai.azure.com/openai/v1", AUTH_API_KEY),
+    "azure-openai": ProfileTemplate(CHAT_COMPLETIONS, SMS_AZURE_BASE_URL_EXAMPLE, AUTH_API_KEY),
     "anthropic": ProfileTemplate(ANTHROPIC_MESSAGES, "https://api.anthropic.com"),
     "qwen": ProfileTemplate(
         CHAT_COMPLETIONS,
@@ -696,6 +724,7 @@ class ConfigFields:
     character は [gui] のキャラクターの絵(true のときだけ真。pywebview の画面だけが使う。ADR-0174 決定1)。
     auto_update_check は [gui] の自動アップデートチェック(true のときだけ真。「更新」のタブの専用の「保存」だけが書く。ADR-0188 決定2)。
     theme は [gui] の画面の色("system"・"light"・"dark"。「表示」のタブの専用の「保存」だけが書く。ADR-0189)。
+    language は [gui] の画面の言語("en"・"ja"・"system"。theme と同じ「保存」が書く。ADR-0190)。
     AI への指示文はこの枠から出した(指示文のプロファイルの枠。PromptPane。REQ-116 §3)。
     """
 
@@ -711,6 +740,7 @@ class ConfigFields:
     character: bool = False
     auto_update_check: bool = False
     theme: str = "system"
+    language: str = "en"
 
     @property
     def words_text(self) -> str:
@@ -814,8 +844,8 @@ def config_state(path: Path) -> str:
     try:
         mtime = path.stat().st_mtime
     except OSError:
-        return "なし"
-    return f"あり(更新 {datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')})"
+        return SMS_CONFIG_ABSENT
+    return sms_config_present(datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"))
 
 
 def folder_to_open(path: Path) -> Path:
@@ -837,7 +867,7 @@ def fingerprint_rows() -> list[FingerprintRow]:
 
 def version_rows(wx_version: str | None, *, web_version: str | None = None) -> list[tuple[str, str]]:
     """「診断」の版の行。web_version(pywebview の版)を渡すと、wxPython の行の代わりに selfcheck と同じ行を出す(REQ-104 §4)。"""
-    gui_row = ("wxPython", wx_version or "(入っていません)")
+    gui_row = ("wxPython", wx_version or SMS_NOT_INSTALLED)
     if web_version is not None:
         gui_row = (SELFCHECK_GUI_WEB, f"pywebview {web_version}")
     return [
@@ -1110,7 +1140,7 @@ def settings_view(
         key_source=_source_label(chosen.api_key_source, store, chosen),
         model=model,
         base_url=base_url,
-        secret_words=f"{len(words)} 語" + (f": {', '.join(words)}" if words else ""),
+        secret_words=sms_secret_words(words),
         workdir_warning=warning,
         status=status,
         status_ok=status_ok,
@@ -1141,6 +1171,7 @@ def settings_view(
             snapshot.character,
             snapshot.auto_update_check,
             snapshot.theme,
+            snapshot.language,
         ),
         limits_warning=(
             workdir_limits_ignored(workdir or Path("driftpilot.toml").absolute(), active.ignored_workdir_limits)
@@ -1162,6 +1193,7 @@ def _config_fields(
     character: bool = False,
     auto_update_check: bool = False,
     theme: str = "system",
+    language: str = "en",
 ) -> ConfigFields:
     note = "\n".join(
         [
@@ -1181,6 +1213,7 @@ def _config_fields(
         character=character,
         auto_update_check=auto_update_check,
         theme=theme,
+        language=language,
     )
 
 
@@ -1192,7 +1225,7 @@ def _migrate_problem() -> str | None:
 def create_template(view: SettingsView) -> Path:
     """「ひな形を作る」。設定ファイルが無いときだけ作る(あれば SettingsError。上書きしない)。"""
     if not view.can_write_template:
-        raise SettingsError(f"{view.config_path}: 既にあります。上書きしません")
+        raise SettingsError(sms_template_exists(view.config_path))
     return write_template(view.config_path)
 
 
@@ -1200,7 +1233,7 @@ def create_template(view: SettingsView) -> Path:
 
 
 def _no_profile(path: Path) -> SettingsError:
-    return SettingsError(f"{path}: 指定した id のプロファイルがありません")
+    return SettingsError(sms_no_profile(path))
 
 
 def _ensure_saved(
@@ -1364,7 +1397,7 @@ def save_as_new(
         return ProfileAction(False, str(exc), source_id)
     message = profile_saved(profile.name)
     if suffix_dropped:
-        message = f"{message}。{ENV_SUFFIX_NOT_COPIED}"
+        message = sms_append_note(message, ENV_SUFFIX_NOT_COPIED)
     return ProfileAction(True, message, profile.id)
 
 
@@ -1434,7 +1467,7 @@ def add_new_profile(
     """
     chosen = PROFILE_TEMPLATES.get(template)
     if chosen is None:
-        raise SettingsError("ひな形の種類が違います")
+        raise SettingsError(SMS_UNKNOWN_TEMPLATE)
     if template == DEFAULT_TEMPLATE:
         make_name: Callable[[int], str] = new_profile_name
     else:
@@ -1925,7 +1958,7 @@ def auto_send_start(
     if start.plan is None:
         return AutoSendStart(refused=auto_send_unusable(start.refused or ""))
     plan = start.plan
-    destination = plan.base_url or f"既定（{plan.default_base_url}）"
+    destination = plan.base_url or sms_default_destination(plan.default_base_url)
     return AutoSendStart(confirm=auto_send_confirm(start.profile_name or DEFAULT_PROFILE_NAME, destination))
 
 
@@ -2050,6 +2083,37 @@ def save_gui_theme(
     return ConfigAction(True, config_saved(path))
 
 
+def save_gui_display(
+    fields: ConfigFields,
+    theme: str,
+    language: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> ConfigAction:
+    """「表示」のタブの「保存」。[gui] の theme と language のうち、読んだときと違うものだけを 1 回で書く(ADR-0190)。
+
+    書き方は save_gui_theme と同じ(読んだときのハッシュを付け、ほかで変わっていたら書かずに reload を立てる)。
+    どちらも読んだときと同じなら何も書かない。ほかの項目には触らない。3 つ以外の値なら書かずに理由を返す。
+    """
+    changed: dict[str, object] = {}
+    if theme != fields.theme:
+        changed[THEME_KEY] = theme
+    if language != fields.language:
+        changed[LANGUAGE_KEY] = language
+    if not changed:
+        return ConfigAction(True, CONFIG_NOT_CHANGED)
+    path = user_config_path(platform=platform, env=env, home=home).absolute()
+    try:
+        update_gui_display(path, fields.digest, changed)
+    except ConfigChanged:
+        return ConfigAction(False, CONFIG_CHANGED_ELSEWHERE, reload=True)
+    except SettingsError as exc:
+        return ConfigAction(False, config_not_saved(str(exc)))
+    return ConfigAction(True, config_saved(path))
+
+
 def config_changed(
     digest: str | None,
     *,
@@ -2110,7 +2174,7 @@ def _prompt_path(env: Mapping[str, str] | None, platform: str | None, home: Path
 
 
 def _no_prompt(path: Path) -> SettingsError:
-    return SettingsError(f"{path}: 指定した id のプロンプトのプロファイルがありません")
+    return SettingsError(sms_no_prompt_profile(path))
 
 
 def _user_prompt_note(env: Mapping[str, str] | None, platform: str | None, home: Path | None) -> str | None:

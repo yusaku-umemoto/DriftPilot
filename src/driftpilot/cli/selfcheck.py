@@ -29,13 +29,17 @@ from typing import Any
 from driftpilot import __version__
 from driftpilot.cli.output import write_machine
 from driftpilot.messages import (
+    CLI_HELP,
     SELFCHECK_ALL_OK,
     SELFCHECK_BUNDLED,
+    SELFCHECK_CISCO_FAMILY,
     SELFCHECK_GUI_WEB,
     SELFCHECK_HELP,
+    SELFCHECK_ITEM_SEPARATOR,
     SELFCHECK_KEY_STORE,
     SELFCHECK_LLM,
     SELFCHECK_METADATA,
+    SELFCHECK_PART_SEPARATOR,
     SELFCHECK_PATTERNS,
     SELFCHECK_SIGNATURE,
     SELFCHECK_TEMPLATES,
@@ -124,7 +128,7 @@ class _Failed(Exception):
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--format", choices=["text", "json"], default="text", help="出力形式(既定: text)")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help=CLI_HELP["format_text"])
 
 
 def add_parser(sub: Any) -> None:
@@ -170,7 +174,7 @@ def _bundled_defaults() -> str:
 
 
 def _check_bundled() -> Check:
-    return Check(SELFCHECK_BUNDLED, True, "・".join([_bundled_rules(), _bundled_defaults()]))
+    return Check(SELFCHECK_BUNDLED, True, SELFCHECK_PART_SEPARATOR.join([_bundled_rules(), _bundled_defaults()]))
 
 
 def _check_patterns() -> Check:
@@ -180,8 +184,8 @@ def _check_patterns() -> Check:
     parts = []
     for name in (None, *CONFIG_PLATFORMS):
         fp = patterns_fingerprint(name)
-        parts.append(selfcheck_fingerprint(name or "Cisco 系", fp.digest, fp.count))
-    return Check(SELFCHECK_PATTERNS, True, "、".join(parts))
+        parts.append(selfcheck_fingerprint(name or SELFCHECK_CISCO_FAMILY, fp.digest, fp.count))
+    return Check(SELFCHECK_PATTERNS, True, SELFCHECK_ITEM_SEPARATOR.join(parts))
 
 
 def _template_dir() -> Path:
@@ -218,7 +222,7 @@ def _check_metadata() -> Check:
             missing.append(name)
     if missing:
         return Check(SELFCHECK_METADATA, False, selfcheck_metadata_missing(missing))
-    return Check(SELFCHECK_METADATA, True, "・".join(found))
+    return Check(SELFCHECK_METADATA, True, SELFCHECK_PART_SEPARATOR.join(found))
 
 
 # RFC 8032 の 7.1 の TEST 1(公開の鍵・空の文・署名)。署名の確かめの部品(cryptography)が動くかを見る(REQ-253 §10)

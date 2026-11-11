@@ -14,6 +14,7 @@ from driftpilot.cli.commands import EXIT_ERROR, add_llm_profile_argument, load_l
 from driftpilot.llm_analyzer import ConnectionCheckResult, send_connection_check
 from driftpilot.llm_settings import prepare_connection_check, store_name
 from driftpilot.messages import (
+    CLI_HELP,
     LLM_CHECK_ASK,
     LLM_CHECK_DECLINED,
     LLM_CHECK_NOT_A_TERMINAL,
@@ -29,11 +30,8 @@ EXIT_NOT_SENT = EXIT_ERROR  # 2
 
 
 def add_parser(sub: Any) -> None:
-    chk = sub.add_parser(
-        "llm-check",
-        help="AI に決まった短い文を1回だけ送り、キーとモデルでつながるかを確かめる(ごく少額の料金がかかりうる)",
-    )
-    chk.add_argument("--yes", action="store_true", help="送る前の確認を飛ばす(入力が端末でないときは必須)")
+    chk = sub.add_parser("llm-check", help=CLI_HELP["llm_check.help"])
+    chk.add_argument("--yes", action="store_true", help=CLI_HELP["llm_check.yes"])
     add_llm_profile_argument(chk)
 
 

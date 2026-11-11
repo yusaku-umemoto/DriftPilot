@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from driftpilot import __version__
+from driftpilot.messages import UPDATE_TEXTS as _T
 from driftpilot.update.check import INSTALL_MAC_APP, INSTALL_WINDOWS_ZIP, install_kind, parse_version
 from driftpilot.update.download import APP_BINARY, DITTO, ZIP_FORBIDDEN_TOP, ZIP_ROOT
 from driftpilot.update.prepare import (
@@ -148,7 +149,7 @@ def _ditto(source: Path, dest: Path) -> None:
         raise FileExistsError(dest.name)
     result = subprocess.run([DITTO, str(source), str(dest)], check=False, capture_output=True)
     if result.returncode != 0:
-        raise OSError(f"ditto が {result.returncode} で終わりました")
+        raise OSError(_T["ditto_failed"].format(code=result.returncode))
 
 
 def _remove(path: Path) -> None:
@@ -198,46 +199,46 @@ def read_plan(path: Path | str, *, version: str = __version__, home: Path | None
     """plan.json を読み、形・場所・版を確かめる。合わなければ PlanError(何も書かない)。"""
     path = Path(path)
     if path.name != PLAN_NAME:
-        raise PlanError("名前")
+        raise PlanError(_T["plan_name"])
     try:
         with open(path, "rb") as stream:
             data = stream.read(PLAN_MAX_BYTES + 1)
     except OSError:
-        raise PlanError("読めない") from None
+        raise PlanError(_T["plan_unreadable"]) from None
     if len(data) > PLAN_MAX_BYTES:
-        raise PlanError("大きすぎる")
+        raise PlanError(_T["plan_too_large"])
     try:
         raw = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        raise PlanError("JSON でない") from None
+        raise PlanError(_T["plan_not_json"]) from None
     if not isinstance(raw, dict) or not all(key in raw for key in _PLAN_KEYS):
-        raise PlanError("欄が無い")
+        raise PlanError(_T["plan_missing_field"])
     if not all(isinstance(raw[key], str) for key in _PLAN_KEYS if key != "pid"):
-        raise PlanError("型")
+        raise PlanError(_T["plan_type"])
     pid = raw["pid"]
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         raise PlanError("pid")
     kind = raw["kind"]
     if kind not in SUPPORTED_KINDS:
-        raise PlanError("入れ方")
+        raise PlanError(_T["plan_kind"])
     old, new, mine = parse_version(raw["from_version"]), parse_version(raw["to_version"]), parse_version(version)
     if old is None or new is None or mine is None or mine != new or not new > old:
-        raise PlanError("版")
+        raise PlanError(_T["plan_version"])
     if not VERSION_DIR.fullmatch(raw["to_version"]) or not VERSION_DIR.fullmatch(raw["from_version"]):
-        raise PlanError("版の形")
+        raise PlanError(_T["plan_version_form"])
     target, staging = Path(raw["target"]), Path(raw["staging"])
     if not target.is_absolute() or not staging.is_absolute():
-        raise PlanError("場所")
+        raise PlanError(_T["plan_location"])
     if not _same(path.parent, staging):
-        raise PlanError("plan.json の場所")
+        raise PlanError(_T["plan_location_file"])
     if staging.name != raw["to_version"]:
-        raise PlanError("準備のフォルダーの名前")
+        raise PlanError(_T["plan_staging_name"])
     if kind == INSTALL_WINDOWS_ZIP:
         if staging.parent.name.casefold() != UPDATE_DIR or not _same(staging.parent.parent, target):
-            raise PlanError("準備のフォルダーの場所")
+            raise PlanError(_T["plan_staging_location"])
     else:
         if not target.name.endswith(".app") or not _same(staging.parent, staging_root(kind, target, home)):
-            raise PlanError("準備のフォルダーの場所")
+            raise PlanError(_T["plan_staging_location"])
     return Plan(raw["from_version"], raw["to_version"], kind, target, staging, pid, raw["key"])
 
 
@@ -313,7 +314,7 @@ def _swap_windows(plan: Plan, ops: Ops, log: UpdateLog, swap: _Swap) -> None:
         child.name for child in source_root.iterdir() if child.name.casefold() not in ZIP_FORBIDDEN_TOP
     )
     if not names:
-        raise OSError("新しい中身がありません")
+        raise OSError(_T["no_new_content"])
     if swap.backup.exists():
         _retry(ops, lambda: ops.remove(swap.backup))  # 前の失敗の残り(元に戻した後なので要らない)
     swap.backup.mkdir(parents=True)
@@ -345,7 +346,7 @@ def _swap_mac(plan: Plan, ops: Ops, log: UpdateLog, swap: _Swap) -> None:
     source = plan.staging / NEW_DIR / "DriftPilot.app"
     copy_in = _copier(ops, plan.kind)
     if not source.is_dir():
-        raise OSError("新しい中身がありません")
+        raise OSError(_T["no_new_content"])
     if swap.backup.exists() or swap.backup.is_symlink():
         _retry(ops, lambda: ops.remove(swap.backup))
     _retry(ops, lambda: ops.move(plan.target, swap.backup))

@@ -61,11 +61,15 @@ from driftpilot.llm_analyzer.redact import RedactedResult, RedactError, redact_r
 from driftpilot.llm_settings import LlmSettings, SettingsError, current_premise
 from driftpilot.llm_settings import build_request as build_llm_request
 from driftpilot.messages import (
+    SMODEL_TEXTS,
     AUTO_PLATFORM_LABEL,
     COMPARE_KIND_TROUBLE,
     COMPARE_PLATFORM_TROUBLE,
     COMPARE_TAB_OFF_MODE_RAW,
     COMPARE_TAB_OFF_SHOW,
+    COMPARE_TAB_RAW,
+    COMPARE_TAB_STRUCTURED,
+    COMPARE_TAB_UNPARSED,
     EXPORT_CHOICE_CANCEL,
     EXPORT_CHOICE_DIFFS,
     EXPORT_CHOICE_HTML,
@@ -89,6 +93,28 @@ from driftpilot.messages import (
     RAW_MARK_IGNORED,
     RAW_REPLACE_EXAMPLES,
     RAW_SETTINGS_SAVED_PREFIX,
+    SM_ALL_RAW_CATEGORY,
+    SM_BREAKDOWN_STRUCTURED,
+    SM_CANCELLED,
+    SM_DEFAULT_PLATFORM_SHORT,
+    SM_MODE_BOTH,
+    SM_MODE_RAW,
+    SM_MODE_STRUCTURED,
+    SM_NO_INPUT,
+    SM_PASTED_NAME,
+    SM_PICK_SEGMENT,
+    SM_PLATFORM_UNSPECIFIED,
+    SM_RAW_OFF_BY_MODE,
+    SM_SELECT_KIND_PROMPT,
+    SM_SET_ASIDE_SEPARATOR,
+    SM_SIDE_LABEL,
+    SM_STAGE_LABEL,
+    SM_STALE_RESULT,
+    SM_SUMMARY_SEPARATOR,
+    SM_UNKNOWN_COMMAND,
+    SM_UNPARSED_NOTE,
+    SM_UNPARSED_OFF,
+    SM_WHOLE_ROW,
     STATUS_LABEL,
     STATUS_ORDER_ONLY,
     auto_platform_text,
@@ -114,6 +140,20 @@ from driftpilot.messages import (
     saved_notice,
     single_pair_name,
     single_row_name,
+    sm_auto_decided_config,
+    sm_auto_decided_show,
+    sm_count_notices,
+    sm_count_raw,
+    sm_count_show,
+    sm_count_structured,
+    sm_count_unparsed,
+    sm_count_warnings,
+    sm_input_lines,
+    sm_input_sections,
+    sm_preview_summary,
+    sm_select_segment_prompt,
+    sm_show_fell_back,
+    sm_unparsed_pair,
     status_breakdown,
     unpaired_place,
     unpaired_row_name,
@@ -146,35 +186,27 @@ Mode = Literal["structured", "raw", "both"]
 KindChoice = Literal["config", "show", "auto"]
 
 SIDES: tuple[Side, ...] = ("before", "after")
-SIDE_LABEL = {"before": "変更前", "after": "変更後"}
+SIDE_LABEL = SM_SIDE_LABEL
 # 画面の選択肢(値, 表示)。順番は画面に並ぶ順
-MODE_CHOICES: tuple[tuple[Mode, str], ...] = (("both", "両方"), ("structured", "構造化"), ("raw", "単純"))
-KIND_CHOICES: tuple[tuple[KindChoice, str], ...] = (("config", "config"), ("show", "show"), ("auto", "自動"))
+MODE_CHOICES: tuple[tuple[Mode, str], ...] = (("both", SM_MODE_BOTH), ("structured", SM_MODE_STRUCTURED), ("raw", SM_MODE_RAW))
+KIND_CHOICES: tuple[tuple[KindChoice, str], ...] = (("config", "config"), ("show", "show"), ("auto", AUTO_PLATFORM_LABEL))
 # 種類が config のときの機種(パーサーの系統)。先頭が既定(指定なし=A型)、残りは CLI の --platform と同じ一覧(REQ-25 パート C)
-CONFIG_PLATFORM_CHOICES: tuple[tuple[str, str], ...] = (("", "Cisco 系・Arista(指定なし)"),) + tuple(
+CONFIG_PLATFORM_CHOICES: tuple[tuple[str, str], ...] = (("", SM_PLATFORM_UNSPECIFIED),) + tuple(
     (name, name) for name in CONFIG_PLATFORMS
 )
 # 機種の自動(ADR-0151 決定4)。pywebview の比較の窓・一括比較の窓の機種の選択肢。先頭が自動、残りは CONFIG_PLATFORM_CHOICES
 WEB_PLATFORM_CHOICES: tuple[tuple[str, str], ...] = ((AUTO_PLATFORM, AUTO_PLATFORM_LABEL),) + CONFIG_PLATFORM_CHOICES
-PASTED_NAME = {"before": "貼り付け(変更前)", "after": "貼り付け(変更後)"}
+PASTED_NAME = SM_PASTED_NAME
 # 進捗の工程名の表示(core の STAGES と同じ並び)
-STAGE_LABEL = {
-    "split": "区間を切り分けています",
-    "select": "区間を選んでいます",
-    "detect_kind": "入力の種類を判定しています",
-    "compare": "比較しています",
-    "safety_checks": "安全網を確認しています",
-    "llm": "AI 解析をしています",
-    "done": "表示しています",
-}
+STAGE_LABEL = SM_STAGE_LABEL
 OP_LABEL = {"added": OP_ADDED, "removed": OP_REMOVED, "changed": OP_CHANGED}
-AUTO_SEGMENT = "自動"
-PICK_SEGMENT = "(選んでください)"
-UNKNOWN_COMMAND = "(コマンド不明)"
-WHOLE_ROW = "(行全体)"
-NO_INPUT = "未選択"
-CANCELLED = "中止しました"
-STALE_RESULT = "入力か設定を変えました。表示中の結果は前の入力のものです。保存するには、もう一度比較してください"
+AUTO_SEGMENT = AUTO_PLATFORM_LABEL
+PICK_SEGMENT = SM_PICK_SEGMENT
+UNKNOWN_COMMAND = SM_UNKNOWN_COMMAND
+WHOLE_ROW = SM_WHOLE_ROW
+NO_INPUT = SM_NO_INPUT
+CANCELLED = SM_CANCELLED
+STALE_RESULT = SM_STALE_RESULT
 
 
 def stage_label(stage: str) -> str:
@@ -308,9 +340,9 @@ def input_summary(source: SideSource | None, segment_count: int | None = None) -
     """入力欄の横の「行数と区間数」。区間数は比較の後にだけ分かる(core の切り分けの結果)。"""
     if source is None:
         return NO_INPUT
-    text = f"{source.line_count:,} 行"
+    text = sm_input_lines(source.line_count)
     if segment_count is not None:
-        text += f" / {segment_count} 区間"
+        text += sm_input_sections(segment_count)
     return text
 
 
@@ -353,17 +385,17 @@ def read_counts(outcome: CompareOutcome) -> Counts:
 def counts_text(counts: Counts) -> str:
     parts: list[str] = []
     if counts.structured is not None:
-        parts.append(f"構造化 {counts.structured}")
+        parts.append(sm_count_structured(counts.structured))
     if counts.show is not None:
-        parts.append(f"show 構造化 {counts.show}")
+        parts.append(sm_count_show(counts.show))
     if counts.raw is not None:
-        parts.append(f"単純 {counts.raw}")
+        parts.append(sm_count_raw(counts.raw))
     if counts.unparsed is not None:
-        parts.append(f"構造化不可の行 前 {counts.unparsed['before']} / 後 {counts.unparsed['after']}")
+        parts.append(sm_count_unparsed(counts.unparsed["before"], counts.unparsed["after"]))
     if counts.warnings:
-        parts.append(f"警告 {counts.warnings}")
+        parts.append(sm_count_warnings(counts.warnings))
     if counts.notices:
-        parts.append(f"注意 {counts.notices}")
+        parts.append(sm_count_notices(counts.notices))
     return "  ".join(parts)
 
 
@@ -372,20 +404,25 @@ def tab_titles(counts: Counts) -> dict[str, str]:
     structured = counts.structured if counts.structured is not None else counts.show
     unparsed = counts.unparsed
     return {
-        "structured": "構造化比較" + (f" ({structured})" if structured is not None else ""),
-        "raw": "単純比較" + (f" ({counts.raw})" if counts.raw is not None else ""),
-        "unparsed": "構造化不可の行" + (f" (前 {unparsed['before']} / 後 {unparsed['after']})" if unparsed is not None else ""),
+        "structured": COMPARE_TAB_STRUCTURED + (f" ({structured})" if structured is not None else ""),
+        "raw": COMPARE_TAB_RAW + (f" ({counts.raw})" if counts.raw is not None else ""),
+        "unparsed": COMPARE_TAB_UNPARSED + (f" ({sm_unparsed_pair(unparsed['before'], unparsed['after'])})" if unparsed is not None else ""),
     }
 
 
 @dataclass(frozen=True)
 class StructuredRow:
+    """構造化比較の表の 1 行。op は操作の欄の文(言語で変わる)。op_key は言語によらない鍵("added"・"removed"・"changed"、
+    どれでもなければ "")で、変更の行の印の判定など、行の見分けはこちらで行う(ADR-0190)。
+    """
+
     op: str
     category: str
     target: str
     item: str
     before: str
     after: str
+    op_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -525,6 +562,11 @@ def _diff_value(d: Any, side: str) -> str:
     return _value(value)
 
 
+def _op_key(op: str) -> str:
+    """core の操作(added・removed・changed)なら、そのまま言語によらない鍵。ほかは空(ADR-0190)。"""
+    return op if op in OP_LABEL else ""
+
+
 def _structured_rows(outcome: CompareOutcome) -> list[StructuredRow]:
     if outcome.show is not None:
         rows = []
@@ -534,9 +576,13 @@ def _structured_rows(outcome: CompareOutcome) -> list[StructuredRow]:
                 fields = d["fields"]
                 before = ", ".join(f"{c}: {b!r}" for c, (b, _a) in fields.items())
                 after = ", ".join(f"{c}: {a!r}" for c, (_b, a) in fields.items())
-                rows.append(StructuredRow(OP_LABEL["changed"], "show", target, ", ".join(fields), before, after))
+                rows.append(StructuredRow(OP_LABEL["changed"], "show", target, ", ".join(fields), before, after, "changed"))
             else:
-                rows.append(StructuredRow(OP_LABEL.get(d["op"], d["op"]), "show", target, "", _value(d["before"]), _value(d["after"])))
+                rows.append(
+                    StructuredRow(
+                        OP_LABEL.get(d["op"], d["op"]), "show", target, "", _value(d["before"]), _value(d["after"]), _op_key(d["op"])
+                    )
+                )
         return rows
     if outcome.structured is None:
         return []
@@ -549,6 +595,7 @@ def _structured_rows(outcome: CompareOutcome) -> list[StructuredRow]:
             " > ".join(d["path"]),
             _diff_value(d, "before"),
             _diff_value(d, "after"),
+            _op_key(d["op"]),
         )
         for d in outcome.structured.diffs
     ]
@@ -560,7 +607,7 @@ def _structured_note(outcome: CompareOutcome) -> str | None:
     if outcome.mode == "raw":
         return COMPARE_TAB_OFF_MODE_RAW
     if outcome.show is not None and outcome.show.method == "raw":
-        return f"show のテンプレートで読めないため、単純比較にしました: {outcome.show.fallback_reason}"
+        return sm_show_fell_back(outcome.show.fallback_reason)
     if outcome.kind == "config" and outcome.structured is None:
         return outcome.error.message if outcome.error else None
     if (outcome.show is not None and not outcome.show.diffs) or (outcome.structured is not None and not outcome.structured.diffs):
@@ -587,7 +634,7 @@ def _raw_note(outcome: CompareOutcome) -> str | None:
     if outcome.kind is None:
         return None
     if outcome.raw is None:
-        return "比較方式が「構造化」のため、単純比較をしていません"
+        return SM_RAW_OFF_BY_MODE
     if not outcome.raw.diffs:
         return STATUS_LABEL["no_difference"]
     return None
@@ -752,8 +799,8 @@ def raw_marks(rows: Sequence[RawRow]) -> list[dict[str, Any]]:
 
 
 def structured_marks(rows: Sequence[StructuredRow]) -> list[dict[str, Any]]:
-    """構造化比較の表の印。操作が「変更」の行の変更前と変更後。"""
-    return _marks_of((k, r.before, r.after) for k, r in enumerate(rows) if r.op == OP_LABEL["changed"])
+    """構造化比較の表の印。操作が「変更」の行(op_key が changed。文では見分けない)の変更前と変更後。"""
+    return _marks_of((k, r.before, r.after) for k, r in enumerate(rows) if r.op_key == "changed")
 
 
 def category_counts(rows: Sequence[StructuredRow]) -> list[tuple[str, int]]:
@@ -773,14 +820,14 @@ def _unparsed(outcome: CompareOutcome) -> tuple[list[UnparsedRow], str | None]:
     if outcome.kind is None:
         return [], None
     if outcome.structured is None:
-        return [], "構造化比較をしていないため、対象外です"
+        return [], SM_UNPARSED_OFF
     rows = []
     for d in outcome.structured.diffs:
         if d["category"] != "unparsed":
             continue
         line_path = d["before"] if d["op"] == "removed" else d["after"]
         rows.append(UnparsedRow(OP_LABEL.get(d["op"], d["op"]), line_path[-1], " > ".join(line_path[:-1])))
-    note = "一覧は、変更前と変更後で違う構造化不可の行だけです。両側で同じ構造化不可の行は、見出しの件数にだけ含まれます"
+    note = SM_UNPARSED_NOTE
     return rows, note
 
 
@@ -820,7 +867,7 @@ def _selection(outcome: CompareOutcome) -> SelectionView | None:
             reason="ambiguous_format",
             waiting=[],
             candidates={},
-            prompt="入力の種類を判定できません。「機種」と「show のコマンド」を入力するか、種類を config か show にして、もう一度比較してください",
+            prompt=SM_SELECT_KIND_PROMPT,
             detail=outcome.selection_detail.get("message"),
             focus_format_fields=True,
         )
@@ -829,7 +876,7 @@ def _selection(outcome: CompareOutcome) -> SelectionView | None:
         reason=outcome.selection_reason or "segment",
         waiting=waiting,
         candidates={side: _choices_from_candidates(outcome, side) for side in waiting},
-        prompt=f"{'・'.join(SIDE_LABEL[s] for s in waiting)}に区間が複数あります。比較する区間を選んで、もう一度比較してください",
+        prompt=sm_select_segment_prompt([SIDE_LABEL[s] for s in waiting]),
         detail=None,
         focus_format_fields=False,
     )
@@ -877,7 +924,7 @@ def _status_text_web(outcome: CompareOutcome, selection: SelectionView | None, c
     if outcome.status != "difference" or selection is not None or outcome.error is not None or counts.raw is None:
         return plain
     if counts.structured is not None:
-        label, structured = "構造化", counts.structured
+        label, structured = SM_BREAKDOWN_STRUCTURED, counts.structured
     elif counts.show is not None:
         label, structured = "show", counts.show
     else:
@@ -948,8 +995,8 @@ def view_outcome(outcome: CompareOutcome) -> OutcomeView:
 
 
 # 比較の設定の要約(REQ-206 §2)で、config の機種が「指定なし」のときの短い名前
-DEFAULT_PLATFORM_SHORT = "Cisco 系"
-SUMMARY_SEPARATOR = "・"
+DEFAULT_PLATFORM_SHORT = SM_DEFAULT_PLATFORM_SHORT
+SUMMARY_SEPARATOR = SM_SUMMARY_SEPARATOR
 
 
 def settings_summary(mode: str, kind: str, config_platform: int, platform: str, command: str) -> str:
@@ -1012,9 +1059,9 @@ def _web_settings_summary(
         shown = auto_platform_text(used) if decided == "config" else AUTO_PLATFORM_LABEL
         return SUMMARY_SEPARATOR.join(["config", shown, mode_text])
     if decided == "config":
-        head = f"{AUTO_PLATFORM_LABEL}（config{SUMMARY_SEPARATOR}{platform_label(used)}）"
+        head = sm_auto_decided_config(platform_label(used))
     elif decided == "show":
-        head = f"{AUTO_PLATFORM_LABEL}（show）"
+        head = sm_auto_decided_show()
     else:
         head = AUTO_PLATFORM_LABEL
     return SUMMARY_SEPARATOR.join([head, mode_text])
@@ -1096,25 +1143,25 @@ def read_raw_form(value: object) -> RawForm:
     前後の行数が整数で 0〜20 でなければ(null も)、problems に RAW_CONTEXT_PROBLEM を入れる(REQ-228 §2)。
     """
     if not isinstance(value, dict) or set(value) != set(_RAW_FORM_KEYS):
-        raise ValueError("単純比較の設定の形が違います")
+        raise ValueError(SMODEL_TEXTS["raw_form_shape"])
     ignore = value["ignore_lines"]
     if not isinstance(ignore, str) or len(ignore) > MAX_RAW_FORM_IGNORE_CHARS:
-        raise ValueError("無視する行の形が違います")
+        raise ValueError(SMODEL_TEXTS["raw_ignore_shape"])
     items = value["replacements"]
     if (
         not isinstance(items, list)
         or len(items) > MAX_RAW_REPLACEMENT_ROWS
         or not all(isinstance(item, list) and len(item) == 2 and all(isinstance(x, str) for x in item) for item in items)
     ):
-        raise ValueError("置き換えの形が違います")
+        raise ValueError(SMODEL_TEXTS["raw_replace_shape"])
     if not isinstance(value["whitespace"], str):
-        raise ValueError("空白の違いの形が違います")
+        raise ValueError(SMODEL_TEXTS["raw_whitespace_shape"])
     if type(value["ignore_blank_lines"]) is not bool or type(value["ignore_case"]) is not bool:
-        raise ValueError("空行・大文字と小文字の形が違います")
+        raise ValueError(SMODEL_TEXTS["raw_blank_case_shape"])
     if type(value["detect_moves"]) is not bool:
-        raise ValueError("行の移動の形が違います")
+        raise ValueError(SMODEL_TEXTS["raw_moves_shape"])
     if not isinstance(value["algorithm"], str):
-        raise ValueError("比べ方の形が違います")
+        raise ValueError(SMODEL_TEXTS["raw_algorithm_shape"])
     context = read_context_lines(value["context_lines"])
     ignore_lines: list[str] = []
     ignore_rows: list[int] = []  # 欄の何行目か(1 始まり)
@@ -1206,7 +1253,7 @@ def raw_set_aside_text(record: RawOptionsRecord | None) -> str | None:
     if record.options.get("algorithm") == "minimal" and record.algorithm_used == "standard":
         parts.append(RAW_ALGORITHM_FELL_BACK)
     shown = [part for part in parts if part is not None]
-    return "・".join(shown) if shown else None
+    return SM_SET_ASIDE_SEPARATOR.join(shown) if shown else None
 
 
 def raw_set_aside_rows(rows: Sequence[RawRow]) -> list[int]:
@@ -1332,7 +1379,7 @@ class PreviewView:
 def preview_view(llm: LlmAnalysis) -> PreviewView:
     return PreviewView(
         payload=llm.payload or "",
-        summary=f"送る差分 {llm.sent_diffs} 件(差分は全部で {llm.diff_total} 件)",
+        summary=sm_preview_summary(llm.sent_diffs, llm.diff_total),
         truncated=llm_truncated_lines(llm) if llm.truncated else [],
         unsent=llm_unsent_line(llm),
         unsent_shapes=llm_unsent_shape_lines(llm),
@@ -1342,7 +1389,7 @@ def preview_view(llm: LlmAnalysis) -> PreviewView:
 def approve(plan: LlmPlan, preview: LlmAnalysis) -> LlmRequest:
     """プレビューで「送信する」を押したときの要求。承認した内容(preview.payload)以外は送らない。"""
     if plan.send is None or plan.send.client is None or preview.payload is None:
-        raise ValueError("送信できる計画とプレビューがありません")
+        raise ValueError(SMODEL_TEXTS["no_plan_or_preview"])
     return replace(plan.send, client=ApprovedPromptClient(plan.send.client, preview.payload))
 
 
@@ -1736,7 +1783,7 @@ def pair_records(
 # --- 「全部」のタブと、行に合うタブ(ADR-0152 決定7・決定8) ---
 
 # 単純比較の差分の行を「全部」のタブに出すときのカテゴリ
-ALL_RAW_CATEGORY = "(行)"
+ALL_RAW_CATEGORY = SM_ALL_RAW_CATEGORY
 
 
 @dataclass(frozen=True)
@@ -1749,6 +1796,8 @@ class AllRow:
     target: str
     before: str
     after: str
+    # 言語によらない操作の鍵(構造化比較の行はその鍵、単純比較の「~」の行は "changed"、ほかは "")。印の判定はこの鍵で行う(ADR-0190)
+    op_key: str = ""
 
 
 def _target_item(target: str, item: str) -> str:
@@ -1784,12 +1833,12 @@ def all_rows(entries: Sequence[MultiEntry]) -> list[AllRow]:
         view = view_outcome(outcome)
         if view.structured_rows:
             rows += [
-                AllRow(name, r.op, r.category, _target_item(r.target, r.item), r.before, r.after)
+                AllRow(name, r.op, r.category, _target_item(r.target, r.item), r.before, r.after, r.op_key)
                 for r in view.structured_rows
             ]
             continue
         rows += [
-            AllRow(name, raw_mark_label(r), ALL_RAW_CATEGORY, "", r.before_text, r.after_text)
+            AllRow(name, raw_mark_label(r), ALL_RAW_CATEGORY, "", r.before_text, r.after_text, "changed" if r.mark == "~" else "")
             for r in view.raw_rows
             if r.is_diff
         ]
@@ -1797,8 +1846,8 @@ def all_rows(entries: Sequence[MultiEntry]) -> list[AllRow]:
 
 
 def all_marks(rows: Sequence[AllRow]) -> list[dict[str, Any]]:
-    """「全部」のタブの印。操作が「変更」の行の変更前と変更後。"""
-    return _marks_of((k, r.before, r.after) for k, r in enumerate(rows) if r.op == OP_LABEL["changed"])
+    """「全部」のタブの印。操作が「変更」の行(op_key が changed。文では見分けない)の変更前と変更後。"""
+    return _marks_of((k, r.before, r.after) for k, r in enumerate(rows) if r.op_key == "changed")
 
 
 def pair_tab(outcome: CompareOutcome | None) -> str | None:
@@ -2023,12 +2072,13 @@ def pair_columns(outcome: CompareOutcome) -> tuple[int | None, int | None, str, 
     """組の一覧の列(構造化比較の差分・単純比較の差分・構造化不可の行・AI)。一括比較の結果の一覧(result_row)と同じ値。"""
     counts = read_counts(outcome)
     structured = counts.structured if counts.structured is not None else counts.show
-    unparsed = NO_COUNT if counts.unparsed is None else f"前 {counts.unparsed['before']} / 後 {counts.unparsed['after']}"
+    unparsed = NO_COUNT if counts.unparsed is None else sm_unparsed_pair(counts.unparsed["before"], counts.unparsed["after"])
     return structured, counts.raw, unparsed, llm_column(outcome.llm)
 
 
 def _labelled(redacted: RedactedResult, raw_rows: Sequence[RawRow] = ()) -> RedactedResult:
-    """操作の欄を画面の表と同じ言葉(追加・削除・変更)にする。単純比較の文脈の行の印は空のまま。
+    """単純比較の行の印を画面の表と同じ言葉(追加・削除・変更・移動元…)にする。単純比較の文脈の行の印は空のまま。
+    構造化比較の行の操作は言語によらない鍵のまま(文は出力の側で引く)。
 
     移動元・移動先の行(REQ-228)は「移動元 1」「移動先 1」。番号は raw_rows(伏せる前の表の行)から、移動元は変更前の行番号、
     移動先は変更後の行番号で引く(伏せた行は移動の番号を持たないため)。
@@ -2041,9 +2091,9 @@ def _labelled(redacted: RedactedResult, raw_rows: Sequence[RawRow] = ()) -> Reda
             return raw_move_mark(row.mark, number)
         return _RAW_OP_LABEL.get(row.mark, row.mark)
 
-    diffs = [replace(d, op=OP_LABEL.get(d.op, d.op)) for d in redacted.diffs]
+    # 構造化比較の行の op は文にせず鍵のまま渡す(report_output が鍵から文と色を引く。ADR-0190)
     rows = [replace(r, mark=label(r)) for r in redacted.raw_rows]
-    return RedactedResult(diffs, rows, redacted.omitted_lines)
+    return RedactedResult(list(redacted.diffs), rows, redacted.omitted_lines)
 
 
 def pair_report(
@@ -2066,7 +2116,19 @@ def pair_report(
     status = STATUS_LABEL[outcome.status]
     structured, raw, unparsed, ai = pair_columns(outcome)
     if outcome.status in _STATUS_ONLY:
-        return ReportPair(shown_name, status, "", structured, raw, unparsed, ai, None, before_name=before_name, after_name=after_name)
+        return ReportPair(
+            shown_name,
+            status,
+            "",
+            structured,
+            raw,
+            unparsed,
+            ai,
+            None,
+            before_name=before_name,
+            after_name=after_name,
+            status_key=outcome.status,
+        )
     seg = outcome.segmentation
     bodies = {
         side: (seg[side].selected.body if seg is not None and seg[side].selected is not None else None) for side in SIDES
@@ -2098,6 +2160,7 @@ def pair_report(
         after_name,
         _raw_report_lines(outcome),
         first_request=first_request if answer is not None else None,
+        status_key=outcome.status,
     )
 
 
@@ -2128,6 +2191,7 @@ def compare_report(
         False,
         file_label(inp.before.name, words),
         file_label(inp.after.name, words),
+        status_key=pair.status_key,
     )
 
 
@@ -2166,6 +2230,7 @@ def multi_report(
         True,
         file_label(inp.before.name, words),
         file_label(inp.after.name, words),
+        status_key=view.status,
     )
 
 
@@ -2177,4 +2242,4 @@ def export_bytes(report: Report, kind: str, saved_at: datetime) -> bytes:
         return render_diffs_csv(report)
     if kind == EXPORT_PAIRS:
         return render_pairs_csv(report)
-    raise ValueError(f"出力の形が違います: {kind!r}")
+    raise ValueError(SMODEL_TEXTS["export_kind"].format(kind=kind))

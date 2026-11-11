@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from driftpilot import i18n
 from driftpilot.config_parser.family_hint import AUTO_PLATFORM
 from driftpilot.config_parser.platforms import CONFIG_PLATFORM_NAMES
 from driftpilot.core.compare import run_compare
@@ -38,6 +39,63 @@ from driftpilot.segmentation import InputNote
 if TYPE_CHECKING:
     # core.compare_all はこのモジュールの _LlmPerJob を読むので、実行時は関数の中で読む(循環を避ける)
     from driftpilot.core.compare_all import MultiCompareOutcome
+
+# 利用者に見える文。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)
+_TEXTS_JA = {
+    "interrupted": "{executed}/{total} 件で中断しました",
+    "top_level": "(最上位)",
+    "top_not_mapping": "マッピング(schema_version / defaults / jobs)にしてください",
+    "version_none": "(なし)",
+    "version_mismatch": "組のファイルの版が違います({shown}、読める版: {readable})。文字列で schema_version: \"{version}\" と書いてください",
+    "not_mapping": "マッピングにしてください",
+    "jobs_required": "比較の組(job)を1件以上、リストで書いてください",
+    "id_duplicate": "id {job_id} が jobs[{first}] と重複しています",
+    "unknown_key": "知らないキーです(書けるキー: {allowed})",
+    "job_only": "job ごとに書いてください(defaults には書けません)",
+    "platform_pair": "platform と show_command は両方セットで書いてください(片方だけは書けません)",
+    "mapping_selection": "マッピング(command か segment)にしてください",
+    "path_job_only": "path は job ごとに書いてください(defaults には書けません)",
+    "not_allowed": "{value} は使えません({choices})",
+    "rule_id_list": "ルール ID(文字列)のリストにしてください",
+    "non_empty_string": "空でない文字列にしてください",
+    "positive_int": "1 以上の整数にしてください",
+    "selection_either": "区間の指定は command と segment のどちらか一方にしてください",
+    "relative_path": "相対パス {raw} は使えません(基準になる組のファイルの位置がありません)。絶対パスにしてください",
+    "mapping_side": "マッピング(path と、必要なら command か segment)にしてください",
+    "input_path": "入力ファイルのパスを書いてください",
+    "id_quote_hint": "(数字だけの id は引用符で囲んでください: id: \"{job_id}\")",
+    "must_be_string": "文字列にしてください",
+    "side_required": "書いてください(path は必須です)",
+    "unexpected": "予期しないエラーで比較できませんでした: {error_type}: {error}",
+}
+_TEXTS_EN = {
+    "interrupted": "Interrupted after {executed} of {total} jobs",
+    "top_level": "(top level)",
+    "top_not_mapping": "Must be a mapping (schema_version / defaults / jobs)",
+    "version_none": "(none)",
+    "version_mismatch": "The pair file version does not match ({shown}; readable version: {readable}). Write it as a string: schema_version: \"{version}\"",
+    "not_mapping": "Must be a mapping",
+    "jobs_required": "Write at least one comparison pair (job) as a list",
+    "id_duplicate": "id {job_id} duplicates jobs[{first}]",
+    "unknown_key": "Unknown key (allowed keys: {allowed})",
+    "job_only": "Write this per job (it cannot be written in defaults)",
+    "platform_pair": "Write platform and show_command together (only one of them is not allowed)",
+    "mapping_selection": "Must be a mapping (command or segment)",
+    "path_job_only": "Write path per job (it cannot be written in defaults)",
+    "not_allowed": "{value} cannot be used ({choices})",
+    "rule_id_list": "Must be a list of rule IDs (strings)",
+    "non_empty_string": "Must be a non-empty string",
+    "positive_int": "Must be an integer of 1 or more",
+    "selection_either": "Specify the segment with either command or segment, not both",
+    "relative_path": "The relative path {raw} cannot be used (there is no pair file location to resolve it from). Use an absolute path",
+    "mapping_side": "Must be a mapping (path, and command or segment if needed)",
+    "input_path": "Write the path of the input file",
+    "id_quote_hint": " (Put an id made only of digits in quotes: id: \"{job_id}\")",
+    "must_be_string": "Must be a string",
+    "side_required": "This is required (path is required)",
+    "unexpected": "The comparison failed with an unexpected error: {error_type}: {error}",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 # マニフェストの版。結果の SCHEMA_VERSION とは別に上げ下げする
 MANIFEST_SCHEMA_VERSION = "1"
@@ -173,7 +231,7 @@ class BatchInterrupted(Exception):
 
     def __init__(self, summary: BatchSummary) -> None:
         self.summary = summary
-        super().__init__(f"{summary.executed}/{summary.total} 件で中断しました")
+        super().__init__(_T["interrupted"].format(executed=summary.executed, total=summary.total))
 
 
 # --- 全体の状態(決定6) ---
@@ -205,17 +263,18 @@ def parse_manifest(data: Any, *, base_dir: Path | None) -> Manifest:
     (GUI が画面で組んだものなど、基準の位置が無い)のとき、相対パスはエラーにする。
     """
     if not isinstance(data, dict):
-        raise ManifestError([("(最上位)", "マッピング(schema_version / defaults / jobs)にしてください")])
+        raise ManifestError([(_T["top_level"], _T["top_not_mapping"])])
     found = data.get("schema_version")
     if type(found) is not str or found != MANIFEST_SCHEMA_VERSION:
         # 版が違えば他のキーの意味も違いうるため、ほかの検査はしない
-        shown = "(なし)" if "schema_version" not in data else repr(found)
+        shown = _T["version_none"] if "schema_version" not in data else repr(found)
         raise ManifestError(
             [
                 (
                     "schema_version",
-                    f"組のファイルの版が違います({shown}、読める版: {MANIFEST_SCHEMA_VERSION!r})。"
-                    f'文字列で schema_version: "{MANIFEST_SCHEMA_VERSION}" と書いてください',
+                    _T["version_mismatch"].format(
+                        shown=shown, readable=repr(MANIFEST_SCHEMA_VERSION), version=MANIFEST_SCHEMA_VERSION
+                    ),
                 )
             ]
         )
@@ -226,7 +285,7 @@ def parse_manifest(data: Any, *, base_dir: Path | None) -> Manifest:
     if defaults is None:
         defaults = {}
     elif not isinstance(defaults, dict):
-        problems.add("defaults", "マッピングにしてください")
+        problems.add("defaults", _T["not_mapping"])
         defaults = {}
     else:
         defaults = _check_defaults(defaults, problems)
@@ -234,7 +293,7 @@ def parse_manifest(data: Any, *, base_dir: Path | None) -> Manifest:
     jobs_data = data.get("jobs")
     jobs: list[Job] = []
     if not isinstance(jobs_data, list) or not jobs_data:
-        problems.add("jobs", "比較の組(job)を1件以上、リストで書いてください")
+        problems.add("jobs", _T["jobs_required"])
     else:
         seen: dict[str, int] = {}
         for index, raw in enumerate(jobs_data, start=1):
@@ -242,7 +301,7 @@ def parse_manifest(data: Any, *, base_dir: Path | None) -> Manifest:
             job_id = _job_id(raw, index)
             if job_id is not None:
                 if job_id in seen:
-                    problems.add(f"jobs[{index}].id", f"id {job_id!r} が jobs[{seen[job_id]}] と重複しています")
+                    problems.add(f"jobs[{index}].id", _T["id_duplicate"].format(job_id=repr(job_id), first=seen[job_id]))
                 else:
                     seen[job_id] = index
             job = _parse_job(raw, index, defaults, base_dir, problems)
@@ -257,7 +316,7 @@ def _unknown_keys(data: dict, allowed: Sequence[str], where: str, problems: _Pro
     for key in data:
         if key not in allowed:
             name = f"{where}.{key}" if where else str(key)
-            problems.add(name, f"知らないキーです(書けるキー: {', '.join(allowed)})")
+            problems.add(name, _T["unknown_key"].format(allowed=", ".join(allowed)))
 
 
 def _present(data: dict, key: str) -> bool:
@@ -268,9 +327,9 @@ def _present(data: dict, key: str) -> bool:
 def _check_defaults(defaults: dict, problems: _Problems) -> dict:
     for key in defaults:
         if key in _JOB_ONLY_KEYS:
-            problems.add(f"defaults.{key}", "job ごとに書いてください(defaults には書けません)")
+            problems.add(f"defaults.{key}", _T["job_only"])
         elif key not in _DEFAULTS_KEYS:
-            problems.add(f"defaults.{key}", f"知らないキーです(書けるキー: {', '.join(_DEFAULTS_KEYS)})")
+            problems.add(f"defaults.{key}", _T["unknown_key"].format(allowed=", ".join(_DEFAULTS_KEYS)))
     checked = {k: v for k, v in defaults.items() if k in _DEFAULTS_KEYS and v is not None}
     for key in _SCALAR_KEYS:
         if key in checked and not _check_scalar(key, checked[key], f"defaults.{key}", problems):
@@ -287,21 +346,21 @@ def _check_defaults(defaults: dict, problems: _Problems) -> dict:
     platform = defaults.get("platform")
     flat_name = isinstance(platform, str) and (platform in CONFIG_PLATFORM_NAMES or platform == AUTO_PLATFORM)
     if not flat_name and _present(defaults, "platform") != _present(defaults, "show_command"):
-        problems.add("defaults", "platform と show_command は両方セットで書いてください(片方だけは書けません)")
+        problems.add("defaults", _T["platform_pair"])
     for side in SIDES:
         if side not in checked:
             continue
         value = checked[side]
         where = f"defaults.{side}"
         if not isinstance(value, dict):
-            problems.add(where, "マッピング(command か segment)にしてください")
+            problems.add(where, _T["mapping_selection"])
             del checked[side]
             continue
         for key in value:
             if key == "path":
-                problems.add(f"{where}.path", "path は job ごとに書いてください(defaults には書けません)")
+                problems.add(f"{where}.path", _T["path_job_only"])
             elif key not in _SELECTION_KEYS:
-                problems.add(f"{where}.{key}", f"知らないキーです(書けるキー: {', '.join(_SELECTION_KEYS)})")
+                problems.add(f"{where}.{key}", _T["unknown_key"].format(allowed=", ".join(_SELECTION_KEYS)))
         selection = _check_selection(value, where, problems)
         if selection is None:
             del checked[side]
@@ -314,20 +373,20 @@ def _check_scalar(key: str, value: Any, where: str, problems: _Problems) -> bool
     if key == "mode":
         ok = value in MODES and isinstance(value, str)
         if not ok:
-            problems.add(where, f"{value!r} は使えません({' / '.join(MODES)})")
+            problems.add(where, _T["not_allowed"].format(value=repr(value), choices=" / ".join(MODES)))
         return ok
     if key == "kind":
         ok = value in KINDS and isinstance(value, str)
         if not ok:
-            problems.add(where, f"{value!r} は使えません({' / '.join(KINDS)})")
+            problems.add(where, _T["not_allowed"].format(value=repr(value), choices=" / ".join(KINDS)))
         return ok
     if key == "enable_rule":
         ok = isinstance(value, list) and all(isinstance(v, str) and v for v in value)
         if not ok:
-            problems.add(where, "ルール ID(文字列)のリストにしてください")
+            problems.add(where, _T["rule_id_list"])
         return ok
     if not isinstance(value, str) or not value:
-        problems.add(where, "空でない文字列にしてください")
+        problems.add(where, _T["non_empty_string"])
         return False
     return True
 
@@ -354,13 +413,13 @@ def _check_selection(side: dict, where: str, problems: _Problems) -> SideSelecti
     command = side.get("command")
     segment = side.get("segment")
     if command is not None and (not isinstance(command, str) or not command):
-        problems.add(f"{where}.command", "空でない文字列にしてください")
+        problems.add(f"{where}.command", _T["non_empty_string"])
         ok = False
     if segment is not None and (type(segment) is not int or segment < 1):
-        problems.add(f"{where}.segment", "1 以上の整数にしてください")
+        problems.add(f"{where}.segment", _T["positive_int"])
         ok = False
     if command is not None and segment is not None:
-        problems.add(where, "区間の指定は command と segment のどちらか一方にしてください")
+        problems.add(where, _T["selection_either"])
         ok = False
     return SideSelection(command, segment) if ok else None
 
@@ -370,7 +429,7 @@ def _resolve(raw: str, base_dir: Path | None, where: str, problems: _Problems) -
     if path.is_absolute():
         return path
     if base_dir is None:
-        problems.add(where, f"相対パス {raw!r} は使えません(基準になる組のファイルの位置がありません)。絶対パスにしてください")
+        problems.add(where, _T["relative_path"].format(raw=repr(raw)))
         return None
     return (base_dir / path).absolute()
 
@@ -379,13 +438,13 @@ def _parse_side(
     raw: Any, side: SideName, defaults: dict, base_dir: Path | None, where: str, problems: _Problems
 ) -> SideSpec | None:
     if not isinstance(raw, dict):
-        problems.add(where, "マッピング(path と、必要なら command か segment)にしてください")
+        problems.add(where, _T["mapping_side"])
         return None
     _unknown_keys(raw, ("path", *_SELECTION_KEYS), where, problems)
     raw_path = raw.get("path")
     path = None
     if not isinstance(raw_path, str) or not raw_path:
-        problems.add(f"{where}.path", "入力ファイルのパスを書いてください")
+        problems.add(f"{where}.path", _T["input_path"])
     else:
         path = _resolve(raw_path, base_dir, f"{where}.path", problems)
     selection = _check_selection(raw, where, problems)
@@ -413,19 +472,19 @@ def _job_id(raw: Any, index: int) -> str | None:
 def _parse_job(raw: Any, index: int, defaults: dict, base_dir: Path | None, problems: _Problems) -> Job | None:
     where = f"jobs[{index}]"
     if not isinstance(raw, dict):
-        problems.add(where, "マッピングにしてください")
+        problems.add(where, _T["not_mapping"])
         return None
     _unknown_keys(raw, _JOB_KEYS, where, problems)
     ok = True
     job_id = _job_id(raw, index)
     if job_id is None:
         job_id = raw.get("id")
-        hint = f'(数字だけの id は引用符で囲んでください: id: "{job_id}")' if isinstance(job_id, (int, float)) else ""
-        problems.add(f"{where}.id", f"空でない文字列にしてください{hint}")
+        hint = _T["id_quote_hint"].format(job_id=job_id) if isinstance(job_id, (int, float)) else ""
+        problems.add(f"{where}.id", f"{_T['non_empty_string']}{hint}")
         ok = False
     label = raw.get("label")
     if label is not None and not isinstance(label, str):
-        problems.add(f"{where}.label", "文字列にしてください")
+        problems.add(f"{where}.label", _T["must_be_string"])
         ok = False
     values: dict[str, Any] = {}
     for key in _SCALAR_KEYS:
@@ -447,7 +506,7 @@ def _parse_job(raw: Any, index: int, defaults: dict, base_dir: Path | None, prob
     sides: dict[str, SideSpec | None] = {}
     for side in SIDES:
         if side not in raw or raw[side] is None:
-            problems.add(f"{where}.{side}", "書いてください(path は必須です)")
+            problems.add(f"{where}.{side}", _T["side_required"])
             sides[side] = None
         else:
             sides[side] = _parse_side(raw[side], side, defaults, base_dir, f"{where}.{side}", problems)
@@ -642,7 +701,7 @@ def _run_one(job: Job, prepare: Callable[[Job], CompareRequest], llm: LlmRequest
         unread = SIDES if request is None else ()
         if unread:
             detail["sides"] = list(unread)
-        message = f"予期しないエラーで比較できませんでした: {type(exc).__name__}: {exc}"
+        message = _T["unexpected"].format(error_type=type(exc).__name__, error=exc)
         error = CompareError("unexpected_error", stage, message, detail)
         return JobResult(job, request or request_for(job, "", ""), _error_outcome(job, error), unread)
 

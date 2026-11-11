@@ -119,6 +119,9 @@ const choiceKeys = {}; // AI プロファイルとプロンプトの選択肢の
 // data-text・data-label の鍵の文を messages.py から取って入れる（HTML には文を書かない）。取れなければ false。
 // data-label の文は title と aria-label に入れる（アイコンのボタン）。
 // data-title の文は title にだけ入れる（答えの吹き出しの顔。読み上げの名前にはしない。ADR-0181 決定1）。
+// <html lang> に入れる言語の鍵（ADR-0190。"en"・"ja"）
+const PAGE_LANG = "page.lang";
+
 async function fillTexts() {
   const elements = Array.from(document.querySelectorAll("[data-text]"));
   const labelled = Array.from(document.querySelectorAll("[data-label]"));
@@ -131,7 +134,10 @@ async function fillTexts() {
       ...EXTRA_TEXTS,
     ]),
   );
-  const result = await call("messages", keys);
+  const result = await call("messages", [...keys, PAGE_LANG]);
+  if (result.ok) {
+    document.documentElement.lang = result.messages[PAGE_LANG];
+  }
   if (!result.ok) {
     text(statusBar, result.message);
     return false;

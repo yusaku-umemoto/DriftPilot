@@ -41,6 +41,8 @@ from driftpilot.llm_settings import (
     GUI_SECTION,
     PROMPT_TEMPLATE_KEY,
     SECTION,
+    LANGUAGE_KEY,
+    LANGUAGES,
     THEME_KEY,
     THEMES,
     SettingsError,
@@ -49,6 +51,7 @@ from driftpilot.llm_settings import (
     auto_update_check_of,
     character_of,
     is_limit,
+    language_of,
     is_secret_word,
     limit_of,
     parse_section,
@@ -56,7 +59,8 @@ from driftpilot.llm_settings import (
     theme_of,
     words_of,
 )
-from driftpilot.messages import CONFIG_CHANGED_ELSEWHERE
+from driftpilot.messages import CONFIG_CHANGED_ELSEWHERE, gui_language_invalid
+from driftpilot.messages import UCW_TEXTS as _T
 
 # 画面から書ける項目(ADR-0071 決定1)。これ以外の名前は update_llm_items が断る(prompt_template は ADR-0079 決定5 で外した)
 WRITABLE = ("max_diffs", "max_total_diffs", "extra_secret_words")
@@ -80,6 +84,7 @@ class UserConfigSnapshot:
     character は [gui] のキャラクターの絵(true のときだけ真。ADR-0174 決定1)。
     auto_update_check は [gui] の自動アップデートチェック(true のときだけ真。ADR-0188 決定2)。
     theme は [gui] の画面の色("system"・"light"・"dark"。ほかは "system"。ADR-0189)。
+    language は [gui] の画面の言語("en"・"ja"・"system"。ほかは "en"。ADR-0190)。
     """
 
     path: Path
@@ -93,6 +98,7 @@ class UserConfigSnapshot:
     character: bool = False
     auto_update_check: bool = False
     theme: str = "system"
+    language: str = "en"
 
 
 @dataclass(frozen=True)
@@ -136,6 +142,7 @@ def read_user_config(path: Path) -> UserConfigSnapshot:
         character=character_of(data),
         auto_update_check=auto_update_check_of(data),
         theme=theme_of(data),
+        language=language_of(data),
     )
 
 
@@ -149,17 +156,17 @@ def _check(values: Mapping[str, object], path: Path) -> dict[str, object]:
     """書く値を確かめる。WRITABLE 以外の名前は ValueError(名前だけを出す)。値の形は読み込みと同じ決まり。"""
     unknown = sorted(set(values) - set(WRITABLE))
     if unknown:
-        raise ValueError(f"設定画面から書けない項目です: {', '.join(unknown)}")
+        raise ValueError(_T["not_writable_item"].format(names=", ".join(unknown)))
     checked: dict[str, object] = {}
     for key, value in values.items():
         if key == "extra_secret_words":
             words = list(value) if isinstance(value, (list, tuple)) else value
             if not isinstance(words, list) or not all(is_secret_word(w) for w in words):
-                raise SettingsError(f"{path}: {SECTION}.extra_secret_words は、空白を含まない語のリストにしてください")
+                raise SettingsError(_T["extra_secret_words"].format(path=path, section=SECTION))
             checked[key] = words
         else:
             if not is_limit(value):
-                raise SettingsError(f"{path}: {SECTION}.{key} は 1 以上の整数にしてください")
+                raise SettingsError(_T["positive_integer"].format(path=path, section=SECTION, key=key))
             checked[key] = value
     return checked
 
@@ -176,7 +183,7 @@ def _load(path: Path, expected_digest: str | None) -> tuple[bytes | None, tomlki
         text = data.decode("utf-8").replace("\r\n", "\n")
         return data, tomlkit.parse(text)
     except Exception:  # noqa: BLE001 - tomlkit の例外の本文は使わない(値が入りうるため)
-        raise SettingsError(f"{path}: TOML として読めません") from None
+        raise SettingsError(_T["toml_unreadable"].format(path=path)) from None
 
 
 Section = Table | InlineTable | OutOfOrderTableProxy
@@ -195,7 +202,7 @@ def _section(doc: tomlkit.TOMLDocument, path: Path, *, create: bool, name: str =
         doc[name] = table
         return doc[name]
     if not isinstance(table, (Table, InlineTable, OutOfOrderTableProxy)):
-        raise SettingsError(f"{path}: [{name}] は表にしてください")
+        raise SettingsError(_T["not_table"].format(path=path, name=name))
     return table
 
 
@@ -281,7 +288,7 @@ def _write(path: Path, text: str) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     except OSError as exc:
-        raise SettingsError(f"{path}: 書けません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_T["cannot_write"].format(path=path, reason=exc.strerror or type(exc).__name__)) from None
     temp = Path(name)
     try:
         with os.fdopen(handle, "wb") as fh:
@@ -289,7 +296,7 @@ def _write(path: Path, text: str) -> str:
         os.replace(temp, path)
     except OSError as exc:
         temp.unlink(missing_ok=True)
-        raise SettingsError(f"{path}: 書けません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_T["cannot_write"].format(path=path, reason=exc.strerror or type(exc).__name__)) from None
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
@@ -330,7 +337,7 @@ def update_gui_items(path: Path, expected_digest: str | None, values: Mapping[st
     """
     unknown = sorted(set(values) - set(GUI_WRITABLE))
     if unknown:
-        raise ValueError(f"設定画面から書けない項目です: {', '.join(unknown)}")
+        raise ValueError(_T["not_writable_item"].format(names=", ".join(unknown)))
     return _write_gui(path, expected_digest, values)
 
 
@@ -350,15 +357,33 @@ def update_gui_theme(path: Path, expected_digest: str | None, theme: object) -> 
     ハッシュが違えば書かない(ConfigChanged)。コメント・並びは、ほかの [gui] の項目と同じく保つ。
     """
     if not isinstance(theme, str) or theme not in THEMES:
-        raise SettingsError(f"{path}: {GUI_SECTION}.{THEME_KEY} は {', '.join(THEMES)} のどれかにしてください")
+        raise SettingsError(_T["one_of"].format(path=path, section=GUI_SECTION, key=THEME_KEY, choices=", ".join(THEMES)))
     return _put_gui(path, expected_digest, {THEME_KEY: theme})
+
+
+def update_gui_display(path: Path, expected_digest: str | None, values: Mapping[str, object]) -> str:
+    """[gui] の theme と language のうち、渡したものだけを 1 回で置き換える・足す。返すのは書いた後のハッシュ(ADR-0190)。
+
+    values の名前は theme・language だけ(ほかは ValueError)。値が 3 つのどれかでなければ SettingsError(書かない)。
+    ハッシュが違えば書かない(ConfigChanged)。コメント・並びは、ほかの [gui] の項目と同じく保つ。
+    """
+    unknown = sorted(set(values) - {THEME_KEY, LANGUAGE_KEY})
+    if unknown:
+        raise ValueError(_T["not_writable_item"].format(names=", ".join(unknown)))
+    theme = values.get(THEME_KEY)
+    if THEME_KEY in values and (not isinstance(theme, str) or theme not in THEMES):
+        raise SettingsError(_T["one_of"].format(path=path, section=GUI_SECTION, key=THEME_KEY, choices=", ".join(THEMES)))
+    language = values.get(LANGUAGE_KEY)
+    if LANGUAGE_KEY in values and (not isinstance(language, str) or language not in LANGUAGES):
+        raise SettingsError(gui_language_invalid(path))
+    return _put_gui(path, expected_digest, dict(values))
 
 
 def _write_gui(path: Path, expected_digest: str | None, values: Mapping[str, object]) -> str:
     """[gui] の真偽値の項目を置き換える・足す(名前は呼ぶ側で確かめる)。値が真偽値でなければ SettingsError。"""
     for key, value in values.items():
         if not isinstance(value, bool):
-            raise SettingsError(f"{path}: {GUI_SECTION}.{key} は true か false にしてください")
+            raise SettingsError(_T["true_or_false"].format(path=path, section=GUI_SECTION, key=key))
     return _put_gui(path, expected_digest, values)
 
 
@@ -395,7 +420,7 @@ def remove_llm_item(path: Path, expected_digest: str | None, key: str) -> str:
     項目が無ければ書かずに今のハッシュを返す。
     """
     if key not in REMOVABLE:
-        raise ValueError(f"設定画面から消せない項目です: {key}")
+        raise ValueError(_T["not_removable_item"].format(key=key))
     return _remove_item(path, expected_digest, key)
 
 

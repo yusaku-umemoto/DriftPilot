@@ -41,6 +41,7 @@ from driftpilot.core import (
     parse_manifest,
 )
 from driftpilot.llm_analyzer import file_name_refused
+from driftpilot.messages import smb_unknown_key
 from driftpilot.messages import (
     BATCH_ALL_SETTINGS_TITLE,
     BATCH_NOTE_RAW_OPTIONS,
@@ -227,7 +228,7 @@ def _checked(batch: EditableBatch) -> EditableBatch:
 def _unknown(keys: Iterable[str], allowed: Sequence[str], where: str) -> None:
     unknown = [key for key in keys if key not in allowed]
     if unknown:
-        raise ManifestError([(f"{where}.{key}", f"この窓では直せないキーです(直せるキー: {', '.join(allowed)})") for key in unknown])
+        raise ManifestError([(f"{where}.{key}", smb_unknown_key(", ".join(allowed))) for key in unknown])
 
 
 def _side_selection(side: dict, value: Mapping[str, Any] | None) -> None:

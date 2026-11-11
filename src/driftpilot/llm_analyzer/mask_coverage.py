@@ -12,6 +12,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from driftpilot import i18n
 from driftpilot.coverage_report import FOLD_VERSION
 from driftpilot.llm_analyzer.mask_patterns import MASK_PATTERNS, masking_fingerprint
 from driftpilot.llm_analyzer.masking import (
@@ -25,12 +26,42 @@ from driftpilot.llm_analyzer.masking import (
 )
 
 CATEGORIES = ("plain", "mask", "pass", "unsent")
-_LABEL = {
-    "plain": "秘密語なし → そのまま送る",
-    "mask": "秘密語あり → 表で伏せる位置が決まった",
-    "pass": "秘密語あり → 表で「伏せる対象なし」と決まった",
-    "unsent": "秘密語あり → 判定不能で送らない(PEM ブロックを含む)",
+
+# 利用者に見える文(日本語・英語。messages を読まない部品なので、ここに持つ。REQ-258)。鍵の組と差し込みの名前は両方で同じ
+_TEXTS_JA = {
+    "label.plain": "秘密語なし → そのまま送る",
+    "label.mask": "秘密語あり → 表で伏せる位置が決まった",
+    "label.pass": "秘密語あり → 表で「伏せる対象なし」と決まった",
+    "label.unsent": "秘密語あり → 判定不能で送らない(PEM ブロックを含む)",
+    "not_found": "{path}: 読めません(存在しないか、ファイルでもディレクトリでもありません)",
+    "unreadable": "{path}: 読めません ({error_type})",
+    "heading": "伏せる表の被覆: {files} ファイル、{total} 行(空行を除く)。表の指紋 {digest}({count} 件)、{fold_version}",
+    "category_line": "  {label}: {lines} 行 ({ratio})",
+    "pem_line": "  うち PEM ブロック: {blocks} 件 / {lines} 行",
+    "unhit_line": "  一度も当たらなかった表の行: {names}",
+    "unhit_none": "なし",
+    "top_heading": "送らなかった形の上位 {top} 件(表に足す候補。値は含まない):",
+    "error_line": "エラー: {message}",
 }
+_TEXTS_EN = {
+    "label.plain": "No secret word -> sent as is",
+    "label.mask": "Secret word -> the table decided where to mask",
+    "label.pass": "Secret word -> the table decided there is nothing to mask",
+    "label.unsent": "Secret word -> cannot be judged, not sent (includes PEM blocks)",
+    "not_found": "{path}: cannot be read (it does not exist, or is neither a file nor a directory)",
+    "unreadable": "{path}: cannot be read ({error_type})",
+    "heading": "Mask table coverage: {files} files, {total} lines (blank lines excluded). Table fingerprint {digest} ({count} entries), {fold_version}",
+    "category_line": "  {label}: {lines} lines ({ratio})",
+    "pem_line": "  Of which PEM blocks: {blocks} / {lines} lines",
+    "unhit_line": "  Table rows that never matched: {names}",
+    "unhit_none": "none",
+    "top_heading": "Top {top} shapes that were not sent (candidates to add to the table; values are not included):",
+    "error_line": "Error: {message}",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+
+# 公開の名前(言語で選んだ文を指す)
+_LABEL = {c: _T[f"label.{c}"] for c in CATEGORIES}
 DEFAULT_TOP = 30
 
 
@@ -87,7 +118,7 @@ def resolve_paths(paths: list[str]) -> list[Path]:
         elif path.is_file():
             found.append(path)
         else:
-            raise FileNotFoundError(f"{raw}: 読めません(存在しないか、ファイルでもディレクトリでもありません)")
+            raise FileNotFoundError(_T["not_found"].format(path=raw))
     return found
 
 
@@ -98,7 +129,7 @@ def measure(paths: list[Path], *, secret_words: tuple[str, ...] | None = None) -
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            report.failed.append(f"{path}: 読めません ({type(exc).__name__})")
+            report.failed.append(_T["unreadable"].format(path=path, error_type=type(exc).__name__))
             continue
         report.files += 1
         measure_text(text, report, masker)
@@ -113,20 +144,20 @@ def to_text(report: MaskCoverage, top: int = DEFAULT_TOP) -> str:
     fp = masking_fingerprint()
     total = report.total
     out = [
-        f"伏せる表の被覆: {report.files} ファイル、{total:,} 行(空行を除く)。表の指紋 {fp.digest}({fp.count} 件)、{FOLD_VERSION}",
+        _T["heading"].format(files=report.files, total=f"{total:,}", digest=fp.digest, count=fp.count, fold_version=FOLD_VERSION),
         "",
     ]
     for c in CATEGORIES:
-        out.append(f"  {_LABEL[c]}: {report.counts[c]:,} 行 ({_ratio(report.counts[c], total)})")
-    out.append(f"  うち PEM ブロック: {report.pem_blocks} 件 / {report.pem_lines:,} 行")
+        out.append(_T["category_line"].format(label=_LABEL[c], lines=f"{report.counts[c]:,}", ratio=_ratio(report.counts[c], total)))
+    out.append(_T["pem_line"].format(blocks=report.pem_blocks, lines=f"{report.pem_lines:,}"))
     unhit = [p.id for p in MASK_PATTERNS if report.hits[p.id] == 0]
-    out.append(f"  一度も当たらなかった表の行: {', '.join(unhit) if unhit else 'なし'}")
+    out.append(_T["unhit_line"].format(names=", ".join(unhit) if unhit else _T["unhit_none"]))
     out.append("")
-    out.append(f"送らなかった形の上位 {top} 件(表に足す候補。値は含まない):")
+    out.append(_T["top_heading"].format(top=top))
     for (scope, shape), n in report.shapes.most_common(top):
         out.append(f"  {n:6d}  [{scope}] {shape}")
     for message in report.failed:
-        out.append(f"エラー: {message}")
+        out.append(_T["error_line"].format(message=message))
     return "\n".join(out) + "\n"
 
 

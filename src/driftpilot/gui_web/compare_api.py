@@ -376,7 +376,7 @@ from driftpilot.screen_model.model import (
     read_raw_form,
     saved_raw_settings_line,
 )
-from driftpilot.messages import RAW_OPTIONS_INVALID_TITLE
+from driftpilot.messages import CAPI_INPUT_FILE_TYPES, CAPI_OPEN_RESULT_FILE_TYPES, RAW_OPTIONS_INVALID_TITLE
 from driftpilot.screen_model.settings_model import (
     ProfileChoices,
     destination_of,
@@ -402,11 +402,11 @@ TARGET_ANALYSIS, TARGET_FOLLOW_UP = "analysis", "follow_up"
 # 窓のファイルのダイアログの種類(webview.FileDialog の OPEN・SAVE の値。webview は読まない)と、選べるファイルの種類(wx と同じ)
 DIALOG_OPEN = 10
 DIALOG_SAVE = 30
-INPUT_FILE_TYPES = ("テキスト (*.txt;*.log;*.cfg;*.conf)", "すべてのファイル (*.*)")
+INPUT_FILE_TYPES = CAPI_INPUT_FILE_TYPES
 SAVE_FILE_TYPES = ("JSON (*.json)",)
 # まとめて比べた結果の保存(JSON Lines。一括比較の窓と同じ)
 MULTI_SAVE_FILE_TYPES = (JSONL_WILDCARD.split("|")[0],)
-OPEN_RESULT_FILE_TYPES = ("保存した結果 (*.json;*.jsonl)",)
+OPEN_RESULT_FILE_TYPES = CAPI_OPEN_RESULT_FILE_TYPES
 MODE_VALUES = tuple(value for value, _ in MODE_CHOICES)
 KIND_VALUES = tuple(value for value, _ in KIND_CHOICES)
 TAB_ORDER = ("structured", "raw", "unparsed")
@@ -3192,7 +3192,8 @@ class CompareApi(Api):
     def _all(self) -> dict[str, Any]:
         """「全部」のタブの行(ADR-0152 決定7)。読むだけ。文字は画面が textContent だけで描く。"""
         with self._lock:
-            rows = [asdict(row) for row in self._current_all_rows()]
+            # op_key(言語によらない操作の鍵。印の判定に使う)は画面へは渡さない(rows の形は変えない。ADR-0190)
+            rows = [{k: v for k, v in asdict(row).items() if k != "op_key"} for row in self._current_all_rows()]
             # marks は変更の行で違う文字の範囲(REQ-226)。rows の形は変えず、別のキーで渡す
             return self._ok(all={"revision": self._all_revision, "rows": rows, "marks": self._current_all_marks()})
 

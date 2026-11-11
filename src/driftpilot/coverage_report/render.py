@@ -8,6 +8,7 @@ fortinet のときだけ、専用に読めた割合(text は参考値の次の1�
 import json
 from typing import Any
 
+from driftpilot import i18n
 from driftpilot.config_parser.fortinet_tree import PLATFORM as FORTINET
 from driftpilot.config_parser.platforms import config_patterns
 from driftpilot.coverage_report.measure import (
@@ -20,7 +21,52 @@ from driftpilot.coverage_report.measure import (
 DEFAULT_TOP = 30
 DEFAULT_FILES = 50
 
-EXPOSURE_LABELS = {"normal": "通常版", "exposed": "既定値込み版", "unknown": "判定不能"}
+# 見出しと表の列の名前(開発者向けの出力なので、説明の文は日本語のまま残す。REQ-258 §3)。
+# 言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)
+_TEXTS_JA = {
+    "exposure_normal": "通常版",
+    "exposure_exposed": "既定値込み版",
+    "exposure_unknown": "判定不能",
+    "title": "被覆率レポート(config パーサー)  畳み込み規則: {fold_version}",
+    "parser": "  パーサー: {platform}({kind})",
+    "kind_flat": "平坦 config",
+    "group_heading": "== {label} ({exposure}): {files} ファイル",
+    "group_failed": "(うち解析失敗 {failed})",
+    "files_heading": "-- ファイル単位(主)。解釈済み率の低い順 --",
+    "column_duplicates": "重複",
+    "column_failed": "失敗",
+    "total_heading": "-- 参考値: ファイル群の合計(機種が混ざるため、この数字で次の実装を決めない) --",
+    "total_line": "  解釈済み {interpreted} / 全 {total} 行 ({ratio})",
+    "category_heading": "-- カテゴリ別(解釈済み行数) --",
+    "none": "  なし",
+    "uninterpreted": "未解釈",
+    "pattern_heading": "-- パターン別ヒット数(!! は一度も当たっていないパターン) --",
+    "shape_heading": "-- 未解釈行の形 上位{top} (規則 {fold_version}。scope は親の粗いラベル) --",
+    "others": "  その他: {lines} 行({kinds} 種)",
+}
+_TEXTS_EN = {
+    "exposure_normal": "Normal version",
+    "exposure_exposed": "Version with defaults",
+    "exposure_unknown": "Undetermined",
+    "title": "Coverage report (config parser)  Folding rule: {fold_version}",
+    "parser": "  Parser: {platform} ({kind})",
+    "kind_flat": "flat config",
+    "group_heading": "== {label} ({exposure}): {files} files",
+    "group_failed": " ({failed} failed to parse)",
+    "files_heading": "-- Per file (main). Lowest interpreted ratio first --",
+    "column_duplicates": "duplicates",
+    "column_failed": "failed",
+    "total_heading": "-- Reference: total of all files (platforms are mixed, so do not decide the next work from this number) --",
+    "total_line": "  Interpreted {interpreted} / total {total} lines ({ratio})",
+    "category_heading": "-- By category (interpreted lines) --",
+    "none": "  none",
+    "uninterpreted": "uninterpreted",
+    "pattern_heading": "-- Hits per pattern (!! marks a pattern that never matched) --",
+    "shape_heading": "-- Top {top} shapes of uninterpreted lines (rule {fold_version}; scope is the coarse label of the parent) --",
+    "others": "  Others: {lines} lines ({kinds} kinds)",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+EXPOSURE_LABELS = {"normal": _T["exposure_normal"], "exposed": _T["exposure_exposed"], "unknown": _T["exposure_unknown"]}
 
 
 def _pct(part: int, whole: int) -> str:
@@ -104,10 +150,10 @@ def to_json(report: CoverageReport, top: int = DEFAULT_TOP) -> str:
 
 
 def to_text(report: CoverageReport, top: int = DEFAULT_TOP, files: int = DEFAULT_FILES) -> str:
-    out = [f"被覆率レポート(config パーサー)  畳み込み規則: {report.fold_version}"]
+    out = [_T["title"].format(fold_version=report.fold_version)]
     if report.platform is not None:
-        kind = "FortiGate" if report.platform == FORTINET else "平坦 config"
-        out[0] += f"  パーサー: {report.platform}({kind})"
+        kind = "FortiGate" if report.platform == FORTINET else _T["kind_flat"]
+        out[0] += _T["parser"].format(platform=report.platform, kind=kind)
     patterns = config_patterns(report.platform)
     for exposure, group in report.groups.items():
         if not group.files:
@@ -115,21 +161,21 @@ def to_text(report: CoverageReport, top: int = DEFAULT_TOP, files: int = DEFAULT
         failed = group.failed
         out += [
             "",
-            f"== {EXPOSURE_LABELS[exposure]} ({exposure}): {len(group.files)} ファイル"
-            + (f"(うち解析失敗 {len(failed)})" if failed else "")
+            _T["group_heading"].format(label=EXPOSURE_LABELS[exposure], exposure=exposure, files=len(group.files))
+            + (_T["group_failed"].format(failed=len(failed)) if failed else "")
             + " ==",
             "",
-            "-- ファイル単位(主)。解釈済み率の低い順 --",
+            _T["files_heading"],
         ]
         rows = sorted(group.measured, key=lambda f: (f.ratio, f.path))
         for f in rows[:files]:
             mark = "  ※パーサー対象外の可能性" if f.possibly_out_of_scope else ""
-            dup = f"  重複 {f.duplicates}" if report.platform is not None else ""
+            dup = f"  {_T['column_duplicates']} {f.duplicates}" if report.platform is not None else ""
             out.append(f"  {_pct(f.interpreted, f.total):>6}  {f.interpreted}/{f.total}  {f.path}{dup}{mark}")
         if len(rows) > files:
             out.append(f"  ... 残り {len(rows) - files} ファイル(--files で件数を変える。json は全件)")
         for f in failed[:files]:
-            out.append(f"     失敗  {f.path}  {f.error}")
+            out.append(f"     {_T['column_failed']}  {f.path}  {f.error}")
         if len(failed) > files:
             out.append(f"  ... 解析失敗の残り {len(failed) - files} ファイル")
         parser = report.platform or "Cisco IOS"
@@ -137,21 +183,21 @@ def to_text(report: CoverageReport, top: int = DEFAULT_TOP, files: int = DEFAULT
 
         out += [
             "",
-            "-- 参考値: ファイル群の合計(機種が混ざるため、この数字で次の実装を決めない) --",
-            f"  解釈済み {group.interpreted} / 全 {group.total} 行 ({_pct(group.interpreted, group.total)})",
+            _T["total_heading"],
+            _T["total_line"].format(interpreted=group.interpreted, total=group.total, ratio=_pct(group.interpreted, group.total)),
         ]
         if report.platform == FORTINET:
             out.append(_fgt_text_line(group))
         out += [
             "",
-            "-- カテゴリ別(解釈済み行数) --",
+            _T["category_heading"],
         ]
         categories = group.categories
-        out += [f"  {name:<14}{count}" for name, count in sorted(categories.items())] or ["  なし"]
-        out.append(f"  {'未解釈':<12}{group.total - group.interpreted}")
+        out += [f"  {name:<14}{count}" for name, count in sorted(categories.items())] or [_T["none"]]
+        out.append(f"  {_T['uninterpreted']:<12}{group.total - group.interpreted}")
 
         hits = group.hits
-        out += ["", "-- パターン別ヒット数(!! は一度も当たっていないパターン) --"]
+        out += ["", _T["pattern_heading"]]
         for p in patterns:
             if p.match is None:
                 continue
@@ -159,8 +205,8 @@ def to_text(report: CoverageReport, top: int = DEFAULT_TOP, files: int = DEFAULT
             out.append(f"  {'!!' if count == 0 else '  '} {p.id:<46}{count}")
 
         head, rest_lines, rest_kinds = _top_shapes(group, top)
-        out += ["", f"-- 未解釈行の形 上位{top} (規則 {report.fold_version}。scope は親の粗いラベル) --"]
-        out += [f"  {count:>7}  [{scope}] {shape}" for scope, shape, count in head] or ["  なし"]
+        out += ["", _T["shape_heading"].format(top=top, fold_version=report.fold_version)]
+        out += [f"  {count:>7}  [{scope}] {shape}" for scope, shape, count in head] or [_T["none"]]
         if rest_kinds:
-            out.append(f"  その他: {rest_lines} 行({rest_kinds} 種)")
+            out.append(_T["others"].format(lines=rest_lines, kinds=rest_kinds))
     return "\n".join(out) + "\n"

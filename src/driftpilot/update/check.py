@@ -25,6 +25,7 @@ from typing import Any
 from driftpilot import __version__
 from driftpilot.llm_analyzer.http_json import ssl_context
 from driftpilot.messages import (
+    UPDATE_TEXTS,
     UPDATE_REASON_BUSY,
     UPDATE_REASON_NOT_FOUND,
     UPDATE_REASON_UNREACHABLE,
@@ -124,7 +125,7 @@ def default_fetch(url: str) -> bytes:
     GitHub の API でない URL にはつながない(ValueError)。
     """
     if not url.startswith(API_PREFIX):
-        raise ValueError("GitHub の API でない URL にはつなぎません")
+        raise ValueError(UPDATE_TEXTS["url_not_api"])
     request = urllib.request.Request(url, headers=request_headers(), method="GET")
     with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS, context=ssl_context()) as response:
         body = response.read(MAX_BODY_BYTES + 1)

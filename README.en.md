@@ -5,7 +5,9 @@
 DriftPilot compares network device configs and `show` command output, and extracts the differences that actually matter.
 It can optionally ask an AI model to analyze the differences, using your own API key.
 
-> The user interface and messages are currently in Japanese.
+See the [user guide](docs/guide/README.md) for how to use it.
+
+> The user interface and messages are in English by default. Japanese is also available (see "Language" under "Where settings are stored").
 
 ## Features
 
@@ -45,16 +47,17 @@ The apps are not code-signed, so your OS will warn you the first time:
 
 - **Windows:** the `settings\` folder next to `DriftPilot.exe`. Nothing is written outside the extracted folder (except the API key).
 - **macOS:** `~/Library/Application Support/DriftPilot/`
-- **API keys:** Windows Credential Manager or the macOS Keychain. You can delete them with "削除…" (Delete) in the settings window.
-- **Screen color:** on the "表示" (Display) tab of the settings window, choose "match the system setting", light mode or dark mode.
+- **API keys:** Windows Credential Manager or the macOS Keychain. You can delete them with "Delete…" (「削除…」 in the Japanese screen) in the settings window.
+- **Screen color:** on the "Display" (「表示」) tab of the settings window, choose "Match system settings", "Light mode" or "Dark mode".
+- **Language:** on the "Display" tab of the settings window ("Settings…" → "Display"), choose English, 日本語 (Japanese) or "Match system setting". The default is English. To use Japanese, choose "日本語", save, and reopen DriftPilot.
 
 ### Checking for new versions
 
-- "更新を確かめる" (Check for updates) on the "更新" (Update) tab of the settings window checks GitHub for a newer release.
+- "Check for updates" (「更新を確かめる」) on the "Update" (「更新」) tab of the settings window checks GitHub for a newer release.
 - By default, DriftPilot checks only when you press that button.
-- If you turn on "起動したときに新しい版を確かめる（自動アップデートチェック）" (automatic update check) and save, DriftPilot checks at every start and shows a notice above the compare window when a newer version is available.
+- If you turn on "Check for a new version at startup (automatic update check)" (「起動したときに新しい版を確かめる（自動アップデートチェック）」) and save, DriftPilot checks at every start and shows a notice above the compare window when a newer version is available.
 - The only thing sent is the DriftPilot version (no configs, settings or API keys).
-- The Windows zip and the macOS app can download a newer version with "更新する" (Update), verify its signature, and replace themselves (DriftPilot closes once and the new version opens).
+- The Windows zip and the macOS app can download a newer version with "Update" (「更新する」), verify its signature, and replace themselves (DriftPilot closes once and the new version opens).
 - Version 0.1.0 has no update feature. To go from 0.1.0 to 0.2.0, replace it by hand as described under "■ 更新するとき" (Updating) in `はじめにお読みください.txt` (Read me first), which comes with the download.
 
 ### From source
@@ -83,7 +86,7 @@ Run `driftpilot --help` to see all commands.
 
 ## Status
 
-Version 0.2.1 (preview). The UI and output formats may still change.
+Version 0.2.2 (preview). The UI and output formats may still change.
 
 ## License
 

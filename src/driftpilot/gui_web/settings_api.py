@@ -81,7 +81,7 @@ from driftpilot import __version__
 from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.gui_web.theme import THEME_EVENT
 from driftpilot.llm_analyzer import LLMClient, ShapeNode, send_connection_check
-from driftpilot.llm_settings import CUSTOM_HTTP_JSON, ENV_KEY_PREFIX, THEMES, SettingsError
+from driftpilot.llm_settings import CUSTOM_HTTP_JSON, ENV_KEY_PREFIX, LANGUAGES, THEMES, SettingsError
 from driftpilot.messages import (
     AUTO_SEND_CONFIRM_TITLE,
     CLI_MODEL_HINT,
@@ -153,7 +153,7 @@ from driftpilot.messages import (
 )
 from driftpilot.messages import RAW_DEFAULTS_TITLE
 from driftpilot.screen_model.settings_model import RawDefaultsPane, raw_defaults_pane, save_raw_defaults_form
-from driftpilot.screen_model.settings_model import save_auto_update_check, save_gui_theme
+from driftpilot.screen_model.settings_model import save_auto_update_check, save_gui_display, save_gui_theme
 from driftpilot.update import (
     INSTALL_SOURCE,
     RELEASES_PAGE_URL,
@@ -296,6 +296,10 @@ _clock = time.monotonic
 
 class _BadRequest(Exception):
     """画面から受け取った引数の形が違う。"""
+
+
+# 「表示」の「保存」で language を渡さなかった印(省いたときは今までどおり theme だけを扱う。ADR-0190)。None と区別する
+_NO_LANGUAGE: Any = object()
 
 
 def web_version() -> str:
@@ -578,13 +582,14 @@ class SettingsApi(Api):
         """
         return self._call(self._save_update_settings, form, checked)
 
-    def save_display_settings(self, form: Any, theme: Any) -> dict[str, Any]:
-        """「表示」のタブの「保存」(ADR-0189)。[gui] theme の 1 項目だけを書く(theme は "system"・"light"・"dark")。
+    def save_display_settings(self, form: Any, theme: Any, language: Any = _NO_LANGUAGE) -> dict[str, Any]:
+        """「表示」のタブの「保存」(ADR-0189・ADR-0190)。[gui] の theme と language を書く。
 
+        theme は "system"・"light"・"dark"、language は "en"・"ja"・"system"(ADR-0190。省くと theme だけを扱う)。
         form は画面の欄の値(ほかの操作と同じ)。受け取るだけで書かず、読み直した後もほかのタブの打ちかけの欄を残すのに使う。
-        書けたら、開いている窓すべてに色を当てる。
+        書けたら、開いている窓すべてに色を当てる。言語はその場では当てない(DriftPilot を開き直すと効く)。
         """
-        return self._call(self._save_display_settings, form, theme)
+        return self._call(self._save_display_settings, form, theme, language)
 
     def start_update(self) -> dict[str, Any]:
         """「更新する」(REQ-253 §7)。引数は受けない。確かめた結果が newer で、配った物で動いているときだけ、裏で取ってきて確かめて準備する。
@@ -881,6 +886,8 @@ class SettingsApi(Api):
             # 「表示」のタブ(ADR-0189)。theme は設定ファイルの値(読めなければ "system")
             "display": {
                 "theme": fields.theme if fields is not None else "system",
+                # 言語(ADR-0190)は設定ファイルの値(読めなければ "en")。変えたら開き直すと効く
+                "language": fields.language if fields is not None else "en",
                 "can_save": fields is not None,
                 "fill": self._fill_display,
             },
@@ -1941,8 +1948,10 @@ class SettingsApi(Api):
                 self._fill_update += 1  # チェックの欄を読み直した値で入れ直す(書けなかったときは押した値を残す)
             return self._ok(notice=notice)
 
-    def _save_display_settings(self, form: Any, theme: Any) -> dict[str, Any]:
-        """「表示」のタブの「保存」。theme が文字でない・3 つのどれでもない・form の形が違えば _BadRequest。
+    def _save_display_settings(self, form: Any, theme: Any, language: Any = _NO_LANGUAGE) -> dict[str, Any]:
+        """「表示」のタブの「保存」。theme・language が文字でない・3 つのどれでもない・form の形が違えば _BadRequest。
+
+        language を省いたときは今までどおり theme だけを扱う(ADR-0190)。
         設定ファイルを読めないときは今の読めないときの扱い。
 
         「更新」のタブの「保存」と同じ作り: 先に画面の欄の値(form)を受け取り、書くのは theme だけ。書けたら・ほかで変わっていたら
@@ -1951,11 +1960,16 @@ class SettingsApi(Api):
         with self._lock:
             if not isinstance(theme, str) or theme not in THEMES:
                 raise _BadRequest
+            if language is not _NO_LANGUAGE and (not isinstance(language, str) or language not in LANGUAGES):
+                raise _BadRequest
             self._take(form)
             fields = self._current().config_fields
             if fields is None:
                 return self._unreadable() or self._ok()
-            action = save_gui_theme(fields, theme, **self._kw("env", "platform", "home"))
+            if language is _NO_LANGUAGE:
+                action = save_gui_theme(fields, theme, **self._kw("env", "platform", "home"))
+            else:
+                action = save_gui_display(fields, theme, language, **self._kw("env", "platform", "home"))
             self._mark_saved(action.ok)
             notice = self._notice(action.message, CONFIG_SAVE_TITLE)
             if action.ok or action.reload:

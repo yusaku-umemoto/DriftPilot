@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from driftpilot import i18n
 from driftpilot.llm_analyzer import (
     DEFAULT_PROMPT_TEMPLATE,
     INCIDENT_PROMPT_TEMPLATE,
@@ -37,7 +38,7 @@ from driftpilot.llm_analyzer import (
     normalize_newlines,
 )
 from driftpilot.llm_settings import SettingsError, user_config_path
-from driftpilot.messages import PROMPT_TEMPLATE_PROBLEM
+from driftpilot.messages import LLMP_ERRORS, PROMPT_TEMPLATE_PROBLEM, PROMPTP_ERRORS
 
 PROMPT_PROFILES_NAME = "prompt-profiles.json"
 SCHEMA_VERSION = 1
@@ -53,6 +54,16 @@ _USER_ID = re.compile(r"[0-9a-f]{32}")
 _UNSET: Any = object()  # update_prompt_profile で「渡していない」を区別する
 
 
+def _err(key: str, **values: object) -> str:
+    """誤りの文の {名前} を埋める。接続のプロファイルと共通の文(LLMP_ERRORS)に無い鍵は、指示文だけの文(PROMPTP_ERRORS)から引く。"""
+    table = PROMPTP_ERRORS if key in PROMPTP_ERRORS else LLMP_ERRORS
+    return table[key].format(**values)
+
+
+def _reason(exc: OSError) -> str:
+    return exc.strerror or type(exc).__name__
+
+
 @dataclass(frozen=True)
 class PromptProfile:
     """1つの指示文。builtin は最初から入っているもの(変えられない・消せない)。"""
@@ -61,13 +72,30 @@ class PromptProfile:
     name: str
     template: str
     builtin: bool = False
+    # 最初から入っているものだけが持つ、もう一方の言語の名前(ADR-0190。名前で探す・重なりを見るときに、表示名と同じに扱う)
+    other_names: tuple[str, ...] = ()
+
+
+# 最初から入っている3つの名前(id → (日本語, 英語))。英語の版のソースに日本語を置けないので、messages_en ではなくここに置く(REQ-258)。
+# 表示は今の言語の名前。名前で探す・重なりを見るときは、両方の言語の名前を使う(最初から入っているものだけ)
+_BUILTIN_NAMES: dict[str, tuple[str, str]] = {
+    BUILTIN_DEFAULT_ID: ("要点と影響", "Key points and impact"),
+    BUILTIN_INCIDENT_ID: ("障害調査", "Incident investigation"),
+    BUILTIN_STATUS_ID: ("状態の確認", "Check status"),
+}
+
+
+def _builtin(profile_id: str, template: str) -> "PromptProfile":
+    ja, en = _BUILTIN_NAMES[profile_id]
+    shown, other = (en, ja) if i18n.current_language() == i18n.EN else (ja, en)
+    return PromptProfile(profile_id, shown, template, True, (other,))
 
 
 # 最初から入っている3つ(この順で一覧の先頭に出す)
 BUILTIN_PROFILES: tuple[PromptProfile, ...] = (
-    PromptProfile(BUILTIN_DEFAULT_ID, "要点と影響", DEFAULT_PROMPT_TEMPLATE, True),
-    PromptProfile(BUILTIN_INCIDENT_ID, "障害調査", INCIDENT_PROMPT_TEMPLATE, True),
-    PromptProfile(BUILTIN_STATUS_ID, "状態の確認", STATUS_PROMPT_TEMPLATE, True),
+    _builtin(BUILTIN_DEFAULT_ID, DEFAULT_PROMPT_TEMPLATE),
+    _builtin(BUILTIN_INCIDENT_ID, INCIDENT_PROMPT_TEMPLATE),
+    _builtin(BUILTIN_STATUS_ID, STATUS_PROMPT_TEMPLATE),
 )
 BUILTIN_IDS = tuple(p.id for p in BUILTIN_PROFILES)
 
@@ -94,23 +122,31 @@ class PromptProfiles:
         return next((p for p in self.all() if p.id == profile_id), None)
 
     def find(self, name: str) -> PromptProfile | None:
-        """表示名で探す(前後の空白を除き、大文字・小文字を区別しない)。"""
+        """表示名で探す(前後の空白を除き、大文字・小文字を区別しない)。最初から入っているものは、もう一方の言語の名前でも当てる。"""
         key = _name_key(name)
-        return next((p for p in self.all() if _name_key(p.name) == key), None)
+        return next((p for p in self.all() if key in name_keys(p)), None)
 
     def names(self) -> list[str]:
         return [p.name for p in self.all()]
 
     def shadowed(self, name: str) -> bool:
-        """名前が、最初から入っている指示文と利用者の指示文の両方に当たるか(find は最初から入っているほうを返す)。"""
+        """名前が、最初から入っている指示文(両方の言語の名前)と利用者の指示文の両方に当たるか(find は最初から入っているほうを返す)。"""
         key = _name_key(name)
-        return any(_name_key(p.name) == key for p in BUILTIN_PROFILES) and any(
-            _name_key(p.name) == key for p in self.profiles
-        )
+        return any(key in name_keys(p) for p in BUILTIN_PROFILES) and any(_name_key(p.name) == key for p in self.profiles)
 
 
 def _name_key(name: str) -> str:
     return name.strip().casefold()
+
+
+def name_keys(profile: PromptProfile) -> set[str]:
+    """名前で比べるときの鍵。表示名と other_names(最初から入っているものだけが持つ。利用者の指示文は表示名だけ)。"""
+    return {_name_key(profile.name), *(_name_key(other) for other in profile.other_names)}
+
+
+def builtin_name_variants() -> list[str]:
+    """最初から入っている指示文の、両方の言語の名前(取り込むときに名前を避けるのに使う)。"""
+    return [name for p in BUILTIN_PROFILES for name in (p.name, *p.other_names)]
 
 
 def is_builtin(profile_id: str) -> bool:
@@ -133,7 +169,7 @@ def _read(path: Path) -> bytes | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise SettingsError(f"{path}: 読めません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_err("unreadable", path=path, reason=_reason(exc))) from None
 
 
 def prompt_file_digest(path: Path) -> str | None:
@@ -150,11 +186,11 @@ def _template_problem(prefix: str, kind: str) -> str:
 def _profile(item: Any, index: int, path: Path) -> PromptProfile:
     where = f"{path}: profiles[{index}]"
     if not isinstance(item, dict):
-        raise SettingsError(f"{where} は表(オブジェクト)にしてください")
+        raise SettingsError(_err("where_not_object", where=where))
     profile_id = item.get("id")
     if not isinstance(profile_id, str) or _USER_ID.fullmatch(profile_id) is None:
         # builtin- の id は最初から入っているものだけ(ファイルの profiles には書けない)
-        raise SettingsError(f"{where}.id は 32 桁の16進にしてください")
+        raise SettingsError(_err("id_form", where=where))
     return replace(prompt_from_item(item.get("name"), item.get("template"), where), id=profile_id)
 
 
@@ -165,7 +201,7 @@ def prompt_from_item(name: Any, template: Any, where: str) -> PromptProfile:
     違えば SettingsError(where と項目と理由の種類だけ。本文は入れない)。
     """
     if not isinstance(name, str) or not name.strip():
-        raise SettingsError(f"{where}.name は空でない文字列にしてください")
+        raise SettingsError(_err("where_name", where=where))
     if (problem := check_prompt_template(template)) is not None:
         raise SettingsError(_template_problem(f"{where}.", problem))
     return PromptProfile(id="", name=name.strip(), template=template)
@@ -181,9 +217,9 @@ def _check_unique(profiles: list[PromptProfile], path: Path) -> None:
     names: set[str] = set()
     for index, profile in enumerate(profiles):
         if profile.id in ids:
-            raise SettingsError(f"{path}: profiles[{index}].id が重複しています")
+            raise SettingsError(_err("dup_id", path=path, index=index))
         if _name_key(profile.name) in names:
-            raise SettingsError(f"{path}: profiles[{index}].name が重複しています(大文字・小文字は区別しません)")
+            raise SettingsError(_err("dup_name", path=path, index=index))
         ids.add(profile.id)
         names.add(_name_key(profile.name))
 
@@ -199,17 +235,17 @@ def load_prompt_profiles(path: Path) -> PromptProfiles:
     try:
         data = json.loads(raw.decode("utf-8"))
     except UnicodeDecodeError:
-        raise SettingsError(f"{path}: UTF-8 として読めません") from None
+        raise SettingsError(_err("not_utf8", path=path)) from None
     except (ValueError, RecursionError):
-        raise SettingsError(f"{path}: JSON として読めません") from None
+        raise SettingsError(_err("not_json", path=path)) from None
     if not isinstance(data, dict):
-        raise SettingsError(f"{path}: 一番外は表(オブジェクト)にしてください")
+        raise SettingsError(_err("top_not_object", path=path))
     version = data.get("schema_version")
     if type(version) is not int or version != SCHEMA_VERSION:
-        raise SettingsError(f"{path}: schema_version は {SCHEMA_VERSION} にしてください")
+        raise SettingsError(_err("schema_version", path=path, version=SCHEMA_VERSION))
     items = data.get("profiles")
     if not isinstance(items, list):
-        raise SettingsError(f"{path}: profiles は配列にしてください")
+        raise SettingsError(PROMPTP_ERRORS["profiles_array"].format(path=path))
     profiles = [_profile(item, i, path) for i, item in enumerate(items)]
     _check_unique(profiles, path)
     active = data.get("active")
@@ -217,7 +253,7 @@ def load_prompt_profiles(path: Path) -> PromptProfiles:
         # 消した最初から入っている指示文は既定とみなす(ファイルは書き換えない。次に保存するときに直る)
         active = BUILTIN_DEFAULT_ID
     if not isinstance(active, str) or active not in {*BUILTIN_IDS, *(p.id for p in profiles)}:
-        raise SettingsError(f"{path}: active は最初から入っているプロンプトの id か、profiles の中の id にしてください")
+        raise SettingsError(_err("active_id", path=path))
     return PromptProfiles(active=active, profiles=tuple(profiles), digest=hashlib.sha256(raw).hexdigest())
 
 
@@ -249,7 +285,7 @@ def _write(path: Path, profiles: PromptProfiles) -> None:
         os.replace(tmp, path)
         tmp = None
     except OSError as exc:
-        raise SettingsError(f"{path}: 書けません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_err("unwritable", path=path, reason=_reason(exc))) from None
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
@@ -258,13 +294,13 @@ def _write(path: Path, profiles: PromptProfiles) -> None:
 def _require_profile(profiles: PromptProfiles, profile_id: Any, path: Path) -> PromptProfile:
     profile = profiles.get(profile_id) if isinstance(profile_id, str) else None
     if profile is None:
-        raise SettingsError(f"{path}: 指定した id のプロンプトのプロファイルがありません")
+        raise SettingsError(_err("no_such_profile", path=path))
     return profile
 
 
 def _refuse_builtin(profile: PromptProfile, path: Path) -> None:
     if profile.builtin:
-        raise SettingsError(f"{path}: 最初から入っているプロンプトは変えられません(複製してから直してください)")
+        raise SettingsError(_err("builtin_readonly", path=path))
 
 
 def _checked(profile: PromptProfile, profiles: PromptProfiles, path: Path) -> PromptProfile:
@@ -273,10 +309,11 @@ def _checked(profile: PromptProfile, profiles: PromptProfiles, path: Path) -> Pr
     本文は改行を \\n にそろえてから確かめる(文に本文は入れない)。
     """
     if not isinstance(profile.name, str) or not profile.name.strip():
-        raise SettingsError(f"{path}: name は空でない文字列にしてください")
+        raise SettingsError(_err("name_required", path=path))
     name = profile.name.strip()
-    if any(_name_key(o.name) == _name_key(name) for o in profiles.all() if o.id != profile.id):
-        raise SettingsError(f"{path}: name が重複しています(大文字・小文字は区別しません)")
+    # 最初から入っているものは両方の言語の名前で断る(find が最初から入っているほうへ当たる名前を作れると、名前で選べなくなるため)
+    if any(_name_key(name) in name_keys(o) for o in profiles.all() if o.id != profile.id):
+        raise SettingsError(_err("name_duplicate", path=path))
     template = normalize_newlines(profile.template) if isinstance(profile.template, str) else profile.template
     if (problem := check_prompt_template(template)) is not None:
         raise SettingsError(_template_problem(f"{path}: ", problem))
@@ -331,7 +368,7 @@ def delete_prompt_profile(path: Path, profile_id: str) -> PromptProfile:
     target = _require_profile(profiles, profile_id, path)
     _refuse_builtin(target, path)
     if profile_id == profiles.active:
-        raise SettingsError(f"{path}: 使っているプロンプトは消せません。先に別のプロンプトを使ってください")
+        raise SettingsError(_err("active_not_deletable", path=path))
     _write(path, replace(profiles, profiles=tuple(p for p in profiles.profiles if p.id != profile_id)))
     return target
 

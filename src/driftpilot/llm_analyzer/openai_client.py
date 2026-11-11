@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from driftpilot import i18n
 from driftpilot.llm_analyzer import api_error
 from driftpilot.llm_analyzer.client import LLMClientUnavailable, LLMConnectionError, LLMError, LLMResponseError
 from driftpilot.llm_analyzer.http_json import DeltaRecord, ask_stream_with_retries, ask_with_retries
@@ -37,6 +38,11 @@ from driftpilot.llm_analyzer.wire import (
     responses_text,
     responses_thinking_event,
 )
+
+# 利用者に見える文(日本語・英語。REQ-258)
+_TEXTS_JA = {"not_installed": "openai が入っていません(pip install 'driftpilot[llm]')"}
+_TEXTS_EN = {"not_installed": "openai is not installed (pip install 'driftpilot[llm]')"}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -100,7 +106,7 @@ class OpenAICompatibleClient:
         try:
             import openai
         except ImportError:
-            raise LLMClientUnavailable("openai が入っていません(pip install 'driftpilot[llm]')") from None
+            raise LLMClientUnavailable(_T["not_installed"]) from None
         self._openai = openai
         self._model = model
         self._api_key = api_key  # エラーの文にそのまま載っていたら伏せるためだけに持つ(repr には出さない)

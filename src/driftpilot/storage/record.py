@@ -29,6 +29,7 @@ from driftpilot.core.types import SIDES, Conversation, KindChoice, Mode
 from driftpilot.coverage_report import FOLD_VERSION
 from driftpilot.diff_engine import NormalizationRule
 from driftpilot.diff_engine.normalization import builtin_rules, select_rules
+from driftpilot.messages import STORE_TEXTS as _T
 from driftpilot.raw_keys import RawOptionsError, options_from_plain, options_to_plain
 from driftpilot.segmentation import Exposure
 
@@ -132,11 +133,8 @@ class UnsupportedSchemaVersion(StorageError):
         self.where = where
         self.found = found
         self.expected = SCHEMA_VERSION
-        shown = "(なし)" if found is _MISSING else repr(found)
-        super().__init__(
-            f"保存ファイルの版が違うため読みません({where}: {shown}、このツールが読める版: {SCHEMA_VERSION!r})。"
-            "変換して読むと、欠けた項目を「無い」と誤読するおそれがあるためです"
-        )
+        shown = _T["none_label"] if found is _MISSING else repr(found)
+        super().__init__(_T["version_mismatch"].format(where=where, shown=shown, expected=repr(SCHEMA_VERSION)))
 
 
 class StoredRecord(NamedTuple):
@@ -261,7 +259,7 @@ def _path(source_paths: Mapping[str, str | os.PathLike[str] | None], side: str) 
         return None
     text = os.fspath(value)
     if not text:
-        raise ValueError(f"source_paths[{side!r}] が空です。パスが無いときは None にしてください")
+        raise ValueError(_T["source_path_empty"].format(side=side))
     return text
 
 
@@ -281,19 +279,18 @@ def build_record(
     """
     unknown = set(source_paths) - set(SIDES)
     if unknown:
-        raise ValueError(f"source_paths のキーは before / after にしてください: {sorted(unknown)}")
+        raise ValueError(_T["source_paths_keys"].format(names=sorted(unknown)))
     unread = set(unread_sides)
     if unread - set(SIDES):
-        raise ValueError(f"unread_sides は before / after にしてください: {sorted(unread - set(SIDES))}")
+        raise ValueError(_T["unread_sides_keys"].format(names=sorted(unread - set(SIDES))))
     if unread != _unread_sides(outcome):
         raise ValueError(
-            "unread_sides は、入力を読めなかった結果(error.stage が read_input)の error.detail.sides と一致させてください"
-            f"(unread_sides: {sorted(unread)}、detail.sides: {sorted(_unread_sides(outcome))})"
+            _T["unread_sides_mismatch"].format(unread=sorted(unread), declared=sorted(_unread_sides(outcome)))
         )
     if saved_at is None:
         saved_at = datetime.now(timezone.utc).astimezone()
     elif saved_at.tzinfo is None or saved_at.utcoffset() is None:
-        raise ValueError("saved_at はタイムゾーン付きの日時にしてください")
+        raise ValueError(_T["saved_at_timezone"])
 
     sides = {"before": request.before, "after": request.after}
     inputs: dict[str, Any] = {}
@@ -384,7 +381,7 @@ def resaved_record(record: Mapping[str, Any], conversation: Conversation | None,
     足すか、消す)だけ。ほかのキー・値・並びはそのまま残す。答えがあるかは保存の result.llm で決める。
     """
     if saved_at.tzinfo is None or saved_at.utcoffset() is None:
-        raise ValueError("saved_at はタイムゾーン付きの日時にしてください")
+        raise ValueError(_T["saved_at_timezone"])
     copied = copy.deepcopy(dict(record))
     copied["saved_at"] = saved_at.isoformat(timespec="seconds")
     result = copied["result"]
@@ -420,11 +417,11 @@ def save(record: Mapping[str, Any], path: str | os.PathLike[str], *, label: str 
         with open(target, "x", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
     except FileExistsError as exc:
-        raise StorageError(f"{target}: 既にあります。上書きしません") from exc
+        raise StorageError(_T["exists"].format(target=target)) from exc
     except FileNotFoundError as exc:
-        raise StorageError(f"{target}: 保存先のフォルダがありません(自動では作りません)") from exc
+        raise StorageError(_T["no_folder"].format(target=target)) from exc
     except OSError as exc:
-        raise StorageError(f"{target}: 書けません ({exc.strerror or exc})") from exc
+        raise StorageError(_T["cannot_write"].format(target=target, reason=exc.strerror or exc)) from exc
     return target
 
 
@@ -441,20 +438,20 @@ def load_raw(path: str | os.PathLike[str]) -> tuple[Any, StoredRecord]:
     try:
         text = Path(path).read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
-        raise StorageFormatError(f"{path}: UTF-8 として読めません") from exc
+        raise StorageFormatError(_T["not_utf8"].format(path=path)) from exc
     except OSError as exc:
-        raise StorageError(f"{path}: 読めません ({exc.strerror or exc})") from exc
+        raise StorageError(_T["cannot_read"].format(path=path, reason=exc.strerror or exc)) from exc
     try:
         record = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise StorageFormatError(f"{path}: JSON として読めません: {exc}") from exc
+        raise StorageFormatError(_T["not_json"].format(path=path, error=exc)) from exc
     return record, from_record(record)
 
 
 def from_record(record: Any) -> StoredRecord:
     """build_record の形の dict を読む。版を最初に確かめ、違えば組み立てずに拒否する。"""
     if not isinstance(record, dict):
-        raise StorageFormatError("保存ファイルの最上位がオブジェクトではありません")
+        raise StorageFormatError(_T["file_not_object"])
     found = record.get("schema_version", _MISSING)
     if found != SCHEMA_VERSION or type(found) is not str:
         raise UnsupportedSchemaVersion("schema_version", found)
@@ -465,15 +462,15 @@ def from_record(record: Any) -> StoredRecord:
             raise UnsupportedSchemaVersion("result.schema_version", found)
     missing = [k for k in RECORD_KEYS if k not in record]
     if missing:
-        raise StorageFormatError(f"保存ファイルに項目がありません: {', '.join(missing)}")
+        raise StorageFormatError(_T["file_missing_items"].format(names=", ".join(missing)))
     # 再現に必要な情報(ハッシュ・指紋・版)が欠けたファイルを、正常な保存結果として受け取らない
     meta = _build(RecordMeta, {k: v for k, v in record.items() if k != "result"}, "")
     try:
         saved_at = datetime.fromisoformat(meta["saved_at"])
     except ValueError as exc:
-        raise _fail("saved_at", f"日時として読めません: {meta['saved_at']!r}") from exc
+        raise _fail("saved_at", _T["date_unreadable"].format(value=meta["saved_at"])) from exc
     if saved_at.utcoffset() is None:
-        raise _fail("saved_at", "タイムゾーンがありません")
+        raise _fail("saved_at", _T["no_timezone"])
     if isinstance(result, dict) and LLM_KEY not in result:
         # REQ-16 より前の保存には result.llm が無い。欠けを受け入れるのはこの項目と下の exclusions・pager_marks だけで、
         # None(未記録)として読む
@@ -496,28 +493,28 @@ def from_record(record: Any) -> StoredRecord:
         side_meta = meta["inputs"][side]
         unread = side_meta["sha256"] is None
         if unread != (side_meta["line_count"] is None):
-            raise _fail(f"inputs.{side}", "sha256 と line_count は、両方 null(入力を読めなかった側)か両方とも値にしてください")
+            raise _fail(f"inputs.{side}", _T["sha_line_both"])
         # 再現に必要なハッシュの欠けを許すのは、結果が読めなかったと言っている側だけ。逆に、読めなかった側に値があるのも形の違い
         if unread and side not in declared:
             raise _fail(
                 f"inputs.{side}.sha256",
-                "null にできるのは、入力を読めなかった結果(error.stage が read_input)の error.detail.sides にある側だけです",
+                _T["null_only_unread"],
             )
         if not unread and side in declared:
-            raise _fail(f"inputs.{side}.sha256", "error.detail.sides で読めなかった側なのに、ハッシュがあります")
+            raise _fail(f"inputs.{side}.sha256", _T["hash_on_unread"])
     settings = record["settings"]
     if PLATFORM_USED_KEY in settings:
         # SettingsMeta には無いキー(今のキーを固定するため)。あれば str か null だけを受け取る
         used = settings[PLATFORM_USED_KEY]
         if used is not None and not isinstance(used, str):
-            raise _fail(f"settings.{PLATFORM_USED_KEY}", f"文字列か null にしてください: {used!r}")
+            raise _fail(f"settings.{PLATFORM_USED_KEY}", _T["str_or_null"].format(value=used))
         meta["settings"][PLATFORM_USED_KEY] = used
     if RAW_OPTIONS_KEY in settings:
         # SettingsMeta には無いキー(platform_used と同じ扱い)。形と中身を設定の決まりで確かめる(文に式は入れない)
         try:
             options_from_plain(settings[RAW_OPTIONS_KEY])
         except RawOptionsError:
-            raise _fail(f"settings.{RAW_OPTIONS_KEY}", "単純比較の設定の形が違うか、使えない設定です") from None
+            raise _fail(f"settings.{RAW_OPTIONS_KEY}", _T["raw_options_bad"]) from None
         meta["settings"][RAW_OPTIONS_KEY] = settings[RAW_OPTIONS_KEY]
     if JOB_KEY in record:
         meta[JOB_KEY] = _build(JobMeta, record[JOB_KEY], JOB_KEY)
@@ -534,19 +531,19 @@ def _read_conversation(value: Any) -> Any:
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise _fail(where, "オブジェクトではありません")
+        raise _fail(where, _T["not_object"])
     turns = value.get("turns", _MISSING)
     if turns is _MISSING:
-        raise _fail(where, "項目がありません: turns")
+        raise _fail(where, _T["missing_turns"])
     if not isinstance(turns, list):
-        raise _fail(f"{where}.turns", "配列ではありません")
+        raise _fail(f"{where}.turns", _T["not_array"])
     pairs = []
     for index, turn in enumerate(turns):
         if not isinstance(turn, dict):
-            raise _fail(f"{where}.turns[{index}]", "オブジェクトではありません")
+            raise _fail(f"{where}.turns[{index}]", _T["not_object"])
         absent = [name for name in ("question", "answer") if name not in turn]
         if absent:
-            raise _fail(f"{where}.turns[{index}]", f"項目がありません: {', '.join(absent)}")
+            raise _fail(f"{where}.turns[{index}]", _T["missing_items"].format(names=", ".join(absent)))
         pairs.append([turn["question"], turn["answer"]])
     return {**value, "turns": pairs}
 
@@ -610,7 +607,7 @@ def _fill_raw_dict(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fail(where: str, message: str) -> StorageFormatError:
-    return StorageFormatError(f"{where or '(最上位)'}: {message}")
+    return StorageFormatError(f"{where or _T['top_level']}: {message}")
 
 
 def _build(tp: Any, value: Any, where: str) -> Any:
@@ -621,7 +618,7 @@ def _build(tp: Any, value: Any, where: str) -> Any:
     if origin is Literal:
         # 型も比べる(1 == True のため、`in` だけでは Literal[True] に 1 が通る)
         if not any(type(value) is type(arg) and value == arg for arg in get_args(tp)):
-            raise _fail(where, f"想定外の値です: {value!r}")
+            raise _fail(where, _T["unexpected_value"].format(value=value))
         return value
     if origin in (Union, types.UnionType):
         args = get_args(tp)
@@ -632,47 +629,47 @@ def _build(tp: Any, value: Any, where: str) -> Any:
                 return _build(arg, value, where)
             except StorageFormatError:
                 continue
-        raise _fail(where, f"どの型にも合いません: {value!r}")
+        raise _fail(where, _T["no_type_matches"].format(value=value))
     if dataclasses.is_dataclass(tp) or is_typeddict(tp):
         if not isinstance(value, dict):
-            raise _fail(where, "オブジェクトではありません")
+            raise _fail(where, _T["not_object"])
         hints = get_type_hints(tp)
         names = [f.name for f in dataclasses.fields(tp)] if dataclasses.is_dataclass(tp) else list(hints)
         # 欠けた項目を既定値で補わない(欠けは「無い」ではなく、形が違うことを意味する)。知らないキーは無視する
         absent = [n for n in names if n not in value]
         if absent:
-            raise _fail(where, f"項目がありません: {', '.join(absent)}")
+            raise _fail(where, _T["missing_items"].format(names=", ".join(absent)))
         built = {n: _build(hints[n], value[n], f"{where}.{n}" if where else n) for n in names}
         return tp(**built) if dataclasses.is_dataclass(tp) else built
     if origin is list:
         if not isinstance(value, list):
-            raise _fail(where, "配列ではありません")
+            raise _fail(where, _T["not_array"])
         (item,) = get_args(tp)
         return [_build(item, v, f"{where}[{i}]") for i, v in enumerate(value)]
     if origin is tuple:
         if not isinstance(value, list):
-            raise _fail(where, "配列ではありません")
+            raise _fail(where, _T["not_array"])
         args = get_args(tp)
         if len(args) == 2 and args[1] is Ellipsis:
             return tuple(_build(args[0], v, f"{where}[{i}]") for i, v in enumerate(value))
         if len(args) != len(value):
-            raise _fail(where, f"要素の数が違います({len(value)} 件、想定 {len(args)} 件)")
+            raise _fail(where, _T["count_differs"].format(actual=len(value), expected=len(args)))
         return tuple(_build(a, v, f"{where}[{i}]") for i, (a, v) in enumerate(zip(args, value)))
     if origin is dict:
         if not isinstance(value, dict):
-            raise _fail(where, "オブジェクトではありません")
+            raise _fail(where, _T["not_object"])
         key_tp, value_tp = get_args(tp)
         return {_build(key_tp, k, f"{where}.{k}"): _build(value_tp, v, f"{where}.{k}") for k, v in value.items()}
     if tp is bool:
         if not isinstance(value, bool):
-            raise _fail(where, "真偽値ではありません")
+            raise _fail(where, _T["not_bool"])
         return value
     if tp is int:
         if not isinstance(value, int) or isinstance(value, bool):
-            raise _fail(where, "整数ではありません")
+            raise _fail(where, _T["not_int"])
         return value
     if tp is str:
         if not isinstance(value, str):
-            raise _fail(where, "文字列ではありません")
+            raise _fail(where, _T["not_str"])
         return value
-    raise _fail(where, f"読み込みが対応していない型です: {tp!r}")
+    raise _fail(where, _T["unsupported_type"].format(tp=tp))

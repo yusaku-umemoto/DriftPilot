@@ -2,6 +2,10 @@ DriftPilot — はじめにお読みください
 
 ネットワーク機器の config と show の出力を比べ、意味のある差分を取り出すツールです。
 
+■ 言語（Language）
+  0.2.2 から、画面の言語の既定は英語です。日本語にするには、比較の画面の「Settings…」→「Display」タブ →
+  「Language」で「日本語」を選び、「Save」を押して、DriftPilot を開き直してください。
+
 ■ 起動
   Windows: フォルダーの中の DriftPilot.exe（画面）。コマンドで使うときは driftpilot-cli.exe
   Mac    : DriftPilot.app を「アプリケーション」へドラッグして開く。

@@ -15,6 +15,7 @@ from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
+from driftpilot import i18n
 from driftpilot.core.batch import STATUSES, BatchSummary, overall_status
 from driftpilot.core.types import CompareOutcome, Status
 from driftpilot.llm_analyzer import LlmAnalysis, LlmReason, UnsentShape
@@ -24,6 +25,11 @@ from driftpilot.llm_analyzer import LlmAnalysis, LlmReason, UnsentShape
 from driftpilot.llm_constants import DEFAULT_MAX_TOTAL_DIFFS
 
 # 送信内容の中の伏せた記号。指示文の `<secret:N>` は数字ではないので数えない
+# 利用者に見える文。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)
+_TEXTS_JA = {"max_total_diffs": "max_total_diffs は 1 以上の整数にしてください: {value}"}
+_TEXTS_EN = {"max_total_diffs": "max_total_diffs must be an integer of 1 or more: {value}"}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+
 _SECRET = re.compile(r"<secret:\d+>")
 
 
@@ -139,7 +145,7 @@ def _merge_shapes(analyses: Iterable[LlmAnalysis]) -> tuple[UnsentShape, ...]:
 def llm_preview(results: Sequence[ResultLike], *, max_total_diffs: int = DEFAULT_MAX_TOTAL_DIFFS) -> BatchLlmPreview:
     """1段目の結果から確認の要約を作る。送らなかった行は、送る内容が無かった job の分も数える。"""
     if type(max_total_diffs) is not int or max_total_diffs < 1:
-        raise ValueError(f"max_total_diffs は 1 以上の整数にしてください: {max_total_diffs!r}")
+        raise ValueError(_T["max_total_diffs"].format(value=repr(max_total_diffs)))
     analyses = [r.outcome.llm for r in results if r.outcome.llm is not None]
     jobs = []
     for r in results:

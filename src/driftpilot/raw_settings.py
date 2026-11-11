@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from driftpilot.llm_settings import SettingsError, user_config_path
+from driftpilot.messages import RAWSET_TEXTS as _T
 from driftpilot.raw_keys import (
     DEFAULT_RAW_OPTIONS,
     RAW_CONTEXT_DEFAULT,
@@ -61,31 +62,31 @@ def load_raw_settings(path: Path) -> RawSettings:
     except FileNotFoundError:
         return RawSettings()
     except OSError as exc:
-        raise SettingsError(f"{path}: 読めません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_T["cannot_read"].format(path=path, reason=exc.strerror or type(exc).__name__)) from None
     try:
         data = json.loads(raw.decode("utf-8"))
     except UnicodeDecodeError:
-        raise SettingsError(f"{path}: UTF-8 として読めません") from None
+        raise SettingsError(_T["not_utf8"].format(path=path)) from None
     except (ValueError, RecursionError):
-        raise SettingsError(f"{path}: JSON として読めません") from None
+        raise SettingsError(_T["not_json"].format(path=path)) from None
     if not isinstance(data, dict):
-        raise SettingsError(f"{path}: 一番外は表(オブジェクト)にしてください")
+        raise SettingsError(_T["not_object"].format(path=path))
     version = data.get("schema_version")
     if type(version) is not int or version != SCHEMA_VERSION:
-        raise SettingsError(f"{path}: schema_version は {SCHEMA_VERSION} にしてください")
+        raise SettingsError(_T["schema_version"].format(path=path, version=SCHEMA_VERSION))
     if "raw_options" not in data:
-        raise SettingsError(f"{path}: raw_options がありません")
+        raise SettingsError(_T["no_raw_options"].format(path=path))
     context = data.get("context_lines", RAW_CONTEXT_DEFAULT)
     if type(context) is not int or not 0 <= context <= RAW_CONTEXT_MAX:
-        raise SettingsError(f"{path}: context_lines は 0 から {RAW_CONTEXT_MAX} の整数にしてください")
+        raise SettingsError(_T["context_lines"].format(path=path, maximum=RAW_CONTEXT_MAX))
     try:
         return RawSettings(options_from_plain(data["raw_options"]), context)
     except RawOptionsError as exc:
         if exc.problems:
-            kinds = "・".join(sorted({p.kind for p in exc.problems}))
-            raise SettingsError(f"{path}: raw_options に使えない設定があります({kinds})") from None
+            kinds = _T["kinds_separator"].join(sorted({p.kind for p in exc.problems}))
+            raise SettingsError(_T["bad_options"].format(path=path, kinds=kinds)) from None
         # 形の誤りの文は場所と種類だけ(式は入らない)
-        raise SettingsError(f"{path}: {exc}") from None
+        raise SettingsError(_T["form_error"].format(path=path, error=exc)) from None
 
 
 def save_raw_defaults(path: Path, options: RawOptions, context_lines: int = RAW_CONTEXT_DEFAULT) -> None:
@@ -109,7 +110,7 @@ def save_raw_defaults(path: Path, options: RawOptions, context_lines: int = RAW_
         os.replace(tmp, path)
         tmp = None
     except OSError as exc:
-        raise SettingsError(f"{path}: 書けません ({exc.strerror or type(exc).__name__})") from None
+        raise SettingsError(_T["cannot_write"].format(path=path, reason=exc.strerror or type(exc).__name__)) from None
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)

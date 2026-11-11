@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from driftpilot.messages import (
+    KEYSTORE_BAD_PROFILE_ID,
+    KEYSTORE_KEY_REMAINS,
+    KEYSTORE_NAME_MAC,
+    KEYSTORE_NAME_OTHER,
+    KEYSTORE_NAME_WINDOWS,
     api_key_bad_length,
     api_key_deleted,
     api_key_empty,
@@ -66,7 +71,7 @@ def is_profile_id(value: object) -> bool:
 def service_name(profile_id: str = DEFAULT_PROFILE_ID) -> str:
     """プロファイルの保存名(keyring の service)。形の違う id は ValueError で断る(文に id は入れない)。"""
     if not is_profile_id(profile_id):
-        raise ValueError("プロファイルの id の形が違います")
+        raise ValueError(KEYSTORE_BAD_PROFILE_ID)
     return f"DriftPilot/LLM/{profile_id}/APIKey"
 
 
@@ -74,10 +79,10 @@ def store_name(platform: str | None = None) -> str:
     """画面に出す保管庫の名前。"""
     platform = sys.platform if platform is None else platform
     if platform.startswith("win"):
-        return "Windows 資格情報マネージャー"
+        return KEYSTORE_NAME_WINDOWS
     if platform == "darwin":
-        return "Mac キーチェーン"
-    return "OS の保管庫"
+        return KEYSTORE_NAME_MAC
+    return KEYSTORE_NAME_OTHER
 
 
 def _backend() -> tuple[Any, str | None]:
@@ -162,7 +167,7 @@ def delete_key(*, profile_id: str = DEFAULT_PROFILE_ID, platform: str | None = N
             error = type(exc).__name__
         # 削除の後に読み直し、キーが残っていれば失敗にする(成功と表示しない)
         if backend.get_password(service, USERNAME) is not None:
-            return StoreResult(False, keyring_failed("delete", error or "キーが残っています"))
+            return StoreResult(False, keyring_failed("delete", error or KEYSTORE_KEY_REMAINS))
     except Exception as exc:  # noqa: BLE001 - 例外の本文は使わない
         return StoreResult(False, keyring_failed("delete", type(exc).__name__))
     if error is not None:

@@ -29,14 +29,20 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from driftpilot import i18n
 from driftpilot.llm_analyzer.client import LLMClientUnavailable, LLMConnectionError, LLMError, LLMResponseError
+
+# 利用者に見える文(日本語・英語。REQ-258)。鍵の組は両方で同じ
+_TEXTS_JA = {"default_model": "CLI の既定のモデル", "effort_invalid": "cli_effort の値が使えません"}
+_TEXTS_EN = {"default_model": "CLI default model", "effort_invalid": "The cli_effort value cannot be used"}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
 CODEX_CLI = "codex-cli"
 CLAUDE_CODE_CLI = "claude-code-cli"
 CLI_FORMATS = (CODEX_CLI, CLAUDE_CODE_CLI)
 DEFAULT_CLI_TIMEOUT_SECONDS = 60
 # モデルの欄が空のとき(--model を付けずに CLI の既定のモデルで送る)の、確認の行と結果に出すモデルの名前
-CLI_DEFAULT_MODEL = "CLI の既定のモデル"
+CLI_DEFAULT_MODEL = _T["default_model"]
 ANSWER_FILE = "answer.txt"  # Codex の --output-last-message の書き先(一時フォルダの中)
 # Thinking の深さ(プロファイルの cli_effort。ADR-0157 決定10)。ここに無い値は引数に入れない
 CLI_EFFORTS: dict[str, tuple[str, ...]] = {
@@ -123,7 +129,7 @@ def _effort_args(kind: str, effort: str | None) -> list[str]:
     if effort is None:
         return []
     if effort not in CLI_EFFORTS[kind]:  # 引数に入れる前にもう一度見る(一覧に無い文字を CLI に渡さない)
-        raise ValueError("cli_effort の値が使えません")
+        raise ValueError(_T["effort_invalid"])
     if kind == CLAUDE_CODE_CLI:
         return ["--effort", effort]
     return ["-c", f'model_reasoning_effort="{effort}"']
@@ -331,7 +337,7 @@ class CliClient:
         del api_key, base_url  # 使わない(キーを属性に残さない)
         if effort is not None and effort not in CLI_EFFORTS[kind]:
             # 一覧に無い値は引数に入れない。文に値を入れない(ADR-0157 決定10)
-            raise ValueError("cli_effort の値が使えません")
+            raise ValueError(_T["effort_invalid"])
         self._spec = CLI_SPECS[kind]
         self._kind = kind
         self._env = dict(env)

@@ -12,6 +12,7 @@
 
 from collections.abc import Sequence
 
+from driftpilot import i18n
 from driftpilot.diff_engine import CompareResult, RawCompareResult, ShowCompareResult
 from driftpilot.llm_analyzer.masking import (
     PEM_BEGIN,
@@ -46,16 +47,33 @@ REFUSE_MASK = "mask"
 REFUSE_UNSENT = "unsent"
 REFUSE_PEM = "pem"
 
-HISTORY_HEADER = "=== これまでのやり取り ==="
-QUESTION_HEADER = "=== 追加の質問 ==="
-END_HEADER = "=== ここまで ==="
-CLOSING = "上の差分とやり取りだけをもとに答えてください。分からないことは分からないと答えてください。"
+# 追加の質問の枠の文(REQ-259 / ADR-0190 決定3)。日本語の版(…_JA)と英語の版(…_EN)を持ち、言語で 1 つ選ぶ。
+# 送る文の枠だけで、最初に送った全文・やり取り・質問の中身は言語で変えない
+_HISTORY_HEADER_JA = "=== これまでのやり取り ==="
+_HISTORY_HEADER_EN = "=== Conversation so far ==="
+_QUESTION_HEADER_JA = "=== 追加の質問 ==="
+_QUESTION_HEADER_EN = "=== Additional question ==="
+_END_HEADER_JA = "=== ここまで ==="
+_END_HEADER_EN = "=== End ==="
+_CLOSING_JA = "上の差分とやり取りだけをもとに答えてください。分からないことは分からないと答えてください。"
+_CLOSING_EN = "Answer based only on the differences and the conversation above. If you do not know something, say that you do not know."
 # 変更後の全文も送るときの終わりの文(ADR-0158 決定6)。全文を送らないときは CLOSING のまま
-CLOSING_FULL = "上の差分と全文とやり取りだけをもとに答えてください。分からないことは分からないと答えてください。"
+_CLOSING_FULL_JA = "上の差分と全文とやり取りだけをもとに答えてください。分からないことは分からないと答えてください。"
+_CLOSING_FULL_EN = (
+    "Answer based only on the differences, the full text and the conversation above. If you do not know something, say that you do not know."
+)
+_LABEL_JA = {ANSWER: "回答", QUESTION: "質問"}
+_LABEL_EN = {ANSWER: "Answer", QUESTION: "Question"}
+
+HISTORY_HEADER = i18n.choose(_HISTORY_HEADER_JA, _HISTORY_HEADER_EN)
+QUESTION_HEADER = i18n.choose(_QUESTION_HEADER_JA, _QUESTION_HEADER_EN)
+END_HEADER = i18n.choose(_END_HEADER_JA, _END_HEADER_EN)
+CLOSING = i18n.choose(_CLOSING_JA, _CLOSING_EN)
+CLOSING_FULL = i18n.choose(_CLOSING_FULL_JA, _CLOSING_FULL_EN)
+_LABEL = i18n.choose(_LABEL_JA, _LABEL_EN)
 # 全文を作り直せなかった理由(rebuild_after_text)。番号がずれる・入力が無い / 全文が上限を超える
 REBUILD_MISMATCH = "mismatch"
 REBUILD_TOO_LONG = "too_long"
-_LABEL = {ANSWER: "回答", QUESTION: "質問"}
 
 
 def question_count(turns: Sequence[tuple[str, str]]) -> int:

@@ -19,7 +19,8 @@ from ntc_templates.parse import ParsingException, parse_output
 from textfsm import TextFSMError
 from textfsm.clitable import CliTableError
 
-from driftpilot.coverage_report.measure import INDEX_NAME, NO_PROMPT, InputError
+from driftpilot import i18n
+from driftpilot.coverage_report.measure import INDEX_NAME, INPUT_TEXTS, NO_PROMPT, InputError
 from driftpilot.coverage_show.commands import SHOW_COMMANDS, match_command
 from driftpilot.format_detect import DetectSettings, Verdict, load_settings, sniff
 from driftpilot.segmentation import split_log
@@ -32,7 +33,9 @@ HEAD_LINES = 3
 HEAD_WIDTH = 120
 
 # 存在しない platform 名 → 案内。ntc-templates の index は読まないため、判別できるのはここに書いたものだけ
-REJECTED_PLATFORMS = {"cisco_xe": "IOS-XE は cisco_ios を指定してください"}
+_REJECTED_JA = {"cisco_xe": "IOS-XE は cisco_ios を指定してください"}
+_REJECTED_EN = {"cisco_xe": "Use cisco_ios for IOS-XE"}
+REJECTED_PLATFORMS = i18n.choose(_REJECTED_JA, _REJECTED_EN)
 
 
 @dataclass(frozen=True)
@@ -174,13 +177,13 @@ def resolve_inputs(paths: list[str]) -> list[InputItem]:
         if path.is_dir():
             indexes = sorted(path.rglob(INDEX_NAME))
             if not indexes:
-                raise InputError(f"{raw}: {INDEX_NAME} が見つかりません(切り出し済みのディレクトリを指定してください)")
+                raise InputError(INPUT_TEXTS["index_missing"].format(raw=raw, index_name=INDEX_NAME))
             for index in indexes:
                 items.extend(_read_index(index))
         elif path.is_file():
             items.append(InputItem(path))
         else:
-            raise InputError(f"{raw}: 読めません(存在しないか、ファイルでもディレクトリでもありません)")
+            raise InputError(INPUT_TEXTS["unreadable_input"].format(raw=raw))
     return items
 
 
@@ -189,7 +192,7 @@ def _read_index(index: Path) -> list[InputItem]:
         with index.open(encoding="utf-8", newline="") as fh:
             rows = list(csv.DictReader(fh, delimiter="\t"))
     except (OSError, UnicodeDecodeError) as exc:
-        raise InputError(f"{index}: 読めません ({exc})") from exc
+        raise InputError(INPUT_TEXTS["unreadable_index"].format(index=index, error=exc)) from exc
     items: list[InputItem] = []
     for row in rows:
         name = row.get("file")
@@ -262,7 +265,7 @@ def measure(items: list[InputItem], platform: str | None = None) -> ShowCoverage
         try:
             text = item.path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            report.errors.append((source, f"読めません ({type(exc).__name__})"))
+            report.errors.append((source, INPUT_TEXTS["unreadable_file"].format(error=type(exc).__name__)))
             continue
         try:
             results = [
@@ -270,7 +273,7 @@ def measure(items: list[InputItem], platform: str | None = None) -> ShowCoverage
                 for number, command, body in _segments(item, text)
             ]
         except Exception as exc:  # noqa: BLE001 - 1ファイルの解析失敗で全体を止めない
-            report.errors.append((source, f"解析失敗 ({type(exc).__name__})"))
+            report.errors.append((source, INPUT_TEXTS["parse_failed"].format(error=type(exc).__name__)))
             continue
         report.files += 1
         report.segments.extend(results)

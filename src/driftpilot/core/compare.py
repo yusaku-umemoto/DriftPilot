@@ -40,6 +40,7 @@ input_form の直後に同じ経路で置く。構造化比較に失敗したと
 import dataclasses
 from collections.abc import Callable
 
+from driftpilot import i18n
 from driftpilot.config_parser import UnsupportedConfigPlatform
 from driftpilot.config_parser.family_hint import AUTO_PLATFORM, detect_platform, family_hint
 from driftpilot.config_parser.platforms import CONFIG_PLATFORM_NAMES, flat_platform
@@ -92,7 +93,25 @@ from driftpilot.segmentation import (
 # 進捗の工程名。工程の入口で通知する(中断の確認も同じ位置)
 STAGES = ("split", "select", "detect_kind", "compare", "safety_checks", "llm", "done")
 
-_LABEL = {"before": "変更前", "after": "変更後"}
+# 利用者に見える文。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)
+_TEXTS_JA = {
+    "side_before": "変更前",
+    "side_after": "変更後",
+    "platform_show_command": "--platform と --show-command は両方指定してください",
+    "platform_use_kind_config": "。{platform} の config を比較するときは --kind config を指定してください(--show-command は不要)",
+    "kind_mismatch": "変更前と変更後で入力の種類の判定が食い違います。--kind config または --kind show を指定してください",
+    "structured_failed": "structured 比較に失敗しました: {error_type}: {error}",
+}
+_TEXTS_EN = {
+    "side_before": "Before",
+    "side_after": "After",
+    "platform_show_command": "Specify both --platform and --show-command",
+    "platform_use_kind_config": ". To compare a {platform} config, specify --kind config (--show-command is not needed)",
+    "kind_mismatch": "The input kind detected for Before and After does not match. Specify --kind config or --kind show",
+    "structured_failed": "Structured comparison failed: {error_type}: {error}",
+}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+_LABEL = {"before": _T["side_before"], "after": _T["side_after"]}
 
 
 def run_compare(
@@ -124,9 +143,9 @@ def run_compare(
         if (unsupported := _unsupported_platform(mode, request.platform, "request")) is not None:
             return unsupported
     elif bool(request.platform) != bool(request.show_command):
-        message = "--platform と --show-command は両方指定してください"
+        message = _T["platform_show_command"]
         if flat_name:
-            message += f"。{request.platform} の config を比較するときは --kind config を指定してください(--show-command は不要)"
+            message += _T["platform_use_kind_config"].format(platform=request.platform)
         return _error(mode, "platform_show_command", "request", message)
 
     inputs = {"before": request.before, "after": request.after}
@@ -182,7 +201,7 @@ def run_compare(
             mode,
             "kind_mismatch",
             "detect_kind",
-            "変更前と変更後で入力の種類の判定が食い違います。--kind config または --kind show を指定してください",
+            _T["kind_mismatch"],
             segmentation=segmentation,
         )
 
@@ -290,7 +309,7 @@ def run_compare(
         error = CompareError(
             "structured_compare_failed",
             "structured_compare",
-            f"structured 比較に失敗しました: {structured_error_type}: {structured_error}",
+            _T["structured_failed"].format(error_type=structured_error_type, error=structured_error),
             {"stage": "structured_compare", "error_type": structured_error_type, "error": structured_error},
         )
     if error is not None and hints:

@@ -45,6 +45,21 @@ from driftpilot.cli.commands import (
     load_llm_settings,
 )
 from driftpilot.messages import (
+    CLI_BATCH_ERR_CONFIRM_NEEDS,
+    CLI_BATCH_ERR_CONFIRM_WITH_WRITE,
+    CLI_BATCH_ERR_LLM_ONLY_COMPARING,
+    CLI_BATCH_ERR_ONE_SOURCE,
+    CLI_BATCH_ERR_PAIR_NO_DRY_RUN,
+    CLI_BATCH_ERR_SAME_PATH,
+    CLI_BATCH_ERR_TOTAL_MIN,
+    CLI_BATCH_ERR_TOTAL_NEEDS_LLM,
+    CLI_BATCH_ERR_WRITE_NEEDS_PAIR,
+    CLI_BATCH_HELP,
+    CLI_BATCH_NO_PAIRS,
+    CLI_BATCH_NONE,
+    CLI_BATCH_PAIR_NOT_RUN,
+    CLI_BATCH_SAVE_STOPPED,
+    CLI_ERROR_PREFIX,
     batch_cancel_accepted,
     batch_llm_confirm_hint,
     batch_llm_gave_up,
@@ -54,6 +69,19 @@ from driftpilot.messages import (
     batch_llm_preview_row,
     batch_saved_notice,
     batch_summary_lines,
+    cli_batch_dry_head,
+    cli_batch_dry_side,
+    cli_batch_dry_total,
+    cli_batch_err_cannot_write,
+    cli_batch_err_exists,
+    cli_batch_err_only_when_comparing,
+    cli_batch_err_path_needed,
+    cli_batch_err_save_dir,
+    cli_batch_err_write_result,
+    cli_batch_file_state,
+    cli_batch_manifest_failed,
+    cli_batch_manifest_written,
+    cli_batch_save_cut,
     pairing_text,
     selection_text,
 )
@@ -84,57 +112,32 @@ from driftpilot.llm_settings import build_request as build_llm_request
 from driftpilot.llm_settings import display_model, with_cli_limits
 from driftpilot.storage import JOB_KEY, StorageError, default_filename, save
 
-_LABEL = {"before": "変更前", "after": "変更後"}
-
-
 def add_parser(sub: Any) -> None:
-    bat = sub.add_parser("batch", help="組のファイルに書いた比較の組を順に実行する(1件1行の JSON Lines)")
-    bat.add_argument("manifest", nargs="?", metavar="MANIFEST", help="組のファイル（マニフェスト。YAML）のパス")
-    bat.add_argument("--output", metavar="PATH", help="JSON Lines の出力先(既定: 標準出力)。既にあるファイルは上書きしない")
-    bat.add_argument(
-        "--summary", metavar="PATH", help="サマリを JSON で書く(終了コードを含む)。既にあるファイルは上書きしない"
-    )
-    bat.add_argument("--quiet", action="store_true", help="標準エラーへのサマリの表示を抑える")
-    bat.add_argument("--dry-run", action="store_true", help="解釈して比較の予定を一覧に出すだけ。比較しない(終了コード 0)")
-    bat.add_argument("--save", metavar="DIR", help="各 job の結果を、このディレクトリに1件1ファイルで保存する(既定: 保存しない)")
-    bat.add_argument(
-        "--pair-by-name",
-        nargs=2,
-        metavar=("BEFORE_DIR", "AFTER_DIR"),
-        help="直下のファイル名が完全一致するものを対にし、一覧を出す(比較しない)",
-    )
-    bat.add_argument(
-        "--confirm",
-        action="store_true",
-        help="--pair-by-name の対で比較を実行する。--llm では、要約を確かめた後に AI への送信を実行する",
-    )
-    bat.add_argument("--write-manifest", metavar="PATH", help="--pair-by-name の対を組のファイルとして書いて終わる")
+    text = CLI_BATCH_HELP
+    bat = sub.add_parser("batch", help=text["command"])
+    bat.add_argument("manifest", nargs="?", metavar="MANIFEST", help=text["manifest"])
+    bat.add_argument("--output", metavar="PATH", help=text["output"])
+    bat.add_argument("--summary", metavar="PATH", help=text["summary"])
+    bat.add_argument("--quiet", action="store_true", help=text["quiet"])
+    bat.add_argument("--dry-run", action="store_true", help=text["dry_run"])
+    bat.add_argument("--save", metavar="DIR", help=text["save"])
+    bat.add_argument("--pair-by-name", nargs=2, metavar=("BEFORE_DIR", "AFTER_DIR"), help=text["pair_by_name"])
+    bat.add_argument("--confirm", action="store_true", help=text["confirm"])
+    bat.add_argument("--write-manifest", metavar="PATH", help=text["write_manifest"])
     llm = bat.add_mutually_exclusive_group()
-    llm.add_argument(
-        "--llm",
-        action="store_true",
-        help="各組の差分を AI に送り、注釈を付ける。--confirm が無ければ、送る内容の要約を出すだけで送らない",
-    )
-    llm.add_argument(
-        "--llm-dry-run", action="store_true", help="AI に送る内容(マスク後)と、送る前の要約を出す。送信はしない"
-    )
+    llm.add_argument("--llm", action="store_true", help=text["llm"])
+    llm.add_argument("--llm-dry-run", action="store_true", help=text["llm_dry_run"])
     bat.add_argument(
         "--llm-max-diffs",
         type=int,
         metavar="N",
-        help=(
-            "1組あたり AI に送る差分の件数の上限。1 以上"
-            f"(既定: 利用者ごとの設定ファイル config.toml の llm.max_diffs、無ければ {DEFAULT_MAX_DIFFS})"
-        ),
+        help=text["llm_max_diffs"].format(default=DEFAULT_MAX_DIFFS),
     )
     bat.add_argument(
         "--llm-max-total-diffs",
         type=int,
         metavar="N",
-        help=(
-            "全組で AI に送る差分の合計の上限。超えたら1件も送らない。1 以上"
-            f"(既定: 利用者ごとの設定ファイル config.toml の llm.max_total_diffs、無ければ {DEFAULT_MAX_TOTAL_DIFFS})"
-        ),
+        help=text["llm_max_total_diffs"].format(default=DEFAULT_MAX_TOTAL_DIFFS),
     )
     add_llm_profile_argument(bat)
     add_llm_prompt_profile_argument(bat)
@@ -145,23 +148,23 @@ def _check_args(args: argparse.Namespace) -> None:
     pairing = args.pair_by_name is not None
     llm = args.llm or args.llm_dry_run
     if pairing == (args.manifest is not None):
-        raise CliError("MANIFEST か --pair-by-name BEFORE_DIR AFTER_DIR のどちらか一方を指定してください")
+        raise CliError(CLI_BATCH_ERR_ONE_SOURCE)
     if args.confirm and args.write_manifest is not None:
-        raise CliError("--confirm と --write-manifest は一緒に使えません")
+        raise CliError(CLI_BATCH_ERR_CONFIRM_WITH_WRITE)
     if not pairing and args.write_manifest is not None:
-        raise CliError("--write-manifest は --pair-by-name と一緒に使ってください")
+        raise CliError(CLI_BATCH_ERR_WRITE_NEEDS_PAIR)
     if args.confirm and not pairing and not args.llm:
-        raise CliError("--confirm は --pair-by-name か --llm と一緒に使ってください")
+        raise CliError(CLI_BATCH_ERR_CONFIRM_NEEDS)
     if pairing and args.dry_run:
-        raise CliError("--pair-by-name は単独で一覧を出すだけです(--dry-run は要りません)")
+        raise CliError(CLI_BATCH_ERR_PAIR_NO_DRY_RUN)
     check_llm_args(args)
     if args.llm_max_total_diffs is not None:
         if not llm:
-            raise CliError("--llm-max-total-diffs は --llm か --llm-dry-run と一緒に指定してください")
+            raise CliError(CLI_BATCH_ERR_TOTAL_NEEDS_LLM)
         if args.llm_max_total_diffs < 1:
-            raise CliError("--llm-max-total-diffs は 1 以上にしてください(無制限の指定はありません)")
+            raise CliError(CLI_BATCH_ERR_TOTAL_MIN)
     if llm and (args.dry_run or args.write_manifest is not None):
-        raise CliError("--llm と --llm-dry-run は比較を実行するときだけ使えます(--dry-run・--write-manifest とは一緒に使えません)")
+        raise CliError(CLI_BATCH_ERR_LLM_ONLY_COMPARING)
     compares = not args.dry_run and (not pairing or args.confirm)
     if not compares:
         given = [
@@ -170,7 +173,7 @@ def _check_args(args: argparse.Namespace) -> None:
             if value is not None
         ]
         if given:
-            raise CliError(f"{', '.join(given)} は比較を実行するときだけ使えます")
+            raise CliError(cli_batch_err_only_when_comparing(", ".join(given)))
     paths = (
         ("--output", args.output),
         ("--summary", args.summary),
@@ -179,9 +182,9 @@ def _check_args(args: argparse.Namespace) -> None:
     )
     for name, value in paths:
         if value is not None and not value:
-            raise CliError(f"{name} にはパスを指定してください")
+            raise CliError(cli_batch_err_path_needed(name))
     if args.output is not None and args.summary is not None and Path(args.output).absolute() == Path(args.summary).absolute():
-        raise CliError("--output と --summary には別のパスを指定してください")
+        raise CliError(CLI_BATCH_ERR_SAME_PATH)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -201,7 +204,7 @@ def run(args: argparse.Namespace) -> int:
 
 def _manifest_failed(args: argparse.Namespace, exc: ManifestError) -> int:
     """マニフェストとして成立していない。1件も実行せずに 2(決定5)。"""
-    print(f"エラー: 組のファイルを読めません({len(exc.problems)} 件)。1件も実行していません", file=sys.stderr)
+    print(f"{CLI_ERROR_PREFIX}{cli_batch_manifest_failed(len(exc.problems))}", file=sys.stderr)
     for where, message in exc.problems:
         print(f"  {where}: {message}", file=sys.stderr)
     if args.summary is not None:
@@ -272,19 +275,19 @@ def _sigint(interrupts: _Interrupts):
 
 def _prepare_outputs(args: argparse.Namespace) -> None:
     if args.save is not None and not Path(args.save).is_dir():
-        raise CliError(f"--save {args.save}: 既存のディレクトリを指定してください(自動では作りません)")
+        raise CliError(cli_batch_err_save_dir(args.save))
     for name, value in (("--output", args.output), ("--summary", args.summary)):
         if value is not None and Path(value).exists():
-            raise CliError(f"{name} {value}: 既にあります。上書きしません")
+            raise CliError(cli_batch_err_exists(name, value))
 
 
 def _open_output(path: str) -> TextIO:
     try:
         return open_machine_file(path, "x")
     except FileExistsError as exc:
-        raise CliError(f"--output {path}: 既にあります。上書きしません") from exc
+        raise CliError(cli_batch_err_exists("--output", path)) from exc
     except OSError as exc:
-        raise CliError(f"--output {path}: 書けません ({exc.strerror or exc})") from exc
+        raise CliError(cli_batch_err_cannot_write("--output", path, str(exc.strerror or exc))) from exc
 
 
 @dataclass(frozen=True)
@@ -396,7 +399,7 @@ def _execute(
 
     def save_failed(job: Job, message: str) -> None:
         # 残りは続ける。保存を頼まれたのに残らなかったことは、最後に終了コード 2 で知らせる
-        print(f"エラー: job {job.id}: {message}", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}job {job.id}: {message}", file=sys.stderr)
         save_failures.append({"id": job.id, "error": message})
 
     def on_result(result: JobResult) -> None:
@@ -415,7 +418,7 @@ def _execute(
         """--save の 1 ファイル。中断で止めたときは False(残りの行も保存しない)。"""
         nonlocal saved_count
         if interrupts.stopping():  # 行を書いている間に2回目を受けた。保存せずに止める
-            save_failed(job, "中断したため保存していません")
+            save_failed(job, CLI_BATCH_SAVE_STOPPED)
             return False
         # 保存名は <日時>_<ラベル>.json で、ラベルの記号は _ に置き換わる(sw/01 と sw:01 が同じになる)。
         # job の順番(マニフェスト内で一意)を前に付け、同じ秒に保存しても job ごとに名前が一意になるようにする。
@@ -429,8 +432,7 @@ def _execute(
             finally:
                 interrupts.disarm()  # どの抜け方でも外す。外す前に受けた2回目も、下の except で受け止める
         except KeyboardInterrupt:
-            leftover = f"。書きかけの {target} が残っている場合があります" if not existed and target.exists() else ""
-            save_failed(job, f"保存の途中で中断しました{leftover}")
+            save_failed(job, cli_batch_save_cut(str(target), not existed and target.exists()))
             return False
         except StorageError as exc:
             save_failed(job, str(exc))
@@ -469,7 +471,7 @@ def _execute(
             else:
                 summary = _two_stages(manifest, plan, run_stage, on_result, collected)
     except OSError as exc:
-        raise CliError(f"結果を書けません ({exc.strerror or exc})") from exc
+        raise CliError(cli_batch_err_write_result(str(exc.strerror or exc))) from exc
 
     if args.llm and not args.confirm and stage_one is not None and stage_one.jobs and not stage_one.over_limit:
         print(batch_llm_confirm_hint(), file=sys.stderr)
@@ -500,10 +502,10 @@ def _write_summary(path: str, data: dict[str, Any]) -> bool:
         with open_machine_file(path, "x") as fh:
             fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     except FileExistsError:
-        print(f"エラー: --summary {path}: 既にあります。上書きしません", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{cli_batch_err_exists('--summary', path)}", file=sys.stderr)
         return False
     except OSError as exc:
-        print(f"エラー: --summary {path}: 書けません ({exc.strerror or exc})", file=sys.stderr)
+        print(f"{CLI_ERROR_PREFIX}{cli_batch_err_cannot_write('--summary', path, str(exc.strerror or exc))}", file=sys.stderr)
         return False
     return True
 
@@ -515,12 +517,12 @@ def _value(value: Any) -> str:
     if value is None:
         return "-"
     if isinstance(value, tuple):
-        return ", ".join(value) if value else "(なし)"
+        return ", ".join(value) if value else CLI_BATCH_NONE
     return str(value)
 
 
 def _dry_run_text(manifest_path: Path, manifest: Manifest) -> str:
-    lines = [f"一括比較の予定(比較は実行していません): {manifest_path}", ""]
+    lines = [cli_batch_dry_head(str(manifest_path)), ""]
     missing: set[Path] = set()
     for job in manifest.jobs:
         head = f"[{job.index}] {job.id}"
@@ -530,9 +532,13 @@ def _dry_run_text(manifest_path: Path, manifest: Manifest) -> str:
             found = spec.path.is_file()
             if not found:
                 missing.add(spec.path)
-            state = "あり" if found else "見つかりません"
             lines.append(
-                f"  {_LABEL[side]}: {spec.path} ({state})  区間: {selection_text(spec.selection, spec.selection_source)}"
+                cli_batch_dry_side(
+                    side == "before",
+                    str(spec.path),
+                    cli_batch_file_state(found),
+                    selection_text(spec.selection, spec.selection_source),
+                )
             )
         lines.append(
             f"  mode: {job.mode} / kind: {job.kind} / platform: {_value(job.platform)} / "
@@ -546,7 +552,7 @@ def _dry_run_text(manifest_path: Path, manifest: Manifest) -> str:
         if extra:
             lines.append("  " + " / ".join(extra))
     lines.append("")
-    lines.append(f"合計 {len(manifest.jobs)} 件。見つからないファイル {len(missing)} 件")
+    lines.append(cli_batch_dry_total(len(manifest.jobs), len(missing)))
     return "\n".join(lines) + "\n"
 
 
@@ -562,11 +568,11 @@ def _run_pairing(args: argparse.Namespace) -> int:
     listing = pairing_text(pairing)
     if not args.confirm and args.write_manifest is None:
         sys.stdout.write(listing)
-        print("比較は実行していません。この対で実行するには --confirm、組のファイルとして保存するには --write-manifest PATH を付けてください")
+        print(CLI_BATCH_PAIR_NOT_RUN)
         return EXIT_SAME
     if not pairing.pairs:
         (sys.stdout if args.write_manifest is not None else sys.stderr).write(listing)
-        raise CliError("対になったファイルがありません")
+        raise CliError(CLI_BATCH_NO_PAIRS)
     if args.write_manifest is not None:
         sys.stdout.write(listing)
         target = Path(args.write_manifest)
@@ -574,7 +580,7 @@ def _run_pairing(args: argparse.Namespace) -> int:
             written = write_manifest(pairing_manifest(pairing, target.absolute().parent), target)
         except (ManifestWriteError, ManifestError) as exc:
             raise CliError(str(exc)) from exc
-        print(f"組のファイルを {written} に書きました。比較は実行していません")
+        print(cli_batch_manifest_written(str(written)))
         return EXIT_SAME
     # --confirm: 標準出力は JSON Lines なので、一覧は標準エラーに出す。--quiet でも消さない
     sys.stderr.write(listing)

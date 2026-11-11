@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from driftpilot import i18n
 from driftpilot.diff_engine import CompareResult, RawCompareResult, ShowCompareResult
 from driftpilot.diff_engine.raw import RawOptionsRecord
 from driftpilot.diff_engine.types import Diff
@@ -40,12 +41,54 @@ from driftpilot.llm_analyzer.masking import (
 )
 from driftpilot.llm_analyzer.types import LlmSource, Unsent, UnsentKind, UnsentShape
 
+# 送る前の確かめ(送らなかった形の一覧)にだけ出る文。AI に送る本文には入らない(日本語・英語。REQ-258)
+_TEXTS_JA = {"show_gate_shape": "[show] 列 {column} の値が秘密語を含む …"}
+_TEXTS_EN = {"show_gate_shape": "[show] column {column} has a value containing a secret word ..."}
+_T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
+
+# AI に送る差分の本文に DriftPilot が入れる印・見出し(REQ-260 / ADR-0190 決定3)。日本語の表と英語の表を別々に持ち、
+# 読み込むときに言語で 1 つ選ぶ(同じ鍵・同じ差し込みの {…})。機器の config の行そのもの(差分の中身)と伏せる処理は言語で変えない。
+# 日本語の版は REQ-259 までの送る文と 1 字も変えない
+_MARKS_JA = {
+    "side_before": "変更前",
+    "side_after": "変更後",
+    "run_one": "@@ {side} {first} 行目 @@",
+    "run_many": "@@ {side} {first}〜{last} 行目 @@",
+    "parent": "  親: {text}",
+    "omitted": "(判定不能のため省略)",
+    "dropped": "  (判定不能のため {count} 行を除いた)",
+    "whole_row": "(行全体)",
+    "unknown_command": "(コマンド不明)",
+    "whole_header": "--- コマンド: {name}（{kind} の差分）---",
+    "no_diff_head": "差分の無かったコマンド: ",
+    "no_diff_none": "なし",
+    "name_separator": "、",
+}
+_MARKS_EN = {
+    "side_before": "before",
+    "side_after": "after",
+    "run_one": "@@ {side} line {first} @@",
+    "run_many": "@@ {side} lines {first}-{last} @@",
+    "parent": "  parent: {text}",
+    "omitted": "(omitted: could not be judged)",
+    "dropped": "  ({count} lines that could not be judged were removed)",
+    "whole_row": "(whole line)",
+    "unknown_command": "(unknown command)",
+    "whole_header": "--- Command: {name} ({kind} differences) ---",
+    "no_diff_head": "Commands with no differences: ",
+    "no_diff_none": "none",
+    "name_separator": ", ",
+}
+_M = i18n.choose(_MARKS_JA, _MARKS_EN)
+
 CONTEXT_LINES = 2
 # 変更後の全文で、判定できずに除いた行の代わりに置く1行(差分の文脈の行と同じ文。ADR-0158 決定3)
-FULL_TEXT_OMITTED = "(判定不能のため省略)"
+FULL_TEXT_OMITTED_JA = _MARKS_JA["omitted"]
+FULL_TEXT_OMITTED_EN = _MARKS_EN["omitted"]
+FULL_TEXT_OMITTED = _M["omitted"]
 # 変更後の全文の文字数の上限(ADR-0158 決定5)。超えたら全文も差分も送らない(切り詰めない)
 MAX_FULL_TEXT_CHARS = 150_000
-_SIDE_LABEL = {"before": "変更前", "after": "変更後"}
+_SIDE_LABEL = {"before": _M["side_before"], "after": _M["side_after"]}
 # リストの項目(要素の総称のパスは `<項目>[]`)
 _LIST_FIELDS = frozenset(p[:-2] for p in fields.ir_field_paths() if p.endswith("[]"))
 
@@ -291,7 +334,7 @@ def _structured_line(diff: Diff, masker: Masker, sides: _Sides, rec: _Recorder) 
         shown = []
         for depth, parent in enumerate(parents):
             judged = _judge_parent(parent, tuple(p.strip() for p in parents[:depth]), masker, sides, rec)
-            shown.append("(判定不能のため省略)" if judged is None else judged.strip())
+            shown.append(_M["omitted"] if judged is None else judged.strip())
         return f"[{op}] unparsed: {' > '.join([*shown, str(masked).strip()])}"
     before = _mask_tree(diff["before"], _value_path(diff, diff["before"]), masker, sides, rec)
     after = _mask_tree(diff["after"], _value_path(diff, diff["after"]), masker, sides, rec)
@@ -310,7 +353,7 @@ def _structured_body(diffs: list[Diff], masker: Masker, sides: _Sides, rec: _Rec
         if line is None:
             continue
         dropped = rec.lines - lines_before
-        out.append(line + (f"  (判定不能のため {dropped} 行を除いた)" if dropped else ""))
+        out.append(line + (_M["dropped"].format(count=dropped) if dropped else ""))
     return out, len(out)
 
 
@@ -344,9 +387,9 @@ def _show_body(diffs: list[dict[str, Any]], masker: Masker, rec: _Recorder) -> t
     for diff in diffs:
         found = _show_gate(diff, masker)
         if found is not None:
-            rec.line(f"[show] 列 {found} の値が秘密語を含む …")
+            rec.line(_T["show_gate_shape"].format(column=found))
             continue
-        label = diff.get("key") if diff.get("key") is not None else "(行全体)"
+        label = diff.get("key") if diff.get("key") is not None else _M["whole_row"]
         if diff["op"] == "changed":
             detail = _dump(diff["fields"])
         else:
@@ -406,23 +449,27 @@ def _raw_body(
             continue
         lines = sides.lines[side]
         first, last = positions[0], positions[-1]
-        head = [f"@@ {_SIDE_LABEL[side]} {first + 1}〜{last + 1} 行目 @@" if first != last else f"@@ {_SIDE_LABEL[side]} {first + 1} 行目 @@"]
+        side_label = _SIDE_LABEL[side]
+        if first != last:
+            head = [_M["run_many"].format(side=side_label, first=first + 1, last=last + 1)]
+        else:
+            head = [_M["run_one"].format(side=side_label, first=first + 1)]
         parents = sides.ancestors_at(side, first)
         for depth, parent in enumerate(parents):
             judged = _judge_parent(parent, parents[:depth], masker, sides, rec)
-            head.append("  親: (判定不能のため省略)" if judged is None else f"  親: {judged}")
+            head.append(_M["parent"].format(text=_M["omitted"] if judged is None else judged))
         before_ctx: list[str] = []
         for index in range(first - 1, max(first - 1 - CONTEXT_LINES, -1), -1):
             if index in changed[side]:
                 break
             text = _raw_line(side, index, masker, sides, rec, context=True)
-            before_ctx.insert(0, f"  {index + 1:5d}  {text}" if text is not None else f"  {index + 1:5d}  (判定不能のため省略)")
+            before_ctx.insert(0, f"  {index + 1:5d}  {text}" if text is not None else f"  {index + 1:5d}  {_M['omitted']}")
         after_ctx: list[str] = []
         for index in range(last + 1, min(last + 1 + CONTEXT_LINES, len(lines))):
             if index in changed[side]:
                 break
             text = _raw_line(side, index, masker, sides, rec, context=True)
-            after_ctx.append(f"  {index + 1:5d}  {text}" if text is not None else f"  {index + 1:5d}  (判定不能のため省略)")
+            after_ctx.append(f"  {index + 1:5d}  {text}" if text is not None else f"  {index + 1:5d}  {_M['omitted']}")
         out += [*head, *before_ctx, *body, *after_ctx]
     return out, sent
 
@@ -449,26 +496,65 @@ def _after_text(masker: Masker, sides: _Sides, rec: _Recorder) -> AfterText:
 
 # --- 単純比較の設定の 1 行(ADR-0166 決定11。REQ-227 §6) ---
 # llm_analyzer は messages を読まないので、言葉をここに置く(画面の言葉 messages.RAW_* と同じことをテストで確かめる)
-RAW_OPTIONS_HEAD = "単純比較の設定: "
-RAW_OPTIONS_IGNORE = "無視する行 {count} 件"
-RAW_OPTIONS_REPLACE = "置き換え {count} 組"
-RAW_OPTIONS_SPACE = {
-    "off": "空白も比べる",
-    "trailing": "行末の空白を無視",
-    "amount": "空白の数を無視",
-    "all": "空白をすべて無視",
+# REQ-228 §8.3 の移動・比べ方の言葉も含む(画面の言葉 messages.RAW_MOVES_LABEL などと同じことをテストで確かめる)。
+# REQ-260: 言語で 1 つ選ぶ(日本語の版は今までの文と 1 字も変えない。英語の版の名前は messages_en.py の画面の名前と同じ)
+_RAW_OPTIONS_JA = {
+    "head": "単純比較の設定: ",
+    "ignore": "無視する行 {count} 件",
+    "replace": "置き換え {count} 組",
+    "space": {
+        "off": "空白も比べる",
+        "trailing": "行末の空白を無視",
+        "amount": "空白の数を無視",
+        "all": "空白をすべて無視",
+    },
+    "blank": "空行を無視",
+    "case": "大文字と小文字を無視",
+    "separator": "・",
+    "tail": "。無視した行 {ignored} 行と、同じとみなした行 {equated} 組は差分に入れていません",
+    "moves": "移動を検出",
+    "algorithm": {"minimal": "比べ方: 最小", "patience": "比べ方: patience"},
+    "algorithm_fell_back": "比べ方: 最小（変更が多いため標準で比べました）",
+    "moves_count": "移動 {count} か所",
+    "moves_skipped": "移動は差分が多いため探していません",
+    "sentence": "。",
 }
-RAW_OPTIONS_BLANK = "空行を無視"
-RAW_OPTIONS_CASE = "大文字と小文字を無視"
-RAW_OPTIONS_SEPARATOR = "・"
-RAW_OPTIONS_TAIL = "。無視した行 {ignored} 行と、同じとみなした行 {equated} 組は差分に入れていません"
-# REQ-228 §8.3(画面の言葉 messages.RAW_MOVES_LABEL などと同じことをテストで確かめる)
-RAW_OPTIONS_MOVES = "移動を検出"
-RAW_OPTIONS_ALGORITHM = {"minimal": "比べ方: 最小", "patience": "比べ方: patience"}
-RAW_OPTIONS_ALGORITHM_FELL_BACK = "比べ方: 最小（変更が多いため標準で比べました）"
-RAW_OPTIONS_MOVES_COUNT = "移動 {count} か所"
-RAW_OPTIONS_MOVES_SKIPPED = "移動は差分が多いため探していません"
-RAW_OPTIONS_SENTENCE = "。"
+_RAW_OPTIONS_EN = {
+    "head": "Simple comparison settings: ",
+    "ignore": "Ignore lines: {count}",
+    "replace": "Replacements: {count}",
+    "space": {
+        "off": "Compare whitespace",
+        "trailing": "Ignore trailing whitespace",
+        "amount": "Ignore amount of whitespace",
+        "all": "Ignore all whitespace",
+    },
+    "blank": "Ignore blank lines",
+    "case": "Ignore case",
+    "separator": ", ",
+    "tail": ". {ignored} ignored lines and {equated} equated pairs are not included in the differences",
+    "moves": "Detect moves",
+    "algorithm": {"minimal": "Algorithm: minimal", "patience": "Algorithm: patience"},
+    "algorithm_fell_back": "Algorithm: minimal (compared with standard because there are many changes)",
+    "moves_count": "Moves: {count}",
+    "moves_skipped": "Moves were not searched because there are many differences.",
+    "sentence": ". ",
+}
+_R = i18n.choose(_RAW_OPTIONS_JA, _RAW_OPTIONS_EN)
+RAW_OPTIONS_HEAD = _R["head"]
+RAW_OPTIONS_IGNORE = _R["ignore"]
+RAW_OPTIONS_REPLACE = _R["replace"]
+RAW_OPTIONS_SPACE = _R["space"]
+RAW_OPTIONS_BLANK = _R["blank"]
+RAW_OPTIONS_CASE = _R["case"]
+RAW_OPTIONS_SEPARATOR = _R["separator"]
+RAW_OPTIONS_TAIL = _R["tail"]
+RAW_OPTIONS_MOVES = _R["moves"]
+RAW_OPTIONS_ALGORITHM = _R["algorithm"]
+RAW_OPTIONS_ALGORITHM_FELL_BACK = _R["algorithm_fell_back"]
+RAW_OPTIONS_MOVES_COUNT = _R["moves_count"]
+RAW_OPTIONS_MOVES_SKIPPED = _R["moves_skipped"]
+RAW_OPTIONS_SENTENCE = _R["sentence"]
 
 
 def raw_options_line(record: RawOptionsRecord) -> str:
@@ -583,18 +669,19 @@ def build_after_text(
 # --- 全部の組をまとめて1回で送る(ADR-0152 決定3・決定4・決定9) ---
 
 # 区切りの行と差分の無かったコマンドの行で、コマンドが分からない組の名前
-WHOLE_UNKNOWN_COMMAND = "(コマンド不明)"
+# (REQ-260: 印は言語で 1 つ選ぶ。区切りの行の形は prompt.WHOLE_SEPARATOR_QUOTE が引く形と同じ並び)
+WHOLE_UNKNOWN_COMMAND = _M["unknown_command"]
 # 判定できずに送らない名前の代わり(差分の文脈の行と同じ文)
 WHOLE_NAME_OMITTED = FULL_TEXT_OMITTED
-WHOLE_NO_DIFF_HEAD = "差分の無かったコマンド: "
-WHOLE_NO_DIFF_NONE = "なし"
-WHOLE_NAME_SEPARATOR = "、"
+WHOLE_NO_DIFF_HEAD = _M["no_diff_head"]
+WHOLE_NO_DIFF_NONE = _M["no_diff_none"]
+WHOLE_NAME_SEPARATOR = _M["name_separator"]
 _KIND_LABEL = {"config": "config", "show": "show"}
 
 
 def whole_header(name: str, kind: str) -> str:
     """組の区切りの行。name は判定を通した後の名前。"""
-    return f"--- コマンド: {name}（{kind} の差分）---"
+    return _M["whole_header"].format(name=name, kind=kind)
 
 
 @dataclass(frozen=True)
