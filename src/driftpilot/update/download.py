@@ -30,7 +30,7 @@ from driftpilot.update.check import INSTALL_MAC_APP, INSTALL_WINDOWS_ZIP, _http_
 from driftpilot.update.errors import ContentError, DownloadError, IntegrityError, UpdateCancelled
 
 # 決まった値(REQ-253 §2)
-DOWNLOAD_PREFIX = "https://github.com/umemonmon/DriftPilot/releases/download/"
+DOWNLOAD_PREFIX = "https://github.com/yusaku-umemoto/DriftPilot/releases/download/"
 ASSET_NAMES = {
     INSTALL_WINDOWS_ZIP: "DriftPilot-{version}-windows-x64.zip",
     INSTALL_MAC_APP: "DriftPilot-{version}-macos-arm64.dmg",

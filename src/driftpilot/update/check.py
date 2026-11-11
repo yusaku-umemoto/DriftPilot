@@ -33,10 +33,10 @@ from driftpilot.messages import (
 )
 
 # 決まった値(直書きしてよいのはここだけ。REQ-252 §3)
-RELEASES_LATEST_URL = "https://api.github.com/repos/umemonmon/DriftPilot/releases/latest"
-RELEASES_PAGE_URL = "https://github.com/umemonmon/DriftPilot/releases"
+RELEASES_LATEST_URL = "https://api.github.com/repos/yusaku-umemoto/DriftPilot/releases/latest"
+RELEASES_PAGE_URL = "https://github.com/yusaku-umemoto/DriftPilot/releases"
 # 「Releases のページを開く」で開いてよい URL の頭(REQ-252 §4)
-RELEASE_PAGE_PREFIX = "https://github.com/umemonmon/DriftPilot/"
+RELEASE_PAGE_PREFIX = "https://github.com/yusaku-umemoto/DriftPilot/"
 # 既定の fetch がつないでよい URL の頭(GitHub の API だけ)
 API_PREFIX = "https://api.github.com/"
 TIMEOUT_SECONDS = 10

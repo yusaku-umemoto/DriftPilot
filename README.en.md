@@ -61,7 +61,7 @@ The apps are not code-signed, so your OS will warn you the first time:
 Requires Python 3.14.
 
 ```bash
-git clone https://github.com/umemonmon/DriftPilot.git
+git clone https://github.com/yusaku-umemoto/DriftPilot.git
 cd DriftPilot
 python3.14 -m venv .venv
 .venv/bin/python -m pip install -e ".[gui,llm]"
