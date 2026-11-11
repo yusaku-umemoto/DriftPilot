@@ -89,6 +89,7 @@ GUI_WEB_FILES = (
     "static/js/marks.js",
     "static/js/raw_options.js",
     "static/js/character.js",
+    "static/js/theme.js",
     # キャラクターの絵と、元の名前との対応の説明(ADR-0174 決定4)
     "static/character/README.md",
     "static/character/ai-thinking.png",

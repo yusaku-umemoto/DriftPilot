@@ -45,6 +45,7 @@ DriftPilot — はじめにお読みください
            前の版（%APPDATA%\DriftPilot）の設定を使うときは、そのフォルダーの中身を settings\ にコピーしてください。
   Mac    : ~/Library/Application Support/DriftPilot/config.toml
   設定画面の「フォルダを開く」「設定ファイルを作る」から開けます。
+  画面の色は、設定画面の「表示」タブで、システム設定に合わせる・白モード・黒モードから選べます。
 
 ■ ライセンス
   同梱している部品のライセンスは THIRD_PARTY_LICENSES.txt にあります。

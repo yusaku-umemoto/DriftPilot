@@ -3433,6 +3433,26 @@ GUI_WEB_TEXTS.update(
 )
 
 
+# 設定の窓の「表示」タブ(ADR-0189 / REQ-256 §4)。「保存」の文は「更新」タブと同じ settings.button.save_config
+SETTINGS_TAB_DISPLAY = "表示"
+DISPLAY_TITLE = "画面の色"
+DISPLAY_THEME_SYSTEM = "システム設定に合わせる"
+DISPLAY_THEME_LIGHT = "白モード"
+DISPLAY_THEME_DARK = "黒モード"
+DISPLAY_FRAME_NOTE = "窓の枠（タイトルバー）の色は、OS の設定のままです"
+
+GUI_WEB_TEXTS.update(
+    {
+        "settings.tab.display": SETTINGS_TAB_DISPLAY,
+        "settings.display.title": DISPLAY_TITLE,
+        "settings.display.system": DISPLAY_THEME_SYSTEM,
+        "settings.display.light": DISPLAY_THEME_LIGHT,
+        "settings.display.dark": DISPLAY_THEME_DARK,
+        "settings.note.display_frame": DISPLAY_FRAME_NOTE,
+    }
+)
+
+
 # --- 署名つきのその場の更新(ADR-0188 決定3・4 / REQ-253) ---
 
 # 誤りの文(REQ-253 §7 の表)。update.errors の型が持つ

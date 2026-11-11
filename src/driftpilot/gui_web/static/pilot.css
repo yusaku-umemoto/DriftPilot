@@ -2,7 +2,8 @@
  * pilot.css — Pilot シリーズ（DriftPilot・ConvoyPilot・CommandPilot）の画面の見た目の部品（ADR-0074 決定4 / REQ-103）。
  * 使い分けと言葉づかいは docs/notes/pilot-ui-standard.md。ほかの製品は、この文書とこのファイルをコピーして使う。
  *
- * - 色・文字・余白は CSS の変数（--pilot- で始まる名前）で持つ。:root にライト、prefers-color-scheme: dark にダーク
+ * - 色・文字・余白は CSS の変数（--pilot- で始まる名前）で持つ。:root にライト、prefers-color-scheme: dark にダーク。
+ *   <html> の data-theme="light" / "dark" で白・黒を選べる（ダークの値は 2 か所に同じ値で書く。ADR-0189）
  * - 色の変数（--pilot-color-）は、ライトとダークで同じ名前をそろえる（ダークだけに無い名前を作らない）
  * - 部品のクラス名は pilot- で始める。状態は属性（:disabled・aria-selected・aria-sort・hidden）で表す
  * - 外部のファイル（書体・画像）を読まない
@@ -74,8 +75,11 @@
   --pilot-pane-min-width: 220px;
 }
 
+/* 色の選び方（ADR-0189）。<html> に data-theme が無いときは OS の設定に従う（system）。
+   data-theme="light" ならライトのまま、data-theme="dark" なら OS の設定によらずダーク。
+   ダークの値は 2 か所（下の media の中と :root[data-theme="dark"]）に同じ値で書く。片方だけ直さない（テストが 2 つの値のそろいを確かめる） */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     /* 色（ダーク）。ライトと同じ名前をそろえる */
     --pilot-color-text: #e6e6e6;
     --pilot-color-text-muted: #a0a0a0;
@@ -112,6 +116,50 @@
     --pilot-color-in-use-text: #0e2410;
     --pilot-color-answer-red: #ff8f85;
   }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* 色（ダーク）。上の media の中と同じ値 */
+  --pilot-color-text: #e6e6e6;
+  --pilot-color-text-muted: #a0a0a0;
+  --pilot-color-bg: #1e1e1e;
+  --pilot-color-surface: #2a2a2a;
+  --pilot-color-border: #4a4a4a;
+  --pilot-color-accent: #2f7fd6;
+  --pilot-color-accent-hover: #4790e0;
+  --pilot-color-accent-text: #ffffff;
+  --pilot-color-danger: #d13438;
+  --pilot-color-danger-hover: #de4c50;
+  --pilot-color-danger-text: #ffffff;
+  --pilot-color-button: #333333;
+  --pilot-color-button-hover: #3d3d3d;
+  --pilot-color-selection: #264f78;
+  --pilot-color-selection-text: #ffffff;
+  --pilot-color-stripe: #252525;
+  --pilot-color-focus: #4c9ee8;
+  --pilot-color-disabled: #2e2e2e;
+  --pilot-color-disabled-text: #6e6e6e;
+  --pilot-color-info-bg: #1c2f45;
+  --pilot-color-info-text: #d8e7f7;
+  --pilot-color-info-border: #2f5b8a;
+  --pilot-color-warning-bg: #3a3014;
+  --pilot-color-warning-text: #f3e2a6;
+  --pilot-color-warning-border: #7a6420;
+  --pilot-color-error-bg: #43191c;
+  --pilot-color-error-text: #f6c8cc;
+  --pilot-color-error-border: #8a2c33;
+  --pilot-color-diff: #4a3a1c;
+  --pilot-color-mark-removed: #6e2b2b;
+  --pilot-color-mark-added: #22522c;
+  --pilot-color-in-use: #57b45c;
+  --pilot-color-in-use-text: #0e2410;
+  --pilot-color-answer-red: #ff8f85;
 }
 
 /* --- 土台 --- */

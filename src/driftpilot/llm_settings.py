@@ -137,6 +137,12 @@ AUTO_SEND_LLM_KEY = "auto_send_llm"
 CHARACTER_KEY = "character"
 # 起動したときに新しい版を確かめるか(ADR-0188 決定2。真偽値。書かれていなければ偽。読めなければ偽)
 AUTO_UPDATE_CHECK_KEY = "auto_update_check"
+# 画面の色(ADR-0189。"system"・"light"・"dark"。書かれていない・ほかの値・文字でないときは "system")
+THEME_KEY = "theme"
+THEME_SYSTEM = "system"
+THEME_LIGHT = "light"
+THEME_DARK = "dark"
+THEMES = (THEME_SYSTEM, THEME_LIGHT, THEME_DARK)
 
 # 利用者ごとの設定ファイルの雛形(REQ-27 §B-4。2行目と上限の行は REQ-93 で直した)。値の行はすべてコメントのまま
 CONFIG_TEMPLATE = f"""\
@@ -162,6 +168,7 @@ CONFIG_TEMPLATE = f"""\
 
 # プロンプトは、設定画面の「プロンプト」の枠でプロファイルとして編集できます。差分を入れる印 {{{{diff}}}} が要ります
 # 比較の画面で、ファイルが2つそろったら自動で比較を始めるか（[gui] の auto_compare。書かなければ始めます）は、設定画面の「設定ファイル」の枠で変えられます
+# 画面の色（[gui] の theme。"system"・"light"・"dark"。書かなければ "system"）は、設定画面の「表示」のタブで変えられます
 # 起動したときに新しい版を確かめるか（[gui] の auto_update_check。書かなければ確かめません）は、設定画面の「更新」のタブで変えられます
 """
 
@@ -502,6 +509,36 @@ def auto_update_check_enabled(
     except SettingsError:
         return False
     return auto_update_check_of(data)
+
+
+def theme_of(data: bytes | None) -> str:
+    """設定ファイルのバイト列から [gui] の theme を読む(ADR-0189)。
+
+    "system"・"light"・"dark" はそのまま。ファイルが無い・[gui] が無い・項目が無い・TOML として読めない・
+    [gui] が表でない・値が文字でない(true・1)・3 つ以外の文字("blue")は "system"。
+    """
+    if data is None:
+        return THEME_SYSTEM
+    try:
+        parsed = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return THEME_SYSTEM
+    section = parsed.get(GUI_SECTION, {})
+    if not isinstance(section, dict):
+        return THEME_SYSTEM
+    value = section.get(THEME_KEY, THEME_SYSTEM)
+    return value if isinstance(value, str) and value in THEMES else THEME_SYSTEM
+
+
+def gui_theme(
+    *, env: Mapping[str, str] | None = None, platform: str | None = None, home: Path | None = None
+) -> str:
+    """利用者ごとの設定ファイルの [gui] theme(窓を開くたびに読む。ADR-0189)。読めなければ "system"。"""
+    try:
+        data = read_bytes(user_config_path(platform=platform, env=env, home=home))
+    except SettingsError:
+        return THEME_SYSTEM
+    return theme_of(data)
 
 
 def auto_compare_enabled(

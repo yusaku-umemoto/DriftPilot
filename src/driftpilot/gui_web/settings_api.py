@@ -58,6 +58,12 @@ JavaScript(static/js/settings.js)は返した JSON を描くことと、操作�
   start_applier を呼ぶ。新しい版が始まったら窓を全部閉じる(_set_close_all。WebSession.open_settings が渡す。無ければこの窓だけ)。
   ファイルに触る処理は全部 driftpilot.update の側にある(ここは呼ぶだけ)
 
+- 画面の色(ADR-0189 / REQ-256 §4・§5): 「表示」のタブの操作 save_display_settings(form, theme)。theme は "system"・"light"・"dark"
+  のどれかの文字(それ以外は形の違う引数)。「更新」のタブの「保存」と同じ作りで、[gui] theme の 1 項目だけを書き(settings_model を通す。
+  ここからファイルに書かない)、form のほかのタブの打ちかけの欄は残す。書けたときだけ、呼び出しの最後(ロックの外)に、開いている窓すべてへ
+  色を当てる(_set_on_theme で WebSession.apply_theme を受け取る。無ければ、この窓だけに当てる。失敗は捨てる)。
+  状態は view.display(theme・can_save・fill)。
+
 webview は読まない(窓は app.py が開いて _attach で渡す。テストは偽の窓を渡す)。
 """
 
@@ -73,8 +79,9 @@ from typing import Any
 
 from driftpilot import __version__
 from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
+from driftpilot.gui_web.theme import THEME_EVENT
 from driftpilot.llm_analyzer import LLMClient, ShapeNode, send_connection_check
-from driftpilot.llm_settings import CUSTOM_HTTP_JSON, ENV_KEY_PREFIX, SettingsError
+from driftpilot.llm_settings import CUSTOM_HTTP_JSON, ENV_KEY_PREFIX, THEMES, SettingsError
 from driftpilot.messages import (
     AUTO_SEND_CONFIRM_TITLE,
     CLI_MODEL_HINT,
@@ -146,7 +153,7 @@ from driftpilot.messages import (
 )
 from driftpilot.messages import RAW_DEFAULTS_TITLE
 from driftpilot.screen_model.settings_model import RawDefaultsPane, raw_defaults_pane, save_raw_defaults_form
-from driftpilot.screen_model.settings_model import save_auto_update_check
+from driftpilot.screen_model.settings_model import save_auto_update_check, save_gui_theme
 from driftpilot.update import (
     INSTALL_SOURCE,
     RELEASES_PAGE_URL,
@@ -278,7 +285,7 @@ FOCUS_NAME = "name"
 FOCUS_PROMPT_NAME = "prompt_name"
 PROCEED_SAVE_KEY = "save_key"
 # 窓のタブ(static/js/settings.js の TABS と同じ並び)。開くタブ(open_tab)に渡せるのはこの名前だけ。「更新」は REQ-252 §4
-SETTINGS_TABS = ("profiles", "prompt", "auto", "raw", "file", "update")
+SETTINGS_TABS = ("profiles", "prompt", "auto", "raw", "file", "display", "update")
 UPDATE_TAB = "update"
 # 「更新する」を出せる入れ方(REQ-253 §7)と、進み具合を知らせる間隔の下限(秒)。時計はテストで差し替える
 UPDATABLE_KINDS = (INSTALL_WINDOWS_ZIP, INSTALL_MAC_APP)
@@ -381,6 +388,10 @@ class SettingsApi(Api):
         # 保存の後に呼ぶ口(ADR-0176 決定4。WebSession.open_settings が渡す)と、この呼び出しで保存できたかの印
         self._on_saved: Callable[[], None] | None = None
         self._saved = False
+        # 「表示」のタブ(ADR-0189): 開いている窓すべてに色を当てる口(WebSession.apply_theme)・この呼び出しで当てる色・欄を入れ直す番号
+        self._on_theme: Callable[[str], None] | None = None
+        self._theme_pending: str | None = None
+        self._fill_display = 0
         # 「更新」のタブ(REQ-252 §4): 確かめた結果・確かめている最中か・チェックの欄を入れ直す番号・次に描くときに開くタブ
         self._update: UpdateStatus | None = None
         self._update_checking = False
@@ -413,6 +424,13 @@ class SettingsApi(Api):
         ロックの外で 1 回だけ呼ぶ。失敗は握りつぶす。
         """
         self._on_saved = callback
+
+    def _set_on_theme(self, callback: Callable[[str], None] | None) -> None:
+        """「表示」の「保存」で色が書けた後に呼ぶ関数(開いている窓すべてに当てる。WebSession.apply_theme。ADR-0189)。
+
+        渡されなければ(--settings で設定の窓だけを開いたとき)、この窓だけに当てる。
+        """
+        self._on_theme = callback
 
     def _mark_saved(self, ok: bool = True) -> None:
         """ロックの中で呼ぶ。ok なら、この呼び出しの最後に保存の後の口を呼ぶ印を立てる。"""
@@ -560,6 +578,14 @@ class SettingsApi(Api):
         """
         return self._call(self._save_update_settings, form, checked)
 
+    def save_display_settings(self, form: Any, theme: Any) -> dict[str, Any]:
+        """「表示」のタブの「保存」(ADR-0189)。[gui] theme の 1 項目だけを書く(theme は "system"・"light"・"dark")。
+
+        form は画面の欄の値(ほかの操作と同じ)。受け取るだけで書かず、読み直した後もほかのタブの打ちかけの欄を残すのに使う。
+        書けたら、開いている窓すべてに色を当てる。
+        """
+        return self._call(self._save_display_settings, form, theme)
+
     def start_update(self) -> dict[str, Any]:
         """「更新する」(REQ-253 §7)。引数は受けない。確かめた結果が newer で、配った物で動いているときだけ、裏で取ってきて確かめて準備する。
 
@@ -600,7 +626,27 @@ class SettingsApi(Api):
 
         result = _guarded(run)
         self._notify_saved()
+        self._notify_theme()
         return result
+
+    def _notify_theme(self) -> None:
+        """色が書けた印(_theme_pending)があれば消して、窓に当てる(ロックの外で。失敗は捨てる。ADR-0189)。
+
+        WebSession.apply_theme を受け取っていれば開いている窓すべてへ、無ければこの窓だけへ。
+        """
+        with self._lock:
+            theme, self._theme_pending = self._theme_pending, None
+            callback = self._on_theme
+            window = self._window
+        if theme is None:
+            return
+        try:
+            if callback is not None:
+                callback(theme)
+            elif window is not None:
+                notify(window, {"type": THEME_EVENT, "theme": theme})
+        except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
+            pass
 
     def _notify_saved(self) -> None:
         """保存できた印が立っていれば消して、保存の後の口を呼ぶ(ロックの外で。失敗は握りつぶす。ADR-0176 決定4)。"""
@@ -832,6 +878,12 @@ class SettingsApi(Api):
             "open_tab": open_tab,
             # 「更新」のタブ(REQ-252 §4)。文はどれも文字として描く(変更の内容 notes も textContent)
             "update": self._update_view(fields),
+            # 「表示」のタブ(ADR-0189)。theme は設定ファイルの値(読めなければ "system")
+            "display": {
+                "theme": fields.theme if fields is not None else "system",
+                "can_save": fields is not None,
+                "fill": self._fill_display,
+            },
             "status": {"text": view.status, "ok": view.status_ok},
             "bands": {
                 "plaintext": view.plaintext_warning,
@@ -1887,6 +1939,30 @@ class SettingsApi(Api):
             if action.ok or action.reload:
                 self._refresh(keep_edits=True, keep_config_edits=True)
                 self._fill_update += 1  # チェックの欄を読み直した値で入れ直す(書けなかったときは押した値を残す)
+            return self._ok(notice=notice)
+
+    def _save_display_settings(self, form: Any, theme: Any) -> dict[str, Any]:
+        """「表示」のタブの「保存」。theme が文字でない・3 つのどれでもない・form の形が違えば _BadRequest。
+        設定ファイルを読めないときは今の読めないときの扱い。
+
+        「更新」のタブの「保存」と同じ作り: 先に画面の欄の値(form)を受け取り、書くのは theme だけ。書けたら・ほかで変わっていたら
+        読み直す(プロファイルと設定ファイルの欄の打ちかけは残す)。色を当てるのは書けたとき(ok)だけで、呼び出しの最後に行う。
+        """
+        with self._lock:
+            if not isinstance(theme, str) or theme not in THEMES:
+                raise _BadRequest
+            self._take(form)
+            fields = self._current().config_fields
+            if fields is None:
+                return self._unreadable() or self._ok()
+            action = save_gui_theme(fields, theme, **self._kw("env", "platform", "home"))
+            self._mark_saved(action.ok)
+            notice = self._notice(action.message, CONFIG_SAVE_TITLE)
+            if action.ok or action.reload:
+                self._refresh(keep_edits=True, keep_config_edits=True)
+                self._fill_display += 1  # ラジオボタンを読み直した値で入れ直す(書けなかったときは選んだ値を残す)
+            if action.ok:
+                self._theme_pending = theme
             return self._ok(notice=notice)
 
     def _set_initial_tab(self, tab: str | None) -> None:

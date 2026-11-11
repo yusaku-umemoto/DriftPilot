@@ -46,6 +46,7 @@ The apps are not code-signed, so your OS will warn you the first time:
 - **Windows:** the `settings\` folder next to `DriftPilot.exe`. Nothing is written outside the extracted folder (except the API key).
 - **macOS:** `~/Library/Application Support/DriftPilot/`
 - **API keys:** Windows Credential Manager or the macOS Keychain. You can delete them with "削除…" (Delete) in the settings window.
+- **Screen color:** on the "表示" (Display) tab of the settings window, choose "match the system setting", light mode or dark mode.
 
 ### Checking for new versions
 
@@ -82,7 +83,7 @@ Run `driftpilot --help` to see all commands.
 
 ## Status
 
-Version 0.2.0 (preview). The UI and output formats may still change.
+Version 0.2.1 (preview). The UI and output formats may still change.
 
 ## License
 

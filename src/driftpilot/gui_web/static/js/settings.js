@@ -15,8 +15,8 @@ const $ = (id) => document.getElementById(id);
 const status = $("status");
 const keyInput = $("key-input");
 // 窓のタブ（ADR-0154 / REQ-214）。id は settings-tab-○○、面は settings-panel-○○
-// 「単純比較」（raw。REQ-227 §12）は「比較と自動の動き」と「設定ファイル」の間。「更新」（update。REQ-252 §4）は最後
-const TABS = ["profiles", "prompt", "auto", "raw", "file", "update"];
+// 「単純比較」（raw。REQ-227 §12）は「比較と自動の動き」と「設定ファイル」の間。「表示」（display。REQ-256 §4）は「設定ファイル」の次、「更新」（update。REQ-252 §4）は最後
+const TABS = ["profiles", "prompt", "auto", "raw", "file", "display", "update"];
 
 let view = null; // いま描いている状態
 // 描いた状態の番号と、欄を入れ直した番号・キーの欄を空にした番号（変わったときだけ入れ直す）
@@ -29,6 +29,7 @@ const shown = {
   clearKey: null,
   fillRaw: null,
   fillUpdate: null,
+  fillDisplay: null,
 };
 
 // data-text の鍵の文を messages.py から取って入れる（HTML には文を書かない）。取れなければ false。
@@ -377,10 +378,29 @@ function render(next) {
   }
   renderShape(next.response_shape);
   renderUpdate(next.update);
+  renderDisplay(next.display);
   // 開くタブ（比較の窓・一括比較の窓の知らせの「更新…」。REQ-252 §5）。Python が 1 回だけ返す
   if (next.open_tab && TABS.includes(next.open_tab)) {
     selectTab(next.open_tab);
   }
+}
+
+// 「表示」のタブ（REQ-256 §4 / ADR-0189）。ラジオボタンは番号が変わったときだけ、設定ファイルの値で選び直す
+// （窓を開いたとき・保存の後。打ちかけの選びは、ほかの描き直しでは動かさない）。設定ファイルを読めないときは「保存」を押せない
+function renderDisplay(display) {
+  if (display.fill !== shown.fillDisplay) {
+    shown.fillDisplay = display.fill;
+    for (const radio of document.querySelectorAll('input[name="theme"]')) {
+      radio.checked = radio.value === display.theme;
+    }
+  }
+  $("save-display").disabled = !display.can_save;
+}
+
+// 選んでいる画面の色（何も選ばれていなければ "system"）。Python が 3 つ以外を断る
+function chosenTheme() {
+  const radio = document.querySelector('input[name="theme"]:checked');
+  return radio === null ? "system" : radio.value;
 }
 
 // 「更新」のタブ（REQ-252 §4）。文はどれも textContent だけで描く（変更の内容も HTML として読まない）。
@@ -566,6 +586,9 @@ bind("save-raw", async () => {
     await handle(await call("save_raw_defaults", readRawOptions()));
   }
 });
+// 「表示」のタブ（REQ-256 §4）。「保存」は [gui] の theme だけを書き、開いている窓すべてに色を当てる。
+// 「更新」のタブの「保存」と同じく form() も渡す（ほかのタブの打ちかけの欄を残すため）
+bind("save-display", () => act("save_display_settings", chosenTheme()));
 // 「更新」のタブ（REQ-252 §4）。確かめと「Releases のページを開く」は欄の値を渡さない（開く URL は Python が決める）。
 // 「保存」は [gui] の auto_update_check だけを書く（今の 2 つの「保存」とは別）。ほかの操作と同じく form() も渡すので、
 // ほかのタブで打ちかけた欄は保存の後も残る（タブの切り替えは Python を呼ばないため、渡さないと Python が打ちかけを知らない）

@@ -23,6 +23,9 @@
   最初の state() の後に 1 回だけ書く(mark_update_started。入れ替える側はこれを見て控えを消す)
 - 「全部閉じる」(close_all)。設定の窓の「更新」で新しい版が始まったら、比較・一括比較・AI・設定の窓を全部閉じる
   (窓が全部閉じると webview.start が戻り、app.run の _finish で終わる)
+- 画面の色(ADR-0189 / REQ-256 §5)。設定の窓・一括比較の窓・AI の窓を開くたびに、設定ファイルの [gui] theme を読んで、
+  create_window の url に付ける(theme.themed_window。"system" は付けない)。「表示」の「保存」の後は apply_theme が、
+  開いている窓(比較・一括比較・AI の答え・設定)すべてに色を知らせる
 
 窓を作る関数(create_window)は差し替えられる(テストは偽物を渡す)。省くと webview.create_window(使うときに読む)。
 窓の Python の側が自分のロックを持つときは、そのロックの中からここを呼んでよい(ここから窓の Python の側を呼ぶのはロックの外だけ)。
@@ -33,6 +36,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from driftpilot import __version__
+from driftpilot.gui_web import theme as theme_module
 from driftpilot.gui_web.settings_api import SettingsApi
 from driftpilot.messages import AI_PANE_TITLE, BATCH_TITLE, SETTINGS_TITLE, update_notice_text
 from driftpilot.update import STATE_NEWER, UpdateStatus, check_latest
@@ -83,6 +87,7 @@ class WebSession:
     run_in_background はその確かめを裏で動かす関数(既定はデーモンのスレッド。テストはその場で動かす関数を渡す)。
     launch_notice は更新の後の起動の知らせの文(REQ-253 §7。無ければ None)。started_marker は --update-started で
     渡された started-ok のパス(無ければ None)。write_started はそれを書く関数(テストで差し替える)。
+    theme_of は窓を開くときに画面の色を読む関数(省くと、そのときの theme.current_theme。読めなければ "system")。
     """
 
     def __init__(
@@ -101,6 +106,7 @@ class WebSession:
         launch_notice: str | None = None,
         started_marker: str | None = None,
         write_started: Callable[[str], Any] = write_started_ok,
+        theme_of: Callable[[], str] | None = None,
     ) -> None:
         self.lock = threading.RLock()
         self._gate = RunGate()
@@ -133,6 +139,25 @@ class WebSession:
         self._started_marker = started_marker
         self._write_started = write_started
         self._started_marked = False
+        self._theme_of = theme_of
+
+    # --- 画面の色(ADR-0189) ---
+
+    def _current_theme(self) -> str:
+        """窓を開くときの画面の色。差し替えが無ければ、呼ぶときに theme.current_theme を引く。読めなければ "system"。"""
+        try:
+            return (self._theme_of or theme_module.current_theme)()
+        except Exception:  # noqa: BLE001 - 色を読めなくても窓は開く
+            return "system"
+
+    def apply_theme(self, theme: str) -> None:
+        """開いている窓(比較・一括比較・AI の答え・設定)すべてに、色を当てる(ロックの外で知らせる)。失敗は捨てる。"""
+        with self.lock:
+            windows = []
+            if self._compare is not None and not self._compare_closed:
+                windows.append(self._compare[0])
+            windows.extend(pair[0] for pair in (self._batch, self._ai, self._settings) if pair is not None)
+        theme_module.apply_theme(windows, theme)
 
     # --- 起動時の絵(ADR-0174 決定2) ---
 
@@ -332,12 +357,18 @@ class WebSession:
                 set_initial_tab = getattr(api, "_set_initial_tab", None)
                 if set_initial_tab is not None:
                     set_initial_tab(tab)
-            window = self._create_window(SETTINGS_TITLE, js_api=api, **self._settings_window)
+            window = self._create_window(
+                SETTINGS_TITLE, js_api=api, **theme_module.themed_window(self._settings_window, self._current_theme())
+            )
             api._attach(window)  # 「閉じる」・接続テストの知らせ・ファイルのダイアログに使う
             # 保存できたら、開いている比較の窓と一括比較の窓へ知らせる(ADR-0176 決定4。テストの偽物に口が無くても動く)
             set_on_saved = getattr(api, "_set_on_saved", None)
             if set_on_saved is not None:
                 set_on_saved(self.settings_saved)
+            # 「表示」の「保存」で色が変わったら、開いている窓すべてに当てる(ADR-0189。テストの偽物に口が無くても動く)
+            set_on_theme = getattr(api, "_set_on_theme", None)
+            if set_on_theme is not None:
+                set_on_theme(self.apply_theme)
             # 「更新」で新しい版が始まったら、窓を全部閉じる(REQ-253 §6。テストの偽物に口が無くても動く)
             set_close_all = getattr(api, "_set_close_all", None)
             if set_close_all is not None:
@@ -428,7 +459,9 @@ class WebSession:
         attached = None
         try:
             api = self._ai_api(compare)
-            window = self._create_window(AI_PANE_TITLE, js_api=api, **self._ai_window)
+            window = self._create_window(
+                AI_PANE_TITLE, js_api=api, **theme_module.themed_window(self._ai_window, self._current_theme())
+            )
             api._attach(window)  # 「閉じる」・ファイルのダイアログに使う
             window.events.closed += lambda: self._on_ai_closed(window)
             with self.lock:
@@ -477,7 +510,9 @@ class WebSession:
             return
         try:
             api = self._batch_api(self)
-            window = self._create_window(BATCH_TITLE, js_api=api, **self._batch_window)
+            window = self._create_window(
+                BATCH_TITLE, js_api=api, **theme_module.themed_window(self._batch_window, self._current_theme())
+            )
             api._attach(window)  # 知らせ・閉じる・ファイルのダイアログに使う
             watch_drop = self._watch_drop
             if watch_drop is not None:

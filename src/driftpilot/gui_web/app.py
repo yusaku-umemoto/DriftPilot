@@ -23,6 +23,9 @@
 - start が戻った後は、ほかの非デーモンのスレッドを合わせて最大2秒待ってから os._exit で終わる(REQ-111。pywebview の
   js_api の呼び出しのスレッドが、窓が閉じた後の evaluate_js で待ち続け、Python の終了処理を止めることがあるため)
 
+- 画面の色(ADR-0189 / REQ-256 §5): 設定ファイルの [gui] theme を run の中で 1 回読み、比較・--settings・見本の窓の url に
+  付ける(gui_web/theme.py。light・dark だけ。URL の # の後ろ)。設定・一括比較・AI の窓は WebSession が開くときに付ける
+
 webview は run() の中で読む(このモジュールは pywebview 無しでも読める。テストは偽物に差し替える)。
 """
 
@@ -36,10 +39,12 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from driftpilot.gui_web import theme as theme_module
 from driftpilot.gui_web.bridge import Api
 from driftpilot.gui_web.compare_api import CompareApi
 from driftpilot.gui_web.session import WebSession
 from driftpilot.gui_web.settings_api import SettingsApi
+from driftpilot.gui_web.theme import themed_url, themed_window
 from driftpilot.llm_settings import portable_settings_dir
 from driftpilot.messages import COMPARE_TITLE, SETTINGS_TITLE, gui_web_start_failed, webview2_missing
 
@@ -202,6 +207,9 @@ def run(
     if uses_legacy_engine(platform.system(), webview.renderer):
         tell(webview2_missing())
         return 2
+    # 画面の色(ADR-0189)。最初に開く窓の url に付ける(light・dark だけ。system は付けない)。
+    # 設定・一括比較・AI の窓を WebSession が開くときは、そのつど読む(settings_window など元の url のまま渡す)
+    theme = theme_module.current_theme()
     settings_window = {"url": page_url(SETTINGS_PAGE), **window_geometry(screens, size=SETTINGS_SIZE)}
     batch_window = {
         "url": page_url(BATCH_PAGE),
@@ -221,10 +229,12 @@ def run(
         else {"launch_notice": launch.get("notice"), "started_marker": launch.get("started_marker")}
     )
     if sample:
-        webview.create_window(TITLE, url=page_url(PAGE), js_api=Api(), **window_geometry(screens, size=SIZE))
+        webview.create_window(
+            TITLE, url=themed_url(page_url(PAGE), theme), js_api=Api(), **window_geometry(screens, size=SIZE)
+        )
     elif settings:
         api = SettingsApi()
-        window = webview.create_window(SETTINGS_TITLE, js_api=api, **settings_window)
+        window = webview.create_window(SETTINGS_TITLE, js_api=api, **themed_window(settings_window, theme))
         api._attach(window)  # 知らせ(送っている最中)と「閉じる」に使う
         # 窓の上の × で閉じたときも「更新する」の準備を止めて捨てる(REQ-253 §5)。偽の窓に events が無くても動く
         events = getattr(window, "events", None)
@@ -254,7 +264,7 @@ def run(
         compare = CompareApi(session)
         window = webview.create_window(
             COMPARE_TITLE,
-            url=page_url(COMPARE_PAGE),
+            url=themed_url(page_url(COMPARE_PAGE), theme),
             js_api=compare,
             min_size=COMPARE_MIN_SIZE,
             text_select=True,

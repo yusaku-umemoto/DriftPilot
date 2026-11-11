@@ -304,6 +304,7 @@ from driftpilot.user_config_writer import (
     remove_api_key,
     update_gui_auto_send,
     update_gui_items,
+    update_gui_theme,
     update_llm_items,
 )
 
@@ -694,6 +695,7 @@ class ConfigFields:
     auto_send_llm は [gui] の自動送信(true のときだけ真。pywebview の画面だけが使う。ADR-0080 決定2)。
     character は [gui] のキャラクターの絵(true のときだけ真。pywebview の画面だけが使う。ADR-0174 決定1)。
     auto_update_check は [gui] の自動アップデートチェック(true のときだけ真。「更新」のタブの専用の「保存」だけが書く。ADR-0188 決定2)。
+    theme は [gui] の画面の色("system"・"light"・"dark"。「表示」のタブの専用の「保存」だけが書く。ADR-0189)。
     AI への指示文はこの枠から出した(指示文のプロファイルの枠。PromptPane。REQ-116 §3)。
     """
 
@@ -708,6 +710,7 @@ class ConfigFields:
     auto_send_llm: bool = False
     character: bool = False
     auto_update_check: bool = False
+    theme: str = "system"
 
     @property
     def words_text(self) -> str:
@@ -1137,6 +1140,7 @@ def settings_view(
             snapshot.auto_send_llm,
             snapshot.character,
             snapshot.auto_update_check,
+            snapshot.theme,
         ),
         limits_warning=(
             workdir_limits_ignored(workdir or Path("driftpilot.toml").absolute(), active.ignored_workdir_limits)
@@ -1157,6 +1161,7 @@ def _config_fields(
     auto_send_llm: bool = False,
     character: bool = False,
     auto_update_check: bool = False,
+    theme: str = "system",
 ) -> ConfigFields:
     note = "\n".join(
         [
@@ -1175,6 +1180,7 @@ def _config_fields(
         auto_send_llm=auto_send_llm,
         character=character,
         auto_update_check=auto_update_check,
+        theme=theme,
     )
 
 
@@ -2012,6 +2018,31 @@ def save_auto_update_check(
     path = user_config_path(platform=platform, env=env, home=home).absolute()
     try:
         update_gui_items(path, fields.digest, {AUTO_UPDATE_CHECK_KEY: checked})
+    except ConfigChanged:
+        return ConfigAction(False, CONFIG_CHANGED_ELSEWHERE, reload=True)
+    except SettingsError as exc:
+        return ConfigAction(False, config_not_saved(str(exc)))
+    return ConfigAction(True, config_saved(path))
+
+
+def save_gui_theme(
+    fields: ConfigFields,
+    theme: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> ConfigAction:
+    """「表示」のタブの「保存」。[gui] の theme の 1 項目だけを書く(ADR-0189)。
+
+    書き方は save_auto_update_check と同じ(読んだときのハッシュを付け、ほかで変わっていたら書かずに reload を立てる)。
+    読んだときと同じ値なら何も書かない。ほかの項目には触らない。theme が 3 つ以外なら書かずに理由を返す。
+    """
+    if theme == fields.theme:
+        return ConfigAction(True, CONFIG_NOT_CHANGED)
+    path = user_config_path(platform=platform, env=env, home=home).absolute()
+    try:
+        update_gui_theme(path, fields.digest, theme)
     except ConfigChanged:
         return ConfigAction(False, CONFIG_CHANGED_ELSEWHERE, reload=True)
     except SettingsError as exc:

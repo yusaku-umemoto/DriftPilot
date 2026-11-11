@@ -2,7 +2,8 @@
 
 書けるのは [llm] の max_diffs・max_total_diffs・extra_secret_words(WRITABLE)と、
 [gui] の auto_compare・character・auto_update_check(GUI_WRITABLE。update_gui_items。ADR-0076 決定3・ADR-0174 決定1・ADR-0188 決定2)と、
-[gui] の auto_send_llm(update_gui_auto_send。ADR-0080 決定2。設定画面がオンにする前に確かめを出す)だけ。
+[gui] の auto_send_llm(update_gui_auto_send。ADR-0080 決定2。設定画面がオンにする前に確かめを出す)と、
+[gui] の theme(update_gui_theme。ADR-0189。"system"・"light"・"dark" だけ。真偽値とは別の口)だけ。
 api_key は消す方向だけ(remove_api_key)。prompt_template は消す関数だけを残す(remove_llm_item。ADR-0075 決定3)。
 AI への指示文は指示文のプロファイル(prompt-profiles.json)に移ったので、prompt_template は書かず、読みもしない(ADR-0079 決定5)。
 model・base_url・api_key を書く関数は作らない(ADR-0071 決定2。平文のキーをツールが書く経路を作らない)。
@@ -40,6 +41,8 @@ from driftpilot.llm_settings import (
     GUI_SECTION,
     PROMPT_TEMPLATE_KEY,
     SECTION,
+    THEME_KEY,
+    THEMES,
     SettingsError,
     auto_compare_of,
     auto_send_llm_of,
@@ -50,6 +53,7 @@ from driftpilot.llm_settings import (
     limit_of,
     parse_section,
     read_bytes,
+    theme_of,
     words_of,
 )
 from driftpilot.messages import CONFIG_CHANGED_ELSEWHERE
@@ -75,6 +79,7 @@ class UserConfigSnapshot:
     auto_send_llm は [gui] の自動送信(true のときだけ真。比較の画面と同じ決まり。ADR-0080 決定2)。
     character は [gui] のキャラクターの絵(true のときだけ真。ADR-0174 決定1)。
     auto_update_check は [gui] の自動アップデートチェック(true のときだけ真。ADR-0188 決定2)。
+    theme は [gui] の画面の色("system"・"light"・"dark"。ほかは "system"。ADR-0189)。
     """
 
     path: Path
@@ -87,6 +92,7 @@ class UserConfigSnapshot:
     auto_send_llm: bool = False
     character: bool = False
     auto_update_check: bool = False
+    theme: str = "system"
 
 
 @dataclass(frozen=True)
@@ -129,6 +135,7 @@ def read_user_config(path: Path) -> UserConfigSnapshot:
         auto_send_llm=auto_send_llm_of(data),
         character=character_of(data),
         auto_update_check=auto_update_check_of(data),
+        theme=theme_of(data),
     )
 
 
@@ -336,11 +343,27 @@ def update_gui_auto_send(path: Path, expected_digest: str | None, value: bool) -
     return _write_gui(path, expected_digest, {AUTO_SEND_LLM_KEY: value})
 
 
+def update_gui_theme(path: Path, expected_digest: str | None, theme: object) -> str:
+    """[gui] の theme だけを置き換える・足す。返すのは書いた後のハッシュ(ADR-0189)。
+
+    真偽値の項目(GUI_WRITABLE)とは別の口。theme が "system"・"light"・"dark" のどれでもなければ SettingsError。
+    ハッシュが違えば書かない(ConfigChanged)。コメント・並びは、ほかの [gui] の項目と同じく保つ。
+    """
+    if not isinstance(theme, str) or theme not in THEMES:
+        raise SettingsError(f"{path}: {GUI_SECTION}.{THEME_KEY} は {', '.join(THEMES)} のどれかにしてください")
+    return _put_gui(path, expected_digest, {THEME_KEY: theme})
+
+
 def _write_gui(path: Path, expected_digest: str | None, values: Mapping[str, object]) -> str:
-    """[gui] の項目を置き換える・足す(名前は呼ぶ側で確かめる)。[gui] が無ければ文書の最後に足す。"""
+    """[gui] の真偽値の項目を置き換える・足す(名前は呼ぶ側で確かめる)。値が真偽値でなければ SettingsError。"""
     for key, value in values.items():
         if not isinstance(value, bool):
             raise SettingsError(f"{path}: {GUI_SECTION}.{key} は true か false にしてください")
+    return _put_gui(path, expected_digest, values)
+
+
+def _put_gui(path: Path, expected_digest: str | None, values: Mapping[str, object]) -> str:
+    """[gui] の項目を置き換える・足す(名前と値は呼ぶ側で確かめる)。[gui] が無ければ文書の最後に足す。"""
     _, doc = _load(path, expected_digest)
     parts = _parts(doc, _section(doc, path, create=True, name=GUI_SECTION), GUI_SECTION)
     added: dict[str, object] = {}

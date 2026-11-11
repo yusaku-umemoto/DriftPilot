@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' data:">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script type="module" blocking="render" src="js/theme.js"></script>
   <title>DriftPilot</title>
   <link rel="stylesheet" href="pilot.css">
   <script type="module" src="js/settings.js"></script>
@@ -15,7 +16,7 @@
   手元の CLI の形式の欄（CLI の場所・時間の上限）も、この画面だけにある（REQ-102 §4）。
   「設定ファイルを作る」（wx の「ひな形を作る」）は、最下段ではなく設定ファイルの枠の中に置く（REQ-113 §2）。
   「AI への指示文」のプロファイルの枠も、この画面だけにある（REQ-116 §3。「プロンプト」のタブの、独立した枠）。
-  窓はタブ 6 枚に分ける（ADR-0154 / REQ-214。「単純比較」のタブは REQ-227 / ADR-0166、「更新」のタブは REQ-252 / ADR-0188 で足した）。見出しと帯とタブの行は動かさず、タブの面の中だけがスクロールする。
+  窓はタブ 7 枚に分ける（ADR-0154 / REQ-214。「単純比較」のタブは REQ-227 / ADR-0166、「更新」のタブは REQ-252 / ADR-0188、「表示」のタブは REQ-256 / ADR-0189 で足した）。見出しと帯とタブの行は動かさず、タブの面の中だけがスクロールする。
   欄は消さずに面の hidden で隠すので、form() はどのタブの欄も読む（切り替えで打った値は消えない）。
   文は書かず、data-text の鍵で messages.py の文を取る。状態は Python（gui_web/settings_api.py）が返す JSON を js/settings.js が描く
 -->
@@ -45,6 +46,7 @@
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-auto" aria-controls="settings-panel-auto" aria-selected="false" data-text="settings.tab.auto"></button>
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-raw" aria-controls="settings-panel-raw" aria-selected="false" data-text="settings.tab.raw"></button>
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-file" aria-controls="settings-panel-file" aria-selected="false" data-text="settings.tab.file"></button>
+      <button type="button" class="pilot-tab" role="tab" id="settings-tab-display" aria-controls="settings-panel-display" aria-selected="false" data-text="settings.tab.display"></button>
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-update" aria-controls="settings-panel-update" aria-selected="false" data-text="settings.tab.update"></button>
     </div>
 
@@ -501,6 +503,25 @@
           </section>
         </div>
       </details>
+    </div>
+
+    <!-- 「表示」のタブ（REQ-256 §4 / ADR-0189）。画面の色（システム設定に合わせる・白モード・黒モード）を選ぶ。
+         この「保存」（save-display）は [gui] の theme だけを書き、開いている窓すべてに色を当てる（「更新」のタブと同じ形。
+         選んだ値は別の引数で渡す。form() はほかの操作と同じく渡し、打ちかけの欄を残す） -->
+    <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-display" aria-labelledby="settings-tab-display" hidden>
+      <section class="pilot-group">
+        <h2 class="pilot-group-title" id="display-title" data-text="settings.display.title"></h2>
+        <div class="pilot-row" role="radiogroup" aria-labelledby="display-title">
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="theme" id="theme-system" value="system"><span data-text="settings.display.system"></span></label>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="theme" id="theme-light" value="light"><span data-text="settings.display.light"></span></label>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="theme" id="theme-dark" value="dark"><span data-text="settings.display.dark"></span></label>
+        </div>
+        <p class="pilot-note pilot-lines" data-text="settings.note.display_frame"></p>
+        <div class="pilot-row">
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="save-display" data-text="settings.button.save_config"></button>
+        </div>
+      </section>
     </div>
 
     <!-- 「更新」のタブ（REQ-252 §4 / ADR-0188 決定2）。今の版・「更新を確かめる」・結果・変更の内容・「Releases のページを開く」・
