@@ -100,6 +100,7 @@ from driftpilot.llm_profiles import (
 )
 from driftpilot.llm_settings import (
     ANTHROPIC_MESSAGES,
+    AUTO_UPDATE_CHECK_KEY,
     CHAT_COMPLETIONS,
     CLAUDE_CODE_CLI,
     CODEX_CLI,
@@ -692,6 +693,7 @@ class ConfigFields:
     auto_compare は [gui] の自動の比較(無ければ真、形が違えば偽。pywebview の画面だけが使う。ADR-0076)。
     auto_send_llm は [gui] の自動送信(true のときだけ真。pywebview の画面だけが使う。ADR-0080 決定2)。
     character は [gui] のキャラクターの絵(true のときだけ真。pywebview の画面だけが使う。ADR-0174 決定1)。
+    auto_update_check は [gui] の自動アップデートチェック(true のときだけ真。「更新」のタブの専用の「保存」だけが書く。ADR-0188 決定2)。
     AI への指示文はこの枠から出した(指示文のプロファイルの枠。PromptPane。REQ-116 §3)。
     """
 
@@ -705,6 +707,7 @@ class ConfigFields:
     auto_compare: bool = True
     auto_send_llm: bool = False
     character: bool = False
+    auto_update_check: bool = False
 
     @property
     def words_text(self) -> str:
@@ -1133,6 +1136,7 @@ def settings_view(
             snapshot.auto_compare,
             snapshot.auto_send_llm,
             snapshot.character,
+            snapshot.auto_update_check,
         ),
         limits_warning=(
             workdir_limits_ignored(workdir or Path("driftpilot.toml").absolute(), active.ignored_workdir_limits)
@@ -1152,6 +1156,7 @@ def _config_fields(
     auto_compare: bool = True,
     auto_send_llm: bool = False,
     character: bool = False,
+    auto_update_check: bool = False,
 ) -> ConfigFields:
     note = "\n".join(
         [
@@ -1169,6 +1174,7 @@ def _config_fields(
         auto_compare=auto_compare,
         auto_send_llm=auto_send_llm,
         character=character,
+        auto_update_check=auto_update_check,
     )
 
 
@@ -1985,6 +1991,31 @@ def save_config(
     except SettingsError as exc:
         # 先に書いた項目があればファイルは変わっているので、画面を読み直させる
         return ConfigAction(False, config_not_saved(str(exc)), reload=written)
+    return ConfigAction(True, config_saved(path))
+
+
+def save_auto_update_check(
+    fields: ConfigFields,
+    checked: bool,
+    *,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> ConfigAction:
+    """「更新」のタブの「保存」。[gui] の auto_update_check の 1 項目だけを書く(ADR-0188 決定2 / REQ-252 §4)。
+
+    書き方は character と同じ(update_gui_items。読んだときのハッシュを付け、ほかで変わっていたら書かずに reload を立てる)。
+    読んだときと同じ値なら何も書かない。ほかの項目(上限・伏せる語・auto_compare・character・auto_send_llm)には触らない。
+    """
+    if checked == fields.auto_update_check:
+        return ConfigAction(True, CONFIG_NOT_CHANGED)
+    path = user_config_path(platform=platform, env=env, home=home).absolute()
+    try:
+        update_gui_items(path, fields.digest, {AUTO_UPDATE_CHECK_KEY: checked})
+    except ConfigChanged:
+        return ConfigAction(False, CONFIG_CHANGED_ELSEWHERE, reload=True)
+    except SettingsError as exc:
+        return ConfigAction(False, config_not_saved(str(exc)))
     return ConfigAction(True, config_saved(path))
 
 

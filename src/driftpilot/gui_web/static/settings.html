@@ -15,7 +15,7 @@
   手元の CLI の形式の欄（CLI の場所・時間の上限）も、この画面だけにある（REQ-102 §4）。
   「設定ファイルを作る」（wx の「ひな形を作る」）は、最下段ではなく設定ファイルの枠の中に置く（REQ-113 §2）。
   「AI への指示文」のプロファイルの枠も、この画面だけにある（REQ-116 §3。「プロンプト」のタブの、独立した枠）。
-  窓はタブ 5 枚に分ける（ADR-0154 / REQ-214。「単純比較」のタブは REQ-227 / ADR-0166 で足した）。見出しと帯とタブの行は動かさず、タブの面の中だけがスクロールする。
+  窓はタブ 6 枚に分ける（ADR-0154 / REQ-214。「単純比較」のタブは REQ-227 / ADR-0166、「更新」のタブは REQ-252 / ADR-0188 で足した）。見出しと帯とタブの行は動かさず、タブの面の中だけがスクロールする。
   欄は消さずに面の hidden で隠すので、form() はどのタブの欄も読む（切り替えで打った値は消えない）。
   文は書かず、data-text の鍵で messages.py の文を取る。状態は Python（gui_web/settings_api.py）が返す JSON を js/settings.js が描く
 -->
@@ -45,6 +45,7 @@
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-auto" aria-controls="settings-panel-auto" aria-selected="false" data-text="settings.tab.auto"></button>
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-raw" aria-controls="settings-panel-raw" aria-selected="false" data-text="settings.tab.raw"></button>
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-file" aria-controls="settings-panel-file" aria-selected="false" data-text="settings.tab.file"></button>
+      <button type="button" class="pilot-tab" role="tab" id="settings-tab-update" aria-controls="settings-panel-update" aria-selected="false" data-text="settings.tab.update"></button>
     </div>
 
     <!-- 「AI プロファイル」のタブ: 一覧と編集の枠・API キーの枠・接続テスト・「このプロファイルを使う」 -->
@@ -500,6 +501,44 @@
           </section>
         </div>
       </details>
+    </div>
+
+    <!-- 「更新」のタブ（REQ-252 §4 / ADR-0188 決定2）。今の版・「更新を確かめる」・結果・変更の内容・「Releases のページを開く」・
+         ソースから入れた人への案内・自動アップデートチェック。文と状態は Python が返し、変更の内容も文字として描く（textContent）。
+         この「保存」（save-update）は [gui] の auto_update_check だけを書く（「単純比較」のタブと同じ形。チェックは form() には入れず、別の引数で渡す。form() はほかの操作と同じく渡し、打ちかけの欄を残す） -->
+    <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-update" aria-labelledby="settings-tab-update" hidden>
+      <section class="pilot-group">
+        <h2 class="pilot-group-title" data-text="settings.tab.update"></h2>
+        <p class="pilot-lines" id="update-current"></p>
+        <div class="pilot-row">
+          <button type="button" class="pilot-button pilot-button--secondary" id="check-update" data-text="settings.button.check_update"></button>
+          <span class="pilot-mark pilot-lines pilot-grow" id="update-result" role="status" hidden></span>
+        </div>
+        <!-- 変更の内容（新しい版があるときだけ）。.pilot-answer の高さの上限（8 行）で、長ければ枠の中で縦に送る（pilot.css は変えない） -->
+        <div class="pilot-answer pilot-lines" id="update-notes" tabindex="0" hidden></div>
+        <!-- 「更新する」（REQ-253 §7）。新しい版があり、配った物（exe・アプリ）で動いているときだけ Python が出させる（can_update）。
+             準備の間は「やめる」と進み具合（取ってきています…・確かめています…・準備しています…）を出す。文は textContent だけで描く -->
+        <div class="pilot-row">
+          <button type="button" class="pilot-button pilot-button--secondary" id="start-update" data-text="settings.button.start_update" hidden></button>
+          <button type="button" class="pilot-button pilot-button--secondary" id="cancel-update" data-text="settings.button.cancel_update" hidden></button>
+          <span class="pilot-lines pilot-grow" id="update-progress" role="status"></span>
+        </div>
+        <div class="pilot-row">
+          <button type="button" class="pilot-button pilot-button--secondary" id="open-releases" data-text="settings.button.open_releases"></button>
+        </div>
+        <p class="pilot-note pilot-lines" id="update-source-note" hidden></p>
+        <div class="pilot-row">
+          <span class="pilot-radio">
+            <input id="auto-update-check" class="pilot-check" type="checkbox">
+            <label for="auto-update-check" data-text="settings.config.auto_update_check"></label>
+          </span>
+        </div>
+        <p class="pilot-note pilot-lines" data-text="settings.note.auto_update_check"></p>
+        <div class="pilot-row">
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="save-update" data-text="settings.button.save_config"></button>
+        </div>
+      </section>
     </div>
   </main>
 

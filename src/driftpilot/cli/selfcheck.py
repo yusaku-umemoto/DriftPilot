@@ -15,6 +15,7 @@ driftpilot の extra の依存のメタデータで決める(入れたつもり�
 """
 
 import argparse
+import base64
 import importlib.util
 import json
 import os
@@ -36,6 +37,7 @@ from driftpilot.messages import (
     SELFCHECK_LLM,
     SELFCHECK_METADATA,
     SELFCHECK_PATTERNS,
+    SELFCHECK_SIGNATURE,
     SELFCHECK_TEMPLATES,
     SELFCHECK_VERSION,
     selfcheck_error,
@@ -46,6 +48,8 @@ from driftpilot.messages import (
     selfcheck_metadata_missing,
     selfcheck_not_installed,
     selfcheck_rules,
+    selfcheck_signature,
+    selfcheck_signature_failed,
     selfcheck_store,
     selfcheck_templates,
     selfcheck_templates_empty,
@@ -216,6 +220,47 @@ def _check_metadata() -> Check:
     return Check(SELFCHECK_METADATA, True, "・".join(found))
 
 
+# RFC 8032 の 7.1 の TEST 1(公開の鍵・空の文・署名)。署名の確かめの部品(cryptography)が動くかを見る(REQ-253 §10)
+RFC8032_TEST1_PUBLIC = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+RFC8032_TEST1_SIGNATURE = (
+    "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+)
+
+
+def _check_signature() -> Check:
+    """署名の確かめ(REQ-253 §10)。RFC 8032 の TEST 1 が通り、1 バイト変えた文は通らず、keys.py の 2 つの鍵の印が合うこと。
+
+    cryptography が入っていない(exe に入れ忘れた)ときは、ここで失敗になる。通信しない・ファイルを書かない。
+    """
+    try:
+        import cryptography  # noqa: F401 - 入っているかだけを見る(PyInstaller に入れさせる)
+    except ImportError as exc:
+        return Check(SELFCHECK_SIGNATURE, False, selfcheck_import_failed("cryptography", type(exc).__name__))
+    from driftpilot.update.errors import SignatureError
+    from driftpilot.update.keys import KEYS, key_mark
+    from driftpilot.update.verify import verify_signature
+
+    test_keys = {"rfc8032": bytes.fromhex(RFC8032_TEST1_PUBLIC)}
+    signature = base64.b64encode(bytes.fromhex(RFC8032_TEST1_SIGNATURE))
+    try:
+        verify_signature(b"", signature, test_keys)
+    except SignatureError:
+        raise _Failed(selfcheck_signature_failed("RFC 8032 TEST 1")) from None
+    try:
+        verify_signature(b"x", signature, test_keys)
+    except SignatureError:
+        pass
+    else:
+        raise _Failed(selfcheck_signature_failed("RFC 8032 TEST 1"))
+    marks = []
+    for key in KEYS:
+        raw = key.raw()
+        if len(raw) != 32 or key_mark(raw) != key.mark:
+            raise _Failed(selfcheck_signature_failed(key.name))
+        marks.append((key.name, key.mark))
+    return Check(SELFCHECK_SIGNATURE, True, selfcheck_signature(marks))
+
+
 def _extra_requirements(extra: str) -> list[str]:
     """driftpilot の extra の依存の名前。driftpilot の版の情報が無ければ空(その抜けは部品の版の情報の項目で失敗になる)。"""
     try:
@@ -335,6 +380,7 @@ def run_checks() -> list[Check]:
         _guarded(SELFCHECK_PATTERNS, _check_patterns),
         _guarded(SELFCHECK_TEMPLATES, _check_templates),
         _guarded(SELFCHECK_METADATA, _check_metadata),
+        _guarded(SELFCHECK_SIGNATURE, _check_signature),  # REQ-253 で足した(判断の記録 2)
         _guarded(SELFCHECK_GUI_WEB, _check_gui_web, gui),
         _guarded(SELFCHECK_LLM, _check_llm, llm),
         _guarded(SELFCHECK_KEY_STORE, _check_key_store, llm),

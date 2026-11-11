@@ -296,6 +296,9 @@ function render(next) {
   $("accept-suggestions").disabled = !next.inputs_enabled;
   $("dismiss-suggestions").disabled = !next.inputs_enabled;
 
+  // 起動したときに見つけた新しい版の知らせ（REQ-252 §5）。文は文字として描く
+  $("update-notice").hidden = next.update_notice === null;
+  text($("update-notice-text"), next.update_notice);
   $("banner").hidden = next.banner === null;
   text($("banner-text"), next.banner);
   text($("tab-all"), next.pairs_titles.all);
@@ -1178,6 +1181,9 @@ bind("handoff", () => {
 });
 // 「設定…」（ADR-0176 決定4）。設定の窓は WebSession が開く（開いていれば前に出す）
 bind("open-settings", async () => handle(await call("open_settings")));
+// 新しい版の知らせ（REQ-252 §5）。「更新…」は設定の窓を「更新」のタブで開き、「閉じる」はその起動の間は出さない
+bind("update-open", async () => handle(await call("open_settings", "update")));
+bind("update-dismiss", async () => handle(await call("dismiss_update_notice")));
 // AI の場所（REQ-213）。押せるか・送るかは Python が決める
 bind("ai-check", () => act("check_llm"));
 bind("ai-send", () => act("send_llm"));

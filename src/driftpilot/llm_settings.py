@@ -135,6 +135,8 @@ AUTO_COMPARE_KEY = "auto_compare"
 AUTO_SEND_LLM_KEY = "auto_send_llm"
 # 窓にキャラクター(Mirarin)の絵を出すか(ADR-0174 決定1。真偽値。書かれていなければ偽)
 CHARACTER_KEY = "character"
+# 起動したときに新しい版を確かめるか(ADR-0188 決定2。真偽値。書かれていなければ偽。読めなければ偽)
+AUTO_UPDATE_CHECK_KEY = "auto_update_check"
 
 # 利用者ごとの設定ファイルの雛形(REQ-27 §B-4。2行目と上限の行は REQ-93 で直した)。値の行はすべてコメントのまま
 CONFIG_TEMPLATE = f"""\
@@ -160,6 +162,7 @@ CONFIG_TEMPLATE = f"""\
 
 # プロンプトは、設定画面の「プロンプト」の枠でプロファイルとして編集できます。差分を入れる印 {{{{diff}}}} が要ります
 # 比較の画面で、ファイルが2つそろったら自動で比較を始めるか（[gui] の auto_compare。書かなければ始めます）は、設定画面の「設定ファイル」の枠で変えられます
+# 起動したときに新しい版を確かめるか（[gui] の auto_update_check。書かなければ確かめません）は、設定画面の「更新」のタブで変えられます
 """
 
 
@@ -479,6 +482,26 @@ def character_enabled(
     except SettingsError:
         return False
     return character_of(data)
+
+
+def auto_update_check_of(data: bytes | None) -> bool:
+    """設定ファイルのバイト列から [gui] の auto_update_check を読む(ADR-0188 決定2。character と同じ読み方)。
+
+    真偽値の true のときだけ真。ファイルが無い・項目が無い・TOML として読めない・[gui] が表でない・
+    値が真偽値でないときは偽(既定はオフ。読めないときはつながない)。
+    """
+    return _gui_flag(data, AUTO_UPDATE_CHECK_KEY, False)
+
+
+def auto_update_check_enabled(
+    *, env: Mapping[str, str] | None = None, platform: str | None = None, home: Path | None = None
+) -> bool:
+    """利用者ごとの設定ファイルの [gui] auto_update_check(起動したときに 1 回読む。ADR-0188 決定2)。読めなければ偽。"""
+    try:
+        data = read_bytes(user_config_path(platform=platform, env=env, home=home))
+    except SettingsError:
+        return False
+    return auto_update_check_of(data)
 
 
 def auto_compare_enabled(

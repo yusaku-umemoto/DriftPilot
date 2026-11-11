@@ -71,6 +71,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,7 @@ from driftpilot.llm_settings import (
     LlmSettings,
     SettingsError,
     auto_send_llm_enabled,
+    auto_update_check_enabled,
     character_enabled,
     display_model,
     load_settings,
@@ -261,6 +263,8 @@ from driftpilot.screen_model.settings_model import (
 
 # Python から画面への知らせの種類。static/js/batch.js が受け、state() を呼び直す
 CHANGED_EVENT = "batch.changed"
+# 「設定…」で開けるタブ(省くと今と同じ。知らせの「更新…」は "update"。REQ-252 §5)
+SETTINGS_TABS = (None, "update")
 # 窓のファイルのダイアログの種類(webview.FileDialog の OPEN・FOLDER・SAVE の値。webview は読まない)
 DIALOG_OPEN = 10
 DIALOG_FOLDER = 20
@@ -614,9 +618,16 @@ class BatchApi(Api):
         """
         return self._call(self._export_result, form, kind)
 
-    def open_settings(self) -> dict[str, Any]:
-        """「設定…」(ADR-0176 決定4)。設定の窓を開く(開いていれば前に出す)。比較の窓の「設定…」と同じ口。"""
-        return self._call(self._open_settings)
+    def open_settings(self, tab: Any = None) -> dict[str, Any]:
+        """「設定…」(ADR-0176 決定4)。設定の窓を開く(開いていれば前に出す)。比較の窓の「設定…」と同じ口。
+
+        tab は開くタブ(知らせの「更新…」は "update"。REQ-252 §5)。省けば今と同じ。None・"update" のほかは受け付けない。
+        """
+        return self._call(self._open_settings, tab)
+
+    def dismiss_update_notice(self) -> dict[str, Any]:
+        """新しい版の知らせの「閉じる」(REQ-252 §5)。その起動の間は、比較の窓にも一括比較の窓にも出さない。"""
+        return self._call(self._dismiss_update_notice)
 
     def close(self) -> dict[str, Any]:
         """窓を閉じる。実行中なら中止してから。"""
@@ -824,6 +835,8 @@ class BatchApi(Api):
             "character": self._character_on(),
             # 起動時の絵を出すか(ADR-0174 決定2)。真にするのは --batch で最初に開いた窓の最初の state() だけ(_state)
             "splash": False,
+            # 起動したときに見つけた新しい版の知らせの文(REQ-252 §5)。無ければ null。画面は textContent だけで描く
+            "update_notice": self._session.update_notice_view(),
         }
 
     def _character_on(self) -> bool:
@@ -997,7 +1010,16 @@ class BatchApi(Api):
             result = self._ok()
             if first and result["view"]["character"]:
                 result["view"]["splash"] = True
-            return result
+        # 起動したときの新しい版の確かめ(REQ-252 §5)。--batch だけのときはこの窓が最初に呼ぶ。比較の窓の後に開いたときは
+        # session の 1 回だけの印で止まる。ロックの外で呼ぶ
+        self._session.start_update_check(
+            partial(auto_update_check_enabled, env=self._where["env"], platform=self._where["platform"], home=self._where["home"])
+        )
+        # --update-started で起動したときの started-ok(REQ-253 §7)。窓が出た後の印として、1 つの起動で 1 回だけ書く。ロックの外で呼ぶ
+        mark_update_started = getattr(self._session, "mark_update_started", None)
+        if mark_update_started is not None:
+            mark_update_started()
+        return result
 
     # --- 組(比較はしない) ---
 
@@ -1630,8 +1652,19 @@ class BatchApi(Api):
         with self._lock:
             return self._ok()
 
-    def _open_settings(self) -> dict[str, Any]:
-        self._session.open_settings()  # 窓を作る間はロックを持たない(--batch だけの起動でも開く)
+    def _open_settings(self, tab: Any) -> dict[str, Any]:
+        if tab not in SETTINGS_TABS:
+            raise _BadRequest
+        # 窓を作る間はロックを持たない(--batch だけの起動でも開く)。tab を省いたときは今と同じく引数なしで呼ぶ
+        if tab is None:
+            self._session.open_settings()
+        else:
+            self._session.open_settings(tab)
+        with self._lock:
+            return self._ok()
+
+    def _dismiss_update_notice(self) -> dict[str, Any]:
+        self._session.dismiss_update_notice()  # 両方の窓へ知らせる。ロックの外で呼ぶ
         with self._lock:
             return self._ok()
 

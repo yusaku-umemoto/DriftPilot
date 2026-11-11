@@ -1,7 +1,7 @@
 """利用者ごとの設定ファイル(config.toml)を設定画面から書く(REQ-93 / ADR-0071 決定2〜4)。
 
 書けるのは [llm] の max_diffs・max_total_diffs・extra_secret_words(WRITABLE)と、
-[gui] の auto_compare・character(GUI_WRITABLE。update_gui_items。ADR-0076 決定3・ADR-0174 決定1)と、
+[gui] の auto_compare・character・auto_update_check(GUI_WRITABLE。update_gui_items。ADR-0076 決定3・ADR-0174 決定1・ADR-0188 決定2)と、
 [gui] の auto_send_llm(update_gui_auto_send。ADR-0080 決定2。設定画面がオンにする前に確かめを出す)だけ。
 api_key は消す方向だけ(remove_api_key)。prompt_template は消す関数だけを残す(remove_llm_item。ADR-0075 決定3)。
 AI への指示文は指示文のプロファイル(prompt-profiles.json)に移ったので、prompt_template は書かず、読みもしない(ADR-0079 決定5)。
@@ -35,6 +35,7 @@ from tomlkit.items import Array, InlineTable, Table, Whitespace
 from driftpilot.llm_settings import (
     AUTO_COMPARE_KEY,
     AUTO_SEND_LLM_KEY,
+    AUTO_UPDATE_CHECK_KEY,
     CHARACTER_KEY,
     GUI_SECTION,
     PROMPT_TEMPLATE_KEY,
@@ -42,6 +43,7 @@ from driftpilot.llm_settings import (
     SettingsError,
     auto_compare_of,
     auto_send_llm_of,
+    auto_update_check_of,
     character_of,
     is_limit,
     is_secret_word,
@@ -56,8 +58,8 @@ from driftpilot.messages import CONFIG_CHANGED_ELSEWHERE
 WRITABLE = ("max_diffs", "max_total_diffs", "extra_secret_words")
 # 消す関数だけを残す項目(ADR-0075 決定3。REQ-116 §2 で関数は残す)。api_key は remove_api_key だけで消す
 REMOVABLE = (PROMPT_TEMPLATE_KEY,)
-# 画面から書ける [gui] の項目(ADR-0076 決定3。character は ADR-0174 決定1)。[llm] の WRITABLE とは混ぜない。これ以外の名前は update_gui_items が断る
-GUI_WRITABLE = (AUTO_COMPARE_KEY, CHARACTER_KEY)
+# 画面から書ける [gui] の項目(ADR-0076 決定3。character は ADR-0174 決定1、auto_update_check は ADR-0188 決定2)。[llm] の WRITABLE とは混ぜない。これ以外の名前は update_gui_items が断る
+GUI_WRITABLE = (AUTO_COMPARE_KEY, CHARACTER_KEY, AUTO_UPDATE_CHECK_KEY)
 
 
 class ConfigChanged(SettingsError):
@@ -72,6 +74,7 @@ class UserConfigSnapshot:
     auto_compare は [gui] の自動の比較(無ければ真。形が違えば偽で、比較の画面と同じ決まり。ADR-0076 決定3)。
     auto_send_llm は [gui] の自動送信(true のときだけ真。比較の画面と同じ決まり。ADR-0080 決定2)。
     character は [gui] のキャラクターの絵(true のときだけ真。ADR-0174 決定1)。
+    auto_update_check は [gui] の自動アップデートチェック(true のときだけ真。ADR-0188 決定2)。
     """
 
     path: Path
@@ -83,6 +86,7 @@ class UserConfigSnapshot:
     auto_compare: bool = True
     auto_send_llm: bool = False
     character: bool = False
+    auto_update_check: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,7 @@ def read_user_config(path: Path) -> UserConfigSnapshot:
         auto_compare=auto_compare_of(data),
         auto_send_llm=auto_send_llm_of(data),
         character=character_of(data),
+        auto_update_check=auto_update_check_of(data),
     )
 
 

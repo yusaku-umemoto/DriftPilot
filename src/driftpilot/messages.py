@@ -3372,3 +3372,132 @@ GUI_WEB_TEXTS.update(
         "batch.note.raw_options": BATCH_NOTE_RAW_OPTIONS,
     }
 )
+
+
+# --- 新しい版の確かめ(ADR-0188 決定2 / REQ-252) ---
+
+# 確かめられないときの理由(REQ-252 §3 の表)。update.check が UpdateStatus.reason に入れる
+UPDATE_REASON_NOT_FOUND = "公開されている版が見つかりません"
+UPDATE_REASON_BUSY = "GitHub が混み合っています。しばらくしてから確かめてください"
+UPDATE_REASON_UNREACHABLE = "GitHub につながりませんでした。ネットワークとプロキシの設定を確かめてください"
+UPDATE_REASON_UNREADABLE = "GitHub の答えを読めませんでした"
+
+
+def update_reason_http(code: int) -> str:
+    """404・403・429 のほかの HTTP の誤り(REQ-252 §3)。"""
+    return f"GitHub から答えがありませんでした（HTTP {code}）"
+
+
+# 設定の窓の「更新」タブ(REQ-252 §4)
+SETTINGS_TAB_UPDATE = "更新"
+UPDATE_CHECKING = "確かめています…"
+# ソースから入れた人への案内(install_kind が "source" のときだけ出す。ADR-0188 決定3)
+UPDATE_SOURCE_NOTE = 'ソースから入れた場合は、git pull の後に pip install -e ".[gui,llm]" で新しくしてください'
+
+
+def update_current_version(version: str) -> str:
+    """「更新」タブのいちばん上の行。"""
+    return f"今の版: {version}"
+
+
+def update_is_latest(version: str) -> str:
+    """確かめた結果が最新のとき。"""
+    return f"最新の版です（{version}）"
+
+
+def update_is_newer(latest: str, published: str | None) -> str:
+    """確かめた結果、新しい版があるとき。公開日が分からなければ括弧を出さない。"""
+    if published:
+        return f"新しい版 {latest} があります（{published} 公開）"
+    return f"新しい版 {latest} があります"
+
+
+def update_notice_text(latest: str, current: str) -> str:
+    """起動したときの知らせ(比較の窓と一括比較の窓の上の帯。REQ-252 §5)。"""
+    return f"新しい版 {latest} があります（今は {current}）"
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "settings.tab.update": SETTINGS_TAB_UPDATE,
+        "settings.button.check_update": "更新を確かめる",
+        "settings.button.open_releases": "Releases のページを開く",
+        "settings.config.auto_update_check": "起動したときに新しい版を確かめる（自動アップデートチェック）",
+        "settings.note.auto_update_check": (
+            "オンにすると、起動のたびに GitHub（api.github.com）につなぎます。送るのは DriftPilot の版だけです"
+        ),
+        # 比較の窓と一括比較の窓の上の知らせ(REQ-252 §5)
+        "update_notice.open": "更新…",
+        "update_notice.dismiss": "閉じる",
+    }
+)
+
+
+# --- 署名つきのその場の更新(ADR-0188 決定3・4 / REQ-253) ---
+
+# 誤りの文(REQ-253 §7 の表)。update.errors の型が持つ
+UPDATE_SIGNATURE_FAILED = "配る物の署名を確かめられませんでした。入れ替えません"
+UPDATE_INTEGRITY_FAILED = "取ってきた物が壊れているか、違う物です。入れ替えません"
+UPDATE_NO_ASSET = "この OS に合う配る物がありません"
+UPDATE_NO_ASSET_MAC = "この Mac に合う配る物がありません"
+UPDATE_WRONG_LOCATION = "アプリケーションフォルダーに DriftPilot を入れてから更新してください"
+UPDATE_CONTENT_FAILED = "配る物の中身を読めませんでした。入れ替えません"
+UPDATE_NOT_STARTED = "更新を始められませんでした"
+
+
+def update_not_writable(place: str) -> str:
+    """入れ替える場所に書けないとき(REQ-253 §5)。"""
+    return f"この場所の DriftPilot は入れ替えられません（{place} に書けません）。Releases のページから入れ直してください"
+
+
+# 「更新」タブの「更新する」の進み具合と確かめの窓(REQ-253 §7)
+UPDATE_TITLE = "更新"
+UPDATE_VERIFYING = "確かめています…"
+UPDATE_PREPARING = "準備しています…"
+UPDATE_APPLY_YES = "入れ替える"
+UPDATE_APPLY_NO = "やめる"
+_MIB = 1024 * 1024
+
+
+def update_downloading(done: int, total: int) -> str:
+    """取ってきている間の進み具合(1 MB = 1,048,576 バイト。小数 1 桁)。"""
+    return f"取ってきています… {done / _MIB:.1f} / {total / _MIB:.1f} MB"
+
+
+def update_apply_confirm(version: str) -> str:
+    """準備ができた後の確かめの窓の本文。"""
+    return (
+        f"DriftPilot を閉じて {version} に入れ替えます。保存していない比較の結果は消えます。"
+        "入れ替えた後に、新しい版が開きます。"
+    )
+
+
+def update_failed_notice(log: str) -> str:
+    """--update-failed で起動したときの知らせ(比較の窓と一括比較の窓の上)。"""
+    return f"更新できなかったので、元の版に戻しました。記録: {log}"
+
+
+def update_done_notice(version: str) -> str:
+    """--update-started で起動したときの知らせ(比較の窓と一括比較の窓の上)。"""
+    return f"{version} に更新しました"
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "settings.button.start_update": "更新する",
+        "settings.button.cancel_update": "やめる",
+    }
+)
+
+# 自己診断の「署名の確かめ」の行(REQ-253 §10)
+SELFCHECK_SIGNATURE = "署名の確かめ"
+
+
+def selfcheck_signature(marks: list[tuple[str, str]]) -> str:
+    """署名の確かめが通ったときの詳しい欄(例: Ed25519・main 5c50466f5b7455a6・backup 80db1dccd1059a79)。"""
+    return "・".join(["Ed25519", *(f"{name} {mark}" for name, mark in marks)])
+
+
+def selfcheck_signature_failed(what: str) -> str:
+    """署名の確かめが合わないとき(what は確かめたものの名前)。"""
+    return f"署名の確かめが合いません: {what}"

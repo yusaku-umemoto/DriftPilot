@@ -190,6 +190,7 @@ from driftpilot.llm_settings import (
     auto_compare_enabled,
     auto_send_llm_enabled,
     auto_send_target,
+    auto_update_check_enabled,
     character_enabled,
     load_settings,
 )
@@ -389,6 +390,8 @@ from driftpilot.storage import StorageError, StoredRecord, resaved_record
 
 # Python から画面への知らせの種類。static/js/compare.js が受け、state() を呼び直す
 CHANGED_EVENT = "compare.changed"
+# 「設定…」で開けるタブ(省くと今と同じ。知らせの「更新…」は "update"。REQ-252 §5)
+SETTINGS_TABS = (None, "update")
 # 届いたところまでの答えの知らせ(ADR-0157 決定5)。static/js/compare.js が受け、最後の左の吹き出しに描く
 PARTIAL_EVENT = "compare.partial"
 # 途中の答えを知らせる間隔の下限(秒)。時計はテストで差し替える
@@ -914,9 +917,16 @@ class CompareApi(Api):
         """「一括比較…」。一括比較の窓を開く(開いていれば前に出す。REQ-106)。"""
         return self._call(self._open_batch)
 
-    def open_settings(self) -> dict[str, Any]:
-        """「設定…」。設定の窓を開く(開いていれば前に出す)。"""
-        return self._call(self._open_settings)
+    def open_settings(self, tab: Any = None) -> dict[str, Any]:
+        """「設定…」。設定の窓を開く(開いていれば前に出す)。
+
+        tab は開くタブ(知らせの「更新…」は "update"。REQ-252 §5)。省けば今と同じ。None・"update" のほかは受け付けない。
+        """
+        return self._call(self._open_settings, tab)
+
+    def dismiss_update_notice(self) -> dict[str, Any]:
+        """新しい版の知らせの「閉じる」(REQ-252 §5)。その起動の間は、比較の窓にも一括比較の窓にも出さない。"""
+        return self._call(self._dismiss_update_notice)
 
     def open_ai_pane(self) -> dict[str, Any]:
         """AI の面の「↗」と、結果のタブの行の「↗」。AI の窓を開く(開いていれば前に出す。ADR-0160 決定1・2)。"""
@@ -1517,6 +1527,8 @@ class CompareApi(Api):
             "character": self._character_for(pane),
             # 起動時の絵を出すか(ADR-0174 決定2)。真にするのは比較の窓の最初の state() だけ(_state)
             "splash": False,
+            # 起動したときに見つけた新しい版の知らせの文(REQ-252 §5)。無ければ null。画面は textContent だけで描く
+            "update_notice": self._session.update_notice_view(),
         }
 
     def _character_for(self, pane: str) -> bool:
@@ -1933,7 +1945,15 @@ class CompareApi(Api):
             result = self._ok()
             if first and result["view"]["character"]:
                 result["view"]["splash"] = True
-            return result
+        # 起動したときの新しい版の確かめ(REQ-252 §5)。1 つの起動で 1 回だけ(2 回目からは session が止める)。ロックの外で呼ぶ
+        self._session.start_update_check(
+            partial(auto_update_check_enabled, env=self._where["env"], platform=self._where["platform"], home=self._where["home"])
+        )
+        # --update-started で起動したときの started-ok(REQ-253 §7)。窓が出た後の印として、1 つの起動で 1 回だけ書く。ロックの外で呼ぶ
+        mark_update_started = getattr(self._session, "mark_update_started", None)
+        if mark_update_started is not None:
+            mark_update_started()
+        return result
 
     def _settings_key(self) -> tuple[Any, ...]:
         """自動の比較を始める比較の設定(比較方式・種類・実際の機種・show のコマンド・両側の区間の番号)。
@@ -3437,8 +3457,19 @@ class CompareApi(Api):
         with self._lock:
             return self._ok()
 
-    def _open_settings(self) -> dict[str, Any]:
-        self._session.open_settings()  # 窓を作る間はロックを持たない
+    def _open_settings(self, tab: Any) -> dict[str, Any]:
+        if tab not in SETTINGS_TABS:
+            raise _BadRequest
+        # 窓を作る間はロックを持たない。tab を省いたときは今と同じく引数なしで呼ぶ
+        if tab is None:
+            self._session.open_settings()
+        else:
+            self._session.open_settings(tab)
+        with self._lock:
+            return self._ok()
+
+    def _dismiss_update_notice(self) -> dict[str, Any]:
+        self._session.dismiss_update_notice()  # 両方の窓へ知らせる。ロックの外で呼ぶ
         with self._lock:
             return self._ok()
 

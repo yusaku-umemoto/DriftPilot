@@ -272,6 +272,9 @@ function render(next) {
   $("platform").disabled = busy;
   $("command").disabled = !next.command_enabled;
 
+  // 起動したときに見つけた新しい版の知らせ（REQ-252 §5）。文は文字として描く
+  $("update-notice").hidden = next.update_notice === null;
+  text($("update-notice-text"), next.update_notice);
   // 自動送信がオンの間は常に出す（ADR-0080 決定2）
   $("auto-send").hidden = next.auto_send === null;
   text($("auto-send-text"), next.auto_send);
@@ -1087,6 +1090,9 @@ bind("ai-front", async () => handle(await call("open_ai_pane")));
 bind("cancel", async () => handle(await call("cancel")));
 bind("open-batch", async () => handle(await call("open_batch")));
 bind("open-settings", async () => handle(await call("open_settings")));
+// 新しい版の知らせ（REQ-252 §5）。「更新…」は設定の窓を「更新」のタブで開き、「閉じる」はその起動の間は出さない
+bind("update-open", async () => handle(await call("open_settings", "update")));
+bind("update-dismiss", async () => handle(await call("dismiss_update_notice")));
 on("compare.changed", () => reload());
 on("compare.partial", drawPartial); // 届いたところまでの答え（ADR-0157 決定5）
 // 設定の窓で自動送信やプロファイルを変えた後に、帯と切り替えを合わせる（窓が前に来たら状態を読み直す）

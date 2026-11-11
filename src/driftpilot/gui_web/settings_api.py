@@ -40,6 +40,24 @@ JavaScript(static/js/settings.js)は返した JSON を描くことと、操作�
   「閉じる」(close(form))は、前提の欄に保存していない変更があるときだけ確かめを返す(ほかの欄は今までどおり確かめずに閉じる。
   form を渡さない呼び方も今までどおりすぐ閉じる)。タブの切り替えは画面の中だけで欄が消えないので確かめない
 
+- 新しい版の確かめ(ADR-0188 決定2 / REQ-252 §4): 「更新」のタブの 3 つの操作(check_update・open_releases_page・
+  save_update_settings)。確かめは接続テストと同じ送り方で、ロックの中で「確かめています」の印を立てて settings.view で先に描かせ、
+  check_latest はロックの外で呼ぶ(つなぐのは update_fetch だけ。テストは偽物を渡す)。「Releases のページを開く」は引数を受けず、
+  いつも決まった URL(RELEASES_PAGE_URL)だけを開く(GitHub の答えの URL も画面の文字も開かない)。
+  自動アップデートチェックのチェックは、このタブの専用の「保存」で [gui] auto_update_check の 1 項目だけを書く
+  (「単純比較」のタブと同じ形。今の 2 つの「保存」はこの項目を書かない)。ほかの操作と同じく画面の欄の値(form)も受け取るので、
+  読み直してもほかのタブの打ちかけの欄は残す(書くのはチェックの 1 項目だけ)。
+  状態は view.update、チェックを入れ直す番号は update.fill。開くタブ(open_tab)は WebSession.open_settings が渡す
+  (_set_initial_tab・_show_tab。1 回描いたら空に戻す)
+
+- 署名つきのその場の更新(ADR-0188 決定3・4 / REQ-253 §7): 「更新」のタブの 2 つの操作(start_update・cancel_update)。
+  どちらも引数を受けない(判断の記録 2)。「更新する」は、Python が持っている確かめの結果(newer)と入れ方(windows_zip・mac_app)の
+  ときだけ、裏で prepare_update を呼ぶ(取りに行く先はコードに書いた決まった URL の頭と名前だけ。画面から URL・パス・版を受けない)。
+  送り方は「更新を確かめる」と同じ(印を立てて settings.view で先に描かせ、準備はロックの外)。進み具合は文が変わったときだけ、
+  0.2 秒あけて settings.view で知らせる。準備ができたら確かめ(action apply_update)を返し、answer の「入れ替える」でだけ
+  start_applier を呼ぶ。新しい版が始まったら窓を全部閉じる(_set_close_all。WebSession.open_settings が渡す。無ければこの窓だけ)。
+  ファイルに触る処理は全部 driftpilot.update の側にある(ここは呼ぶだけ)
+
 webview は読まない(窓は app.py が開いて _attach で渡す。テストは偽の窓を渡す)。
 """
 
@@ -47,11 +65,13 @@ import os
 import platform as _platform
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping
 from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from driftpilot import __version__
 from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.llm_analyzer import LLMClient, ShapeNode, send_connection_check
 from driftpilot.llm_settings import CUSTOM_HTTP_JSON, ENV_KEY_PREFIX, SettingsError
@@ -108,8 +128,40 @@ from driftpilot.messages import (
     secret_words_in_effect,
     template_created,
 )
+from driftpilot.messages import (
+    UPDATE_APPLY_NO,
+    UPDATE_APPLY_YES,
+    UPDATE_CHECKING,
+    UPDATE_CONTENT_FAILED,
+    UPDATE_NOT_STARTED,
+    UPDATE_PREPARING,
+    UPDATE_SOURCE_NOTE,
+    UPDATE_TITLE,
+    UPDATE_VERIFYING,
+    update_apply_confirm,
+    update_current_version,
+    update_downloading,
+    update_is_latest,
+    update_is_newer,
+)
 from driftpilot.messages import RAW_DEFAULTS_TITLE
 from driftpilot.screen_model.settings_model import RawDefaultsPane, raw_defaults_pane, save_raw_defaults_form
+from driftpilot.screen_model.settings_model import save_auto_update_check
+from driftpilot.update import (
+    INSTALL_SOURCE,
+    RELEASES_PAGE_URL,
+    STATE_LATEST,
+    STATE_NEWER,
+    UpdateStatus,
+    check_latest,
+    install_kind,
+    open_release_page,
+)
+from driftpilot.update import INSTALL_MAC_APP, INSTALL_WINDOWS_ZIP, STAGE_DOWNLOADING, STAGE_VERIFYING
+from driftpilot.update import PreparedUpdate, UpdateCancelled, UpdateError
+from driftpilot.update import discard as discard_prepared_update
+from driftpilot.update import prepare_update as prepare_update_default
+from driftpilot.update import start_applier as start_applier_default
 from driftpilot.screen_model.settings_model import (
     AUTH_CHOICES,
     CUSTOM_AUTH_CHOICES,
@@ -225,6 +277,14 @@ CHOICE_ANSWERS = (CHOICE_NEW, CHOICE_OVERWRITE, CHOICE_CANCEL)
 FOCUS_NAME = "name"
 FOCUS_PROMPT_NAME = "prompt_name"
 PROCEED_SAVE_KEY = "save_key"
+# 窓のタブ(static/js/settings.js の TABS と同じ並び)。開くタブ(open_tab)に渡せるのはこの名前だけ。「更新」は REQ-252 §4
+SETTINGS_TABS = ("profiles", "prompt", "auto", "raw", "file", "update")
+UPDATE_TAB = "update"
+# 「更新する」を出せる入れ方(REQ-253 §7)と、進み具合を知らせる間隔の下限(秒)。時計はテストで差し替える
+UPDATABLE_KINDS = (INSTALL_WINDOWS_ZIP, INSTALL_MAC_APP)
+PROGRESS_INTERVAL_SECONDS = 0.2
+APPLY_UPDATE_ACTION = "apply_update"
+_clock = time.monotonic
 
 
 class _BadRequest(Exception):
@@ -265,11 +325,25 @@ class SettingsApi(Api):
         client_factory: Callable[..., LLMClient] | None = None,
         web_version: str | None = None,
         opener: Callable[[Path], None] = open_in_os,
+        update_fetch: Callable[[str], bytes] | None = None,
+        browser: Callable[[str], Any] | None = None,
+        install_kind_of: Callable[[], str] = install_kind,
+        prepare_update: Callable[..., PreparedUpdate] = prepare_update_default,
+        start_applier: Callable[[PreparedUpdate], bool] = start_applier_default,
+        discard_update: Callable[[PreparedUpdate], None] = discard_prepared_update,
     ) -> None:
         self._where: dict[str, Any] = {"cwd": cwd, "env": env, "platform": platform, "home": home}
         self._client_factory = client_factory
         self._web_version = web_version
         self._opener = opener
+        # 新しい版の確かめ(REQ-252 §4): つなぐ関数(None なら check_latest の既定の default_fetch)・ブラウザーで開く関数(None ならそのときの webbrowser.open)・入れ方
+        self._update_fetch = update_fetch
+        self._browser = browser
+        self._install_kind_of = install_kind_of
+        # 署名つきのその場の更新(REQ-253 §7): 準備する・新しい版を起動する・準備を捨てる関数(テストは偽物を渡す)
+        self._prepare_update = prepare_update
+        self._start_applier = start_applier
+        self._discard_update = discard_update
         self._window: Any = None
         # 状態はここだけに持つ。pywebview は js_api の呼び出しを別々のスレッドで動かすので、触るのはロックの中だけ
         self._lock = threading.RLock()
@@ -307,10 +381,30 @@ class SettingsApi(Api):
         # 保存の後に呼ぶ口(ADR-0176 決定4。WebSession.open_settings が渡す)と、この呼び出しで保存できたかの印
         self._on_saved: Callable[[], None] | None = None
         self._saved = False
+        # 「更新」のタブ(REQ-252 §4): 確かめた結果・確かめている最中か・チェックの欄を入れ直す番号・次に描くときに開くタブ
+        self._update: UpdateStatus | None = None
+        self._update_checking = False
+        self._fill_update = 0
+        self._open_tab: str | None = None
+        # 「更新する」(REQ-253 §7): 準備中か・進み具合の文と段と知らせた時刻・やめるための印・失敗の文・
+        # 確かめを待っている準備・全部閉じる関数(WebSession.open_settings が渡す)
+        self._preparing = False
+        self._update_progress = ""
+        self._progress_stage: str | None = None
+        self._progress_at = 0.0
+        self._update_cancel: threading.Event | None = None
+        self._update_failure: str | None = None
+        self._prepared: PreparedUpdate | None = None
+        self._close_all: Callable[[], None] | None = None
+        self._window_closed = False  # 窓が閉じた後か(閉じた後は「更新する」を始めない・準備ができても捨てる)
 
     def _attach(self, window: Any) -> None:
         """pywebview の窓(知らせ・閉じるに使う)。app.run が create_window の後に渡す。"""
         self._window = window
+
+    def _set_close_all(self, callback: Callable[[], None] | None) -> None:
+        """「更新」で新しい版が始まった後に、窓を全部閉じる関数(WebSession.close_all)。渡されなければこの窓だけを閉じる。"""
+        self._close_all = callback
 
     def _set_on_saved(self, callback: Callable[[], None] | None) -> None:
         """保存できた後に呼ぶ関数(開いている比較の窓と一括比較の窓へ知らせる。ADR-0176 決定4)。
@@ -451,6 +545,32 @@ class SettingsApi(Api):
         """「プロファイルを取り込む…」。開くのダイアログで選んだファイルを確かめ、名前と接続先の一覧の確かめを返す。"""
         return self._call(self._import_profiles, form)
 
+    def check_update(self) -> dict[str, Any]:
+        """「更新を確かめる」(REQ-252 §4)。GitHub の最新の Release を確かめる(確かめている最中にもう一度押されたら何もしない)。"""
+        return self._call(self._check_update)
+
+    def open_releases_page(self) -> dict[str, Any]:
+        """「Releases のページを開く」。引数は受けず、いつも決まった URL(RELEASES_PAGE_URL)だけを既定のブラウザーで開く。"""
+        return self._call(self._open_releases_page)
+
+    def save_update_settings(self, form: Any, checked: Any) -> dict[str, Any]:
+        """「更新」のタブの「保存」。[gui] auto_update_check の 1 項目だけを書く(checked は真偽値。ほかの欄は書かない)。
+
+        form は画面の欄の値(ほかの操作と同じ)。受け取るだけで書かず、読み直した後もほかのタブの打ちかけの欄を残すのに使う。
+        """
+        return self._call(self._save_update_settings, form, checked)
+
+    def start_update(self) -> dict[str, Any]:
+        """「更新する」(REQ-253 §7)。引数は受けない。確かめた結果が newer で、配った物で動いているときだけ、裏で取ってきて確かめて準備する。
+
+        準備ができたら確かめ(「入れ替える」「やめる」)を返す。入れ替えは answer の「入れ替える」でだけ始まる。
+        """
+        return self._call(self._start_update)
+
+    def cancel_update(self) -> dict[str, Any]:
+        """「更新する」の準備の途中の「やめる」。引数は受けない。準備のフォルダーは prepare_update が消す。"""
+        return self._call(self._cancel_update)
+
     def close(self, form: Any = None) -> dict[str, Any]:
         """「閉じる」。前提の欄に保存していない変更があるときだけ確かめを返す(閉じるのは answer の「閉じる」)。
 
@@ -563,7 +683,12 @@ class SettingsApi(Api):
 
     # --- 読み直し(wx の refresh・_refresh_keeping_edits と同じ判断) ---
 
-    def _refresh(self, select: str | None = None, *, keep_edits: bool = False) -> None:
+    def _refresh(self, select: str | None = None, *, keep_edits: bool = False, keep_config_edits: bool = False) -> None:
+        """設定を読み直す。keep_edits ならプロファイルの欄の保存していない編集を残す。
+
+        keep_config_edits なら、設定ファイルが変わっていても(「更新」のタブの「保存」で書いた後)、設定ファイルの欄
+        (「比較と自動の動き」「設定ファイル」のタブ)に保存していない入力があれば入れ直さずに残す(REQ-252 §4)。
+        """
         before = self._view
         before_id = self._selected
         before_editor = before.editor if before is not None else None
@@ -593,7 +718,7 @@ class SettingsApi(Api):
         keep = (
             before_fields is not None
             and fields is not None
-            and before_fields.digest == fields.digest
+            and (keep_config_edits or before_fields.digest == fields.digest)
             and self._config_changed_now(before_fields)
         )
         if not keep:
@@ -700,8 +825,13 @@ class SettingsApi(Api):
         fields = view.config_fields
         name, api_format, model, base_url, wire = self._typed
         words = secret_words_in_effect(view.secret_words)
+        open_tab, self._open_tab = self._open_tab, None  # 開くタブは 1 回描いたら空に戻す
         return {
             "revision": self._revision,
+            # 画面が選ぶタブ(WebSession.open_settings が渡したとき。REQ-252 §5)。無ければ null(今のタブのまま)
+            "open_tab": open_tab,
+            # 「更新」のタブ(REQ-252 §4)。文はどれも文字として描く(変更の内容 notes も textContent)
+            "update": self._update_view(fields),
             "status": {"text": view.status, "ok": view.status_ok},
             "bands": {
                 "plaintext": view.plaintext_warning,
@@ -1542,9 +1672,249 @@ class SettingsApi(Api):
             self._refresh_premise()
             return self._ok(notice=self._notice(premise_saved_notice(), SETTINGS_PREMISE_TITLE))
 
+    # --- 新しい版の確かめ(ADR-0188 決定2 / REQ-252 §4。設定ファイルは「保存」の 1 項目だけを書く) ---
+
+    def _update_view(self, fields: Any) -> dict[str, Any]:
+        """ロックの中で呼ぶ(_render から)。「更新」のタブに描く状態。
+
+        result は結果の行({text, state, kind})か null。state は接続テストの行と同じ ok・failed・neutral、kind は
+        latest・newer・unavailable・checking。notes は新しい版があるときだけの変更の内容(プレーンテキスト)。
+        source_note はソースから入れたときだけの案内の文(ほかは null)。checked は設定ファイルの値、fill は変わったら
+        画面がチェックの欄に checked を入れ直す番号。can_save は設定ファイルを読めたか。
+        """
+        status = self._update
+        result: dict[str, str] | None = None
+        notes = ""
+        kind = self._install_kind_of()
+        if self._update_failure is not None and not self._update_checking:
+            result = {"text": self._update_failure, "state": "failed", "kind": "update_failed"}
+            if status is not None and status.state == STATE_NEWER:
+                notes = status.notes
+        elif self._update_checking:
+            result = {"text": UPDATE_CHECKING, "state": "neutral", "kind": "checking"}
+        elif status is not None:
+            if status.state == STATE_LATEST:
+                result = {"text": update_is_latest(status.current), "state": "ok", "kind": status.state}
+            elif status.state == STATE_NEWER:
+                result = {
+                    "text": update_is_newer(status.latest or "", status.published),
+                    "state": "failed",
+                    "kind": status.state,
+                }
+                notes = status.notes
+            else:
+                result = {"text": status.reason or "", "state": "failed", "kind": status.state}
+        return {
+            "current": update_current_version(__version__),
+            "checking": self._update_checking,
+            "result": result,
+            "notes": notes,
+            "source_note": UPDATE_SOURCE_NOTE if kind == INSTALL_SOURCE else None,
+            "checked": bool(fields.auto_update_check) if fields is not None else False,
+            "can_save": fields is not None,
+            "fill": self._fill_update,
+            # 「更新する」を出すか(newer で、配った物で動いているときだけ。REQ-253 §7)・準備中か・進み具合の文
+            "can_update": status is not None and status.state == STATE_NEWER and kind in UPDATABLE_KINDS,
+            "preparing": self._preparing,
+            "progress": self._update_progress,
+        }
+
+    def _check_update(self) -> dict[str, Any]:
+        """「更新を確かめる」。接続テストと同じ送り方: 印を立てて先に描かせ、つなぐのはロックの外。結果は view.update に出す。"""
+        with self._lock:
+            if self._update_checking or self._preparing:
+                return self._ok()  # 確かめている最中の二度押し・準備の最中は何もしない
+            self._update_checking = True
+            self._update_failure = None
+            checking_view = self._render()
+        status: UpdateStatus | None = None
+        try:
+            if self._window is not None:
+                notify(self._window, {"type": VIEW_EVENT, "view": checking_view})
+            status = check_latest(__version__, self._update_fetch)
+        finally:
+            with self._lock:
+                self._update_checking = False
+                if status is not None:
+                    self._update = status
+        with self._lock:
+            return self._ok()
+
+    def _open_releases_page(self) -> dict[str, Any]:
+        """いつも決まった URL(RELEASES_PAGE_URL)だけを開く。GitHub の答えの html_url も画面から渡された文字も使わない。"""
+        open_release_page(RELEASES_PAGE_URL, self._browser)
+        with self._lock:
+            return self._ok()
+
+    # --- 署名つきのその場の更新(ADR-0188 決定3・4 / REQ-253 §7。ファイルに触るのは driftpilot.update の側だけ) ---
+
+    def _start_update(self) -> dict[str, Any]:
+        """「更新する」。印を立てて先に描かせ、準備はロックの外。使うのは Python が持っている確かめの結果(self._update)だけ。"""
+        with self._lock:
+            status = self._update
+            if (
+                self._window_closed
+                or self._preparing
+                or self._update_checking
+                or status is None
+                or status.state != STATE_NEWER
+                or self._install_kind_of() not in UPDATABLE_KINDS
+            ):
+                return self._ok()
+            self._preparing = True
+            self._update_failure = None
+            self._update_progress = UPDATE_PREPARING
+            self._progress_stage = None
+            cancel = threading.Event()
+            self._update_cancel = cancel
+            preparing_view = self._render()
+        prepared: PreparedUpdate | None = None
+        failure: str | None = None
+        try:
+            if self._window is not None:
+                notify(self._window, {"type": VIEW_EVENT, "view": preparing_view})
+            prepared = self._prepare_update(status, cancel=cancel, progress=self._update_progressed)
+        except UpdateCancelled:
+            prepared = None
+        except UpdateError as exc:
+            failure = exc.message
+        except Exception:  # noqa: BLE001 - 思いがけない誤りも、中身を読めなかった扱いにする(本文は出さない)
+            failure = UPDATE_CONTENT_FAILED
+        finally:
+            with self._lock:
+                self._preparing = False
+                self._update_progress = ""
+                self._progress_stage = None
+                self._update_cancel = None
+        with self._lock:
+            stopped = cancel.is_set() or self._window_closed
+        if prepared is not None and stopped:
+            self._discard_update(prepared)  # 準備ができた直後に「やめる」が押された・窓が閉じた
+            prepared = None
+        with self._lock:
+            if failure is not None:
+                self._update_failure = failure
+                return self._ok(notice=self._notice(failure, UPDATE_TITLE))
+            if prepared is None:
+                return self._ok()
+            self._prepared = prepared
+            return self._confirm(
+                APPLY_UPDATE_ACTION,
+                prepared.to_version,
+                update_apply_confirm(prepared.to_version),
+                UPDATE_TITLE,
+                yes=UPDATE_APPLY_YES,
+                no=UPDATE_APPLY_NO,
+            )
+
+    def _update_progressed(self, stage: str, done: int, total: int) -> None:
+        """prepare_update の進み具合。表に出す文が変わったときだけ、同じ段の中では 0.2 秒あけて settings.view で知らせる。"""
+        if stage == STAGE_DOWNLOADING:
+            text = update_downloading(done, total)
+        elif stage == STAGE_VERIFYING:
+            text = UPDATE_VERIFYING
+        else:
+            text = UPDATE_PREPARING
+        with self._lock:
+            if not self._preparing or text == self._update_progress:
+                return
+            now = _clock()
+            if stage == self._progress_stage and now - self._progress_at < PROGRESS_INTERVAL_SECONDS:
+                return
+            self._update_progress = text
+            self._progress_stage = stage
+            self._progress_at = now
+            view = self._render()
+        window = self._window
+        if window is not None:
+            notify(window, {"type": VIEW_EVENT, "view": view})
+
+    def _cancel_update(self) -> dict[str, Any]:
+        with self._lock:
+            if self._update_cancel is not None:
+                self._update_cancel.set()
+            return self._ok()
+
+    def _apply_update_answered(self, form: Any, target: Any, yes: Any) -> dict[str, Any]:
+        """確かめの窓の答え。「入れ替える」でだけ新しい版を起動する(ロックの外)。「やめる」は準備を捨てる。"""
+        with self._lock:
+            self._take(form)
+            if not isinstance(yes, bool):
+                raise _BadRequest
+            pending = self._pending
+            if pending is None or (pending[0], pending[1]) != (APPLY_UPDATE_ACTION, target):
+                return self._ok()  # 別の確かめの答えでは消さない
+            self._pending = None
+            prepared, self._prepared = self._prepared, None
+        if prepared is None or prepared.to_version != target:
+            with self._lock:
+                return self._ok()
+        if not yes:
+            self._discard_update(prepared)
+            with self._lock:
+                return self._ok()
+        if self._start_applier(prepared):
+            with self._lock:
+                result = self._ok()
+            close_all = self._close_all
+            if close_all is not None:
+                close_all()
+            elif self._window is not None:
+                self._window.destroy()
+            return result
+        self._discard_update(prepared)
+        with self._lock:
+            return self._ok(notice=self._notice(UPDATE_NOT_STARTED, UPDATE_TITLE))
+
+    def _save_update_settings(self, form: Any, checked: Any) -> dict[str, Any]:
+        """「更新」のタブの「保存」。checked が真偽値でない・form の形が違えば _BadRequest。
+        設定ファイルを読めないときは今の読めないときの扱い。
+
+        ほかの操作と同じく、先に画面の欄の値(form。どのタブの欄も入る)を受け取る。タブの切り替えは Python を呼ばないので、
+        こうしないと、ほかのタブで打ちかけた値を知らないまま読み直して欄を入れ直してしまう。書くのは auto_update_check だけ。
+        書けたら・ほかで変わっていたら読み直す(プロファイルと設定ファイルの欄の打ちかけは残す)。保存の後の口も呼ぶ。
+        """
+        with self._lock:
+            if not isinstance(checked, bool):
+                raise _BadRequest
+            self._take(form)
+            fields = self._current().config_fields
+            if fields is None:
+                return self._unreadable() or self._ok()
+            action = save_auto_update_check(fields, checked, **self._kw("env", "platform", "home"))
+            self._mark_saved(action.ok)
+            notice = self._notice(action.message, CONFIG_SAVE_TITLE)
+            if action.ok or action.reload:
+                self._refresh(keep_edits=True, keep_config_edits=True)
+                self._fill_update += 1  # チェックの欄を読み直した値で入れ直す(書けなかったときは押した値を残す)
+            return self._ok(notice=notice)
+
+    def _set_initial_tab(self, tab: str | None) -> None:
+        """窓を作るときに WebSession.open_settings が呼ぶ。最初の state() で、画面にそのタブを選ばせる(None なら今のまま)。"""
+        with self._lock:
+            self._open_tab = tab if tab in SETTINGS_TABS else None
+
+    def _show_tab(self, tab: str | None) -> None:
+        """開いている窓で WebSession.open_settings が呼ぶ(ロックの外で)。settings.view の知らせでそのタブを選ばせる。
+
+        まだ一度も描いていなければ、最初の state() で選ばせる。窓への知らせはロックの外で送る。
+        """
+        if tab not in SETTINGS_TABS:
+            return
+        with self._lock:
+            self._open_tab = tab
+            if self._view is None:
+                return
+            view = self._render()
+        window = self._window
+        if window is not None:
+            notify(window, {"type": VIEW_EVENT, "view": view})
+
     # --- 確かめの2段目 ---
 
     def _answer(self, form: Any, action: Any, target: Any, yes: Any) -> dict[str, Any]:
+        if action == APPLY_UPDATE_ACTION:
+            return self._apply_update_answered(form, target, yes)  # 新しい版の起動はロックの外
         with self._lock:
             self._take(form)
             if not isinstance(action, str) or not (isinstance(yes, bool) or yes in CHOICE_ANSWERS):
@@ -1659,12 +2029,32 @@ class SettingsApi(Api):
                     )
         return self._close()
 
+    def _on_closed(self) -> None:
+        """窓が閉じた後に呼ぶ(WebSession._on_settings_closed と、--settings だけのときの app.run が、窓の closed の知らせからロックの外で呼ぶ)。
+
+        窓の上の × で閉じたときは _close を通らないので、ここで「更新する」の準備を止め(準備のフォルダーは prepare_update が消す)、
+        確かめを待っている準備を捨てる。閉じた後に準備ができても、_start_update が印を見て捨てる。
+        """
+        with self._lock:
+            self._window_closed = True
+            self._pending = None
+            if self._update_cancel is not None:
+                self._update_cancel.set()
+            prepared, self._prepared = self._prepared, None
+        if prepared is not None:
+            self._discard_update(prepared)
+
     def _close(self) -> dict[str, Any]:
         with self._lock:
             self._clear_key += 1
             self._pending = None
             self._shape = None
+            if self._update_cancel is not None:
+                self._update_cancel.set()  # 準備の途中なら止める(準備のフォルダーは prepare_update が消す)
+            prepared, self._prepared = self._prepared, None
             result = self._ok()
+        if prepared is not None:
+            self._discard_update(prepared)
         if self._window is not None:
             self._window.destroy()
         return result

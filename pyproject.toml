@@ -1,6 +1,7 @@
 [project]
 name = "driftpilot"
-version = "0.1.0"
+# 版は src/driftpilot/__init__.py の __version__ だけに書き、ここはそこから読む(ADR-0188 決定1)
+dynamic = ["version"]
 description = "Semantic config diff tool for network devices, with LLM-based drift analysis"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -13,6 +14,8 @@ dependencies = [
     "textfsm",
     # 設定画面が config.toml の決まった行だけを書き換える(コメント・並びを保つ。REQ-93 / ADR-0071 決定3)
     "tomlkit==0.15.2",
+    # 更新の署名(Ed25519)の確かめ(ADR-0188 決定4 / REQ-253 §9。Apache-2.0 または BSD-3-Clause)
+    "cryptography>=50",
 ]
 
 [project.scripts]
@@ -36,6 +39,10 @@ addopts = ["-m", "not ui"]
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+# 版を書く所は src/driftpilot/__init__.py の __version__ だけ(ADR-0188 決定1)
+version = {attr = "driftpilot.__version__"}
 
 [tool.setuptools.package-data]
 "driftpilot.format_detect" = ["defaults.yaml"]

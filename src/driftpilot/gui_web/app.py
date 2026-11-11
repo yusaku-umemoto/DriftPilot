@@ -175,6 +175,7 @@ def run(
     settings: bool = False,
     batch: bool = False,
     report: Callable[[str], None] | None = None,
+    launch: dict[str, Any] | None = None,
 ) -> int:
     """窓を開き、閉じたら 0。表示部品が使えない・WebView2 が無ければ案内を出して 2。
 
@@ -184,6 +185,9 @@ def run(
 
     省くと比較の画面。sample なら見本のページ、settings なら設定の画面だけ、batch なら一括比較の画面だけ
     (設計側の確かめのため。比較の窓が無いので「比較画面で開く」は押せない)。
+
+    launch は更新の後の起動(REQ-253 §7): {"notice": 知らせの文, "started_marker": started-ok のパスか None}。
+    比較の画面と一括比較の画面の WebSession に渡す(gui_web.main が --update-started・--update-failed のときだけ渡す)。
     """
     import webview
 
@@ -211,18 +215,28 @@ def run(
         "text_select": True,
         **window_geometry(screens, size=AI_PANE_SIZE),
     }
+    launch_args = (
+        {}
+        if launch is None
+        else {"launch_notice": launch.get("notice"), "started_marker": launch.get("started_marker")}
+    )
     if sample:
         webview.create_window(TITLE, url=page_url(PAGE), js_api=Api(), **window_geometry(screens, size=SIZE))
     elif settings:
         api = SettingsApi()
         window = webview.create_window(SETTINGS_TITLE, js_api=api, **settings_window)
         api._attach(window)  # 知らせ(送っている最中)と「閉じる」に使う
+        # 窓の上の × で閉じたときも「更新する」の準備を止めて捨てる(REQ-253 §5)。偽の窓に events が無くても動く
+        events = getattr(window, "events", None)
+        if events is not None and hasattr(events, "closed"):
+            events.closed += api._on_closed
     elif batch:
         session = WebSession(
             create_window=webview.create_window,
             settings_window=settings_window,
             batch_window=batch_window,
             watch_drop=watch_drop,
+            **launch_args,
         )
         session.open_batch()  # 比較の窓をつながないので「比較画面で開く」は押せない
     else:
@@ -235,6 +249,7 @@ def run(
             batch_window=batch_window,
             watch_drop=watch_drop,
             ai_window=ai_window,
+            **launch_args,
         )
         compare = CompareApi(session)
         window = webview.create_window(

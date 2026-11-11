@@ -15,8 +15,8 @@ const $ = (id) => document.getElementById(id);
 const status = $("status");
 const keyInput = $("key-input");
 // 窓のタブ（ADR-0154 / REQ-214）。id は settings-tab-○○、面は settings-panel-○○
-// 「単純比較」（raw。REQ-227 §12）は「比較と自動の動き」と「設定ファイル」の間
-const TABS = ["profiles", "prompt", "auto", "raw", "file"];
+// 「単純比較」（raw。REQ-227 §12）は「比較と自動の動き」と「設定ファイル」の間。「更新」（update。REQ-252 §4）は最後
+const TABS = ["profiles", "prompt", "auto", "raw", "file", "update"];
 
 let view = null; // いま描いている状態
 // 描いた状態の番号と、欄を入れ直した番号・キーの欄を空にした番号（変わったときだけ入れ直す）
@@ -28,6 +28,7 @@ const shown = {
   fillPremise: null,
   clearKey: null,
   fillRaw: null,
+  fillUpdate: null,
 };
 
 // data-text の鍵の文を messages.py から取って入れる（HTML には文を書かない）。取れなければ false。
@@ -375,6 +376,39 @@ function render(next) {
     mark($("check-result"), next.check.text, next.check.state);
   }
   renderShape(next.response_shape);
+  renderUpdate(next.update);
+  // 開くタブ（比較の窓・一括比較の窓の知らせの「更新…」。REQ-252 §5）。Python が 1 回だけ返す
+  if (next.open_tab && TABS.includes(next.open_tab)) {
+    selectTab(next.open_tab);
+  }
+}
+
+// 「更新」のタブ（REQ-252 §4）。文はどれも textContent だけで描く（変更の内容も HTML として読まない）。
+// 確かめている間は「更新を確かめる」を押せない。チェックは番号が変わったときだけ入れ直す（窓を開いたとき・保存の後）
+function renderUpdate(update) {
+  text($("update-current"), update.current);
+  $("check-update").disabled = update.checking;
+  $("update-result").hidden = update.result === null;
+  if (update.result !== null) {
+    mark($("update-result"), update.result.text, update.result.state);
+  }
+  $("update-notes").hidden = update.notes === "";
+  text($("update-notes"), update.notes);
+  $("update-source-note").hidden = update.source_note === null;
+  text($("update-source-note"), update.source_note);
+  if (update.fill !== shown.fillUpdate) {
+    shown.fillUpdate = update.fill;
+    $("auto-update-check").checked = update.checked;
+  }
+  $("save-update").disabled = !update.can_save;
+  // 「更新する」（REQ-253 §7）。出すかは Python が決める（can_update）。準備の間は「やめる」と進み具合を出し、確かめを押せなくする
+  $("start-update").hidden = !update.can_update || update.preparing;
+  $("start-update").disabled = update.checking;
+  $("cancel-update").hidden = !update.preparing;
+  if (update.preparing) {
+    $("check-update").disabled = true;
+  }
+  text($("update-progress"), update.progress);
 }
 
 // --- 操作を Python に渡す ---
@@ -532,6 +566,24 @@ bind("save-raw", async () => {
     await handle(await call("save_raw_defaults", readRawOptions()));
   }
 });
+// 「更新」のタブ（REQ-252 §4）。確かめと「Releases のページを開く」は欄の値を渡さない（開く URL は Python が決める）。
+// 「保存」は [gui] の auto_update_check だけを書く（今の 2 つの「保存」とは別）。ほかの操作と同じく form() も渡すので、
+// ほかのタブで打ちかけた欄は保存の後も残る（タブの切り替えは Python を呼ばないため、渡さないと Python が打ちかけを知らない）
+bind("check-update", async () => {
+  if (view !== null) {
+    await handle(await call("check_update"));
+  }
+});
+bind("open-releases", async () => handle(await call("open_releases_page")));
+bind("save-update", () => act("save_update_settings", $("auto-update-check").checked));
+// 「更新する」「やめる」（REQ-253 §7）。どちらも引数を渡さない（取りに行く先と版は Python が決める）。
+// 準備ができたら Python が確かめを返し、handle の confirm で出す（「入れ替える」「やめる」の答えは answer に行く）
+bind("start-update", async () => {
+  if (view !== null) {
+    await handle(await call("start_update"));
+  }
+});
+bind("cancel-update", async () => handle(await call("cancel_update")));
 // 「AI への指示文」の枠の操作（REQ-116 §3）
 bind("add-prompt", () => act("add_prompt_profile"));
 bind("duplicate-prompt", () => act("duplicate_prompt_profile"));

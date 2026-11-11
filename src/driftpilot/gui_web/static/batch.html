@@ -47,6 +47,13 @@
       </div>
     </section>
 
+    <!-- 起動したときに見つけた新しい版の知らせ（REQ-252 §5 / ADR-0188 決定2）。文は Python が返す。
+         「更新…」で設定の窓を「更新」のタブで開き、「閉じる」でその起動の間は出さない -->
+    <div class="pilot-band pilot-band--info" id="update-notice" role="status" hidden>
+      <span class="pilot-lines pilot-grow" id="update-notice-text"></span>
+      <button type="button" class="pilot-button pilot-button--secondary" id="update-open" data-text="update_notice.open"></button>
+      <button type="button" class="pilot-button pilot-button--secondary" id="update-dismiss" data-text="update_notice.dismiss"></button>
+    </div>
     <!-- ②実行の前の確認（ADR-0020）。組があるときだけ。実行を始めたら隠し、組を作り直すとまた出る -->
     <div class="pilot-band pilot-band--info" id="banner" role="status" hidden><span class="pilot-lines" id="banner-text"></span></div>
 

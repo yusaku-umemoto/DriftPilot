@@ -21,7 +21,7 @@ It can optionally ask an AI model to analyze the differences, using your own API
 - Only the differences are sent to the AI. The full config is sent only when you choose to.
 - Passwords, keys, SNMP communities and similar values are masked before sending (`<secret:N>`). Lines whose secrets cannot be masked are not sent.
 - The full text to be sent is shown for your approval before anything is sent.
-- Without AI, DriftPilot makes no network connections.
+- Without AI and update checks, DriftPilot makes no network connections.
 
 The masking code lives in `src/driftpilot/llm_analyzer/`, so anyone can review it.
 
@@ -46,6 +46,15 @@ The apps are not code-signed, so your OS will warn you the first time:
 - **Windows:** the `settings\` folder next to `DriftPilot.exe`. Nothing is written outside the extracted folder (except the API key).
 - **macOS:** `~/Library/Application Support/DriftPilot/`
 - **API keys:** Windows Credential Manager or the macOS Keychain. You can delete them with "削除…" (Delete) in the settings window.
+
+### Checking for new versions
+
+- "更新を確かめる" (Check for updates) on the "更新" (Update) tab of the settings window checks GitHub for a newer release.
+- By default, DriftPilot checks only when you press that button.
+- If you turn on "起動したときに新しい版を確かめる（自動アップデートチェック）" (automatic update check) and save, DriftPilot checks at every start and shows a notice above the compare window when a newer version is available.
+- The only thing sent is the DriftPilot version (no configs, settings or API keys).
+- The Windows zip and the macOS app can download a newer version with "更新する" (Update), verify its signature, and replace themselves (DriftPilot closes once and the new version opens).
+- Version 0.1.0 has no update feature. To go from 0.1.0 to 0.2.0, replace it by hand as described under "■ 更新するとき" (Updating) in `はじめにお読みください.txt` (Read me first), which comes with the download.
 
 ### From source
 
@@ -73,7 +82,7 @@ Run `driftpilot --help` to see all commands.
 
 ## Status
 
-Version 0.1.0 (preview). The UI and output formats may still change.
+Version 0.2.0 (preview). The UI and output formats may still change.
 
 ## License
 

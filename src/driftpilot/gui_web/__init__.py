@@ -26,7 +26,13 @@ def print_error(text: str) -> None:
     print(f"エラー: {text}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None, report: Callable[[str], None] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    report: Callable[[str], None] | None = None,
+    *,
+    update_started: str | None = None,
+    update_failed: str | None = None,
+) -> int:
     """pywebview の画面を開き、閉じたら 0 を返す。pywebview が無い・表示部品が使えなければ案内を出して 2。
 
     開くのは比較の画面(REQ-105。設定の窓と一括比較の窓はそこから開く)。argv に --sample があれば見本のページ
@@ -35,6 +41,9 @@ def main(argv: list[str] | None = None, report: Callable[[str], None] | None = N
     argv を省くと引数なし(`driftpilot gui` と配る形の画面版から呼ぶとき。driftpilot の CLI の引数は読まない)。
     report を渡すと、開けないときの文(messages.py の決まった文。例外は型名だけ)をその関数に渡す。
     省くと標準エラーに出す(print_error)。
+    update_started・update_failed は、配る形の画面版が --update-started・--update-failed で起動したときのパス
+    (REQ-253 §7。packaging/gui_main.py が渡す)。渡されたときだけ、起動の知らせを app.run に渡す(launch)。
+    update_failed は名前が last-failed.log のときだけ知らせに出す。
     """
     from driftpilot.messages import gui_web_unavailable
 
@@ -49,7 +58,26 @@ def main(argv: list[str] | None = None, report: Callable[[str], None] | None = N
         return 2
     from driftpilot.gui_web.app import run
 
-    extra = {} if report is None else {"report": report}  # 渡されたときだけ渡す(既定の呼び方は今のまま)
+    extra: dict = {} if report is None else {"report": report}  # 渡されたときだけ渡す(既定の呼び方は今のまま)
+    launch = _launch(update_started, update_failed)
+    if launch is not None:
+        extra["launch"] = launch
     if args.batch:
         return run(batch=True, **extra)
     return run(sample=args.sample, settings=args.settings, **extra)
+
+
+def _launch(update_started: str | None, update_failed: str | None) -> dict | None:
+    """更新の後の起動の知らせ(REQ-253 §7)。どちらも無い・記録のファイルの名前が違えば None。"""
+    if update_started is None and update_failed is None:
+        return None
+    from driftpilot import __version__
+    from driftpilot.messages import update_done_notice, update_failed_notice
+    from driftpilot.update.apply import read_failed_log_arg
+
+    if update_started is not None:
+        return {"notice": update_done_notice(__version__), "started_marker": update_started}
+    log = read_failed_log_arg(update_failed)
+    if log is None:
+        return None
+    return {"notice": update_failed_notice(log), "started_marker": None}

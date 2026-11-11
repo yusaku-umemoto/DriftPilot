@@ -1,12 +1,14 @@
 # exe を作るときの部品の版（ADR-0036）。テストで確かめた開発環境（.venv）の版に固定する。
 # 製品の依存（pyproject.toml）を変えたら、.venv の pip freeze から作り直す（手順は packaging/README.md）。
-# Windows だけの部品（pythonnet・clr_loader・cffi・pycparser。pywebview の依存）は、Windows の .venv の pip freeze から足す（REQ-103）。
-# Windows だけの部品の版は、2026-11-08 に決定者の Windows の build\pkg-venv の pip freeze から足した（cffi・clr_loader・pycparser・pythonnet）。
+# Windows だけの部品（pythonnet・clr_loader。pywebview の依存）は、Windows の .venv の pip freeze から足す（REQ-103）。
+# その版は、2026-11-08 に決定者の Windows の build\pkg-venv の pip freeze から足した（cffi・clr_loader・pycparser・pythonnet）。
+# cffi・pycparser は、更新の署名の確かめに使う cryptography（REQ-253 §9。本体の依存）の依存として Mac でも要る（版は今のまま）。
 annotated-types==0.8.0
 anyio==4.15.1
 bottle==0.13.4
 cffi==2.1.1
 clr_loader==0.3.1
+cryptography==50.0.2
 h11==0.16.0
 hier-config==3.7.1
 httpcore2==2.13.1
