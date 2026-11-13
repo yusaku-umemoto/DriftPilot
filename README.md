@@ -60,6 +60,30 @@ The changed lines in that preview:
 
 FortiGate and Si-R samples are in [`examples/`](examples/README.md), with a short walkthrough.
 
+## The app
+
+### Compare two configs
+
+<img src="docs/images/gui-compare-en.png" alt="The DriftPilot compare window showing the side-by-side differences of two Cisco configs" width="800">
+
+Choose the before and after files (**Browse…**, **Paste…**, or drag and drop) and press **Compare**. DriftPilot detects the device type and shows the result in three tabs:
+
+- **Structured compare** — changes by meaning (interfaces, BGP neighbors, ACL entries, SNMP and so on), not by line position.
+- **Simple compare** — the familiar side-by-side line diff. The screenshot shows it with "Show differences only".
+- **Lines not structured** — lines DriftPilot could not read into its structure, so nothing is dropped silently.
+
+**Analyze with AI** (optional) sends the differences, with secrets masked, to the AI you set up, and the answer appears next to the result.
+
+### Batch compare
+
+<img src="docs/images/gui-batch-en.png" alt="The DriftPilot batch compare window with three device pairs: Fujitsu Si-R, Cisco and FortiGate" width="800">
+
+Open **Batch compare…**, pick a "before" folder and an "after" folder, and press **Run**. DriftPilot pairs the files by file name (or hostname), detects each device type — Cisco, FortiGate and Si-R can be mixed in one run — and compares every pair at once.
+
+- See at a glance which devices changed and how many differences each has.
+- Double-click a pair (or **Open in compare window**) to see its details.
+- Save the results, export them as HTML/CSV, or ask the AI for the key points of every pair.
+
 ## Features
 
 - **Config comparison:** Compares Cisco-style configs (indented configs such as IOS and IOS-XE), FortiGate and Fujitsu Si-R configs by meaning rather than by line order (structured comparison). Parts it cannot parse are compared line by line (raw comparison).

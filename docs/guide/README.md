@@ -2,8 +2,8 @@
 
 DriftPilot compares two network device configurations (or two `show` outputs) and shows what changed. It can also ask an AI to explain the differences, after hiding secrets.
 
-- [Using the app (GUI)](gui.md) — compare two files, read the results, AI analysis, batch compare, settings
-- [Using the command line (CLI)](cli.md) — `driftpilot` / `driftpilot-cli` commands
+- [Using the app (GUI)](gui.md) — with screenshots: compare two files, read the results, terminal logs with several commands, AI analysis, batch compare, settings
+- [Using the command line (CLI)](cli.md) — every command and option with real outputs, exit codes, JSON fields, manifest files and recipes; written so that scripts and AI agents can use it too
 - [Troubleshooting](troubleshooting.md) — first-launch warnings, updates, AI connection
 
 日本語の手引きは [ja/](ja/README.md) にあります。
