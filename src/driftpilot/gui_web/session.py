@@ -530,6 +530,22 @@ class WebSession:
             with self.lock:
                 self._batch_opening = False
 
+    def _open_batch_folders(self, before: Any, after: Any) -> bool:
+        """機器ごとに分けて書いたフォルダーを入れた一括比較の窓を開く(開いていれば前に出す。REQ-267 §5)。
+
+        公開でない操作(画面からは呼べない)。比較は始めない。窓を作れなかった・フォルダーを入れられなかったときは False。
+        窓を作る間はロックを持たない(open_batch と同じ)。
+        """
+        self.open_batch()
+        with self.lock:
+            current = self._batch
+        if current is None:
+            return False
+        load = getattr(current[1], "_load_split_folders", None)
+        if load is None:
+            return False
+        return bool(load(before, after))
+
     def _on_batch_closed(self, window: Any) -> None:
         with self.lock:
             batch = self._batch

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 # 最初から入っている指示文の版。日本語の版と英語の版は別の文なので、言語が分かる形にする(REQ-259)。
 # 最初から入っている3つは後ろに -incident・-status を、全部の組をまとめて送るときはさらに -whole を付ける
 PROMPT_VERSION_JA = "req259-ja-v1"
-PROMPT_VERSION_EN = "req260-en-v1"  # REQ-260: 差分の本文の印と、全部の組の決まりが引く区切りの行を英語にした
+PROMPT_VERSION_EN = "req266-en-v1"  # REQ-260: 差分の本文の印と、全部の組の決まりが引く区切りの行を英語にした。REQ-266: 記号の言い換えの例を、秘密の語に当たらない語にした
 PROMPT_VERSION = i18n.choose(PROMPT_VERSION_JA, PROMPT_VERSION_EN)
 # 利用者のひな形の prompt_version の頭と、ハッシュの桁数(ADR-0075 決定5)
 CUSTOM_PROMPT_PREFIX = "custom-"
@@ -175,6 +175,14 @@ _PROMPT_HEAD_JA = (
     "- 同じことを2回書かない。差分から確かに言えないこと、どの変更にも当てはまる一般論は書かない。名前から意図を推測しない。",
     "- 前提に「送っていません」とあるときだけ、そのことを最後に1文で書く。全部送ったときは送った件数に触れない。",
 )
+# 差分の本文を挟む印の行(最初から入っている指示文の中。送信前の確認で差分の欄の範囲を決めるのに使う。REQ-266)。
+# 文字は今までと同じ。利用者が作ったひな形には無いこともある
+DIFF_OPEN_JA = "=== 差分 ==="
+DIFF_CLOSE_JA = "=== ここまで ==="
+DIFF_OPEN_EN = "=== Differences ==="
+DIFF_CLOSE_EN = "=== End ==="
+DIFF_OPEN = i18n.choose(DIFF_OPEN_JA, DIFF_OPEN_EN)
+DIFF_CLOSE = i18n.choose(DIFF_CLOSE_JA, DIFF_CLOSE_EN)
 _PROMPT_TAIL_JA = (
     "",
     "前提:",
@@ -183,15 +191,15 @@ _PROMPT_TAIL_JA = (
     "- 差分の形式: {{diff_format}}",
     "- 差分の全件数は {{diff_total}} 件です。送ったのは先頭から {{sent_range}} 件の範囲です(上限 {{max_diffs}} 件)。{{notes}}",
     "",
-    "=== 差分 ===",
+    DIFF_OPEN_JA,
     "{{diff}}",
-    "=== ここまで ===",
+    DIFF_CLOSE_JA,
 )
 _PROMPT_HEAD_EN = (
     "You help read differences between network device configurations. The reader is a network engineer. Below are the differences that DriftPilot produced by comparing two configurations.",
     "Writing rules:",
     '- Write in English. Do not copy null, true, false, JSON or the item names of the differences; rephrase them, for example as "not set" or "shut down".',
-    '- Do not write the `<secret:N>` marker; write, for example, "the password changed".',
+    '- Do not write the `<secret:N>` marker; write, for example, "a credential changed".',
     "- Do not write the same thing twice. Do not write what the differences do not clearly show, or generalities that fit any change. Do not guess the intent from names.",
     '- Only when the premises say "not sent", write that in one sentence at the end. When everything was sent, do not mention the number sent.',
 )
@@ -203,9 +211,9 @@ _PROMPT_TAIL_EN = (
     "- Difference format: {{diff_format}}",
     "- The total number of differences is {{diff_total}}. The ones sent are in the range of the first {{sent_range}} (limit {{max_diffs}}).{{notes}}",
     "",
-    "=== Differences ===",
+    DIFF_OPEN_EN,
     "{{diff}}",
-    "=== End ===",
+    DIFF_CLOSE_EN,
 )
 _PROMPT_HEAD = i18n.choose(_PROMPT_HEAD_JA, _PROMPT_HEAD_EN)
 _PROMPT_TAIL = i18n.choose(_PROMPT_TAIL_JA, _PROMPT_TAIL_EN)
@@ -444,6 +452,34 @@ def build_prompt(
     diff_format・sent_range・omitted は全部の組をまとめて送るとき(ADR-0152)に、{{diff_format}} の文・{{sent_range}} の件数・
     打ち切って送らなかった件数を渡す。省けば今と同じ文(source のラベル・min(diff_total, max_diffs)・diff_total - max_diffs)。
     """
+    return build_prompt_span(
+        source=source,
+        body=body,
+        diff_total=diff_total,
+        max_diffs=max_diffs,
+        truncated=truncated,
+        unsent_lines=unsent_lines,
+        template=template,
+        diff_format=diff_format,
+        sent_range=sent_range,
+        omitted=omitted,
+    )[0]
+
+
+def build_prompt_span(
+    *,
+    source: LlmSource,
+    body: str,
+    diff_total: int,
+    max_diffs: int,
+    truncated: bool,
+    unsent_lines: int,
+    template: str | None = None,
+    diff_format: str | None = None,
+    sent_range: int | None = None,
+    omitted: int | None = None,
+) -> tuple[str, int, int]:
+    """build_prompt と同じ文と、差し込んだ差分の本文({{diff}} の値)の始まりと終わりの位置(送信前の確認の差分の欄。REQ-266)。"""
     if template is None:
         template = DEFAULT_PROMPT_TEMPLATE
     problem = check_prompt_template(template)
@@ -460,4 +496,31 @@ def build_prompt(
         ),
     }
     # 1回の走査で差し込む(差し込んだ値の中は見ない。差分の本文の {{diff_total}} のような文字は置き換えない)
-    return _MARK.sub(lambda match: values[match.group(1)], template)
+    pieces: list[str] = []
+    position = length = 0
+    start = end = 0
+    for match in _MARK.finditer(template):
+        pieces.append(template[position : match.start()])
+        length += match.start() - position
+        value = values[match.group(1)]
+        if match.group(1) == MARK_DIFF:
+            start, end = length, length + len(value)
+        pieces.append(value)
+        length += len(value)
+        position = match.end()
+    pieces.append(template[position:])
+    return "".join(pieces), start, end
+
+
+def diff_region(prompt: str, start: int, end: int) -> tuple[int, int]:
+    """差分の本文の位置を、差分の欄の範囲にする。本文のすぐ前の行が DIFF_OPEN で、すぐ後ろの行が DIFF_CLOSE なら印の行も含める。
+
+    印の行がどちらか片方でも無い(利用者のひな形)ときは、本文だけ。文字を探さず、本文の位置の前後だけを見る(REQ-266 §2)。
+    """
+    before, after = prompt[:start], prompt[end:]
+    opening, closing = DIFF_OPEN + "\n", "\n" + DIFF_CLOSE
+    opened = before.endswith(opening) and (len(before) == len(opening) or before[-len(opening) - 1] == "\n")
+    closed = after.startswith(closing) and (len(after) == len(closing) or after[len(closing)] == "\n")
+    if opened and closed:
+        return start - len(opening), end + len(closing)
+    return start, end

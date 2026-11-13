@@ -1189,6 +1189,27 @@ class BatchApi(Api):
                 self._late_notice = {"id": self._next_serial(), **notice}
         self._changed()
 
+    def _load_split_folders(self, before: Any, after: Any) -> bool:
+        """機器ごとに分けて書いた before・after のフォルダーを入れる(REQ-267 §5。比較の窓から WebSession を通して呼ぶ。画面からは呼べない)。
+
+        フォルダーを 2 つ落としたときと同じ扱い: 実行中・送信前の確認の待ち中・閉じている途中は何も変えない。
+        組を直している途中も、落としたときと同じく確かめを出せないので入力を変えない。どちらも False を返す。
+        それ以外は、組が入っていても確かめずに置き換える。before と after はそのまま入れる(落とした順の並べ替えはしない)。
+        比較は始めない。
+        """
+        with self._lock:
+            if not self._idle() or self._closing:
+                return False
+            if self._edit is not None and self._edit.edited:
+                return False
+            self._form.update({"source": "folders", "before_dir": str(before), "after_dir": str(after)})
+            self._fill += 1
+            notice = self._rebuild()  # 組を作り直すだけで、実行は始めない
+            if notice is not None:
+                self._late_notice = {"id": self._next_serial(), **notice}
+        self._changed()
+        return True
+
     # --- 実行(wx の _on_run と同じ順) ---
 
     def _run(self, form: Any) -> dict[str, Any]:

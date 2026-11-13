@@ -10,6 +10,13 @@
 両側の本文が同じで同じコマンドが2回以上あれば、1つのログの中で出てきた順に2つずつ組にする(ADR-0152 決定2。pair_within)。
 組にならなかった区間は unpaired に入れるが、全体の status には数えない(single_log)。
 
+打ち間違いなどのエラーの出力の区間(segmentation.is_error_output)は、組にする前に外し、残りの区間で組にする(ADR-0195 決定1)。
+外した区間は error_outputs に入れ、組にも unpaired にも入れない。全体の status にも数えない。
+
+組は後から手で選び直せる(ADR-0195 決定2・REQ-269)。pair_by_hand は選んだ2つの区間だけを組にして、その1組だけを比べ直し
+(_run_one と同じ道)、unpair は組を外して2つの区間を戻す(比べない)。解けた組の区間は、エラーの出力なら error_outputs、
+ふつうの区間なら unpaired に戻す。どちらも組の並びと番号・全体の status を作り直し、AI の答えの値(llm・llm_pairs・llm_chosen)は消す。
+
 LLM 解析(REQ-122 §4・§5 / ADR-0084 決定6)は、CLI の --all-segments --llm では一括比較と同じ2段(compare_all の llm・approved)。
 組ごとの要求は一括比較の _LlmPerJob を、組の番号の文字列を id にして使う(承認した内容だけを送る・承認していない組は送らない・
 続けて失敗したら残りでは呼ばない・比較が失敗した組には送らない)。要約と承認は core.batch_llm の関数に PairResult をそのまま渡す。
@@ -18,7 +25,7 @@ LLM 解析(REQ-122 §4・§5 / ADR-0084 決定6)は、CLI の --all-segments --l
 """
 
 import dataclasses
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -38,7 +45,17 @@ from driftpilot.core.types import (
 from driftpilot.llm_analyzer import LlmAnalysis, LlmRequest, WholeSection
 from driftpilot.llm_analyzer.analyze import analyze_whole_sent
 from driftpilot.llm_analyzer.follow_up import same_sent_whole_body
-from driftpilot.segmentation import Segment, SegmentPair, has_repeats, pair_segments, pair_within, split_log
+from driftpilot.llm_analyzer.payload import LlmInputs
+from driftpilot.segmentation import (
+    Segment,
+    SegmentPair,
+    command_key,
+    has_repeats,
+    is_error_output,
+    pair_segments,
+    pair_within,
+    split_log,
+)
 
 _TEXTS_JA = {"unexpected": "予期しないエラーで比較できませんでした: {error_type}: {error}"}
 _TEXTS_EN = {"unexpected": "The comparison failed with an unexpected error: {error_type}: {error}"}
@@ -72,6 +89,8 @@ class PairResult:
     request: CompareRequest
     outcome: CompareOutcome
     index: int
+    # 比較の窓で手で組にした組か(REQ-269。自動の組は偽。保存の job.paired_by_hand に出る)
+    manual: bool = False
 
     @property
     def job(self) -> PairJob:
@@ -94,7 +113,8 @@ class MultiCompareOutcome:
     single_log は1つのログの中で組にしたか(両側の本文が同じで、同じコマンドが2回以上ある。ADR-0152 決定2)。
     そのときの unpaired は組にならなかった区間(1回だけのコマンド・コマンド不明)で、全体の状態には数えない。
     llm は全部の組をまとめて1回で送った解析(比較の窓と一括比較のまとめて比べた組。analyze_all。ADR-0152 決定3・ADR-0178 決定4)、
-    llm_pairs はその本文に入れた組の pairs の位置(保存には入れない)。CLI の --all-segments --llm は今のまま組ごとの outcome.llm に入る。
+    llm_pairs はその本文に入れた組の pairs の位置(保存には入れない)、llm_chosen は送る組として選んだ pairs の位置
+    (None はすべて。REQ-265。保存には入れない)。CLI の --all-segments --llm は今のまま組ごとの outcome.llm に入る。
     """
 
     status: MultiStatus
@@ -103,6 +123,10 @@ class MultiCompareOutcome:
     single_log: bool = False
     llm: LlmAnalysis | None = None
     llm_pairs: tuple[int, ...] = ()
+    llm_chosen: tuple[int, ...] | None = None
+    # 組にする前に外したエラーの出力の区間(ADR-0195 決定1)。変更前の出てきた順、続けて変更後の順。
+    # 1つのログの中で組にしたときは、同じ本文の1回分だけ変更前の側として入れる。全体の状態には数えない
+    error_outputs: tuple[Unpaired, ...] = ()
 
 
 def is_config_command(key: str) -> bool:
@@ -152,21 +176,31 @@ def compare_all(
     on_progress: Callable[[str], None] | None = None,
     llm: LlmRequest | None = None,
     approved: Mapping[str, str] | None = None,
+    on_pair: Callable[[int, int, str | None], None] | None = None,
 ) -> MultiCompareOutcome:
     """全部の組を比べる。should_cancel は組の境目で見て、真なら CompareCancelled("pair") を送出する。
 
     1組の失敗で止めない。run_compare が例外を出した組は status=error(unexpected_error)の結果にする。
     on_progress には各組の run_compare の工程をそのまま流す。llm は入口が組み立てた LLM 解析の要求(全部の組で使い回す)。
-    approved は送る段で使う「組の番号の文字列 → 確認で承認した送信内容」(run_batch と同じ)。どれも省けば今と同じ動き。
+    approved は送る段で使う「組の番号の文字列 → 確認で承認した送信内容」(run_batch と同じ)。
+    on_pair(何組目か, 比べる組の数, コマンドの文)は各組を比べる前に1回呼ぶ(REQ-264 §3。数は両側がそろった組。
+    コマンド不明は None)。どれも省けば今と同じ動き。
     """
-    before = split_log(request.before.text, prompt=request.prompt).segments
-    after = split_log(request.after.text, prompt=request.prompt).segments
+    all_before = split_log(request.before.text, prompt=request.prompt).segments
+    all_after = split_log(request.after.text, prompt=request.prompt).segments
+    # エラーの出力の区間は組にする前に外す(ADR-0195 決定1)
+    before = tuple(s for s in all_before if not is_error_output(s))
+    after = tuple(s for s in all_after if not is_error_output(s))
     results: list[PairResult] = []
     unpaired: list[Unpaired] = []
     llm_per_pair = _LlmPerJob(llm, approved)
     # 両側の本文が同じで、同じコマンドが2回以上あれば、1つのログの中で組にする(ADR-0152 決定2。パスは見ない)
     single_log = request.before.text == request.after.text and has_repeats(before)
     pairs = pair_within(before) if single_log else pair_segments(before, after)
+    error_outputs = tuple(Unpaired("before", s) for s in all_before if is_error_output(s))
+    if not single_log:
+        error_outputs += tuple(Unpaired("after", s) for s in all_after if is_error_output(s))
+    total = sum(1 for pair in pairs if pair.before is not None and pair.after is not None)
     for pair in pairs:
         if pair.before is None or pair.after is None:
             side: SideName = "before" if pair.after is None else "after"
@@ -175,14 +209,165 @@ def compare_all(
         if should_cancel is not None and should_cancel():
             raise CompareCancelled("pair")
         index = len(results) + 1
+        if on_pair is not None:
+            on_pair(index, total, pair.before.command)
         pair_req = pair_request(request, pair)
         outcome = _run_one(pair_req, llm_per_pair.request(str(index)), on_progress)
         llm_per_pair.record(outcome.llm)
         results.append(PairResult(pair.before.command, pair.before.number, pair.after.number, pair_req, outcome, index))
     if single_log:
         # 1回だけのコマンドとコマンド不明の区間は比べていないので、全体の状態に数えない(terminal length 0 などで差分ありにしない)
-        return MultiCompareOutcome(overall_status(results, []), results, unpaired, single_log=True)
-    return MultiCompareOutcome(overall_status(results, unpaired), results, unpaired)
+        return MultiCompareOutcome(overall_status(results, []), results, unpaired, single_log=True, error_outputs=error_outputs)
+    return MultiCompareOutcome(overall_status(results, unpaired), results, unpaired, error_outputs=error_outputs)
+
+
+def _numbered(request: CompareRequest) -> tuple[dict[int, Segment], dict[int, Segment]]:
+    """両側の区間を、compare_all と同じ切り分けで番号から引ける形にする(エラーの出力の区間も含む)。"""
+    before = split_log(request.before.text, prompt=request.prompt).segments
+    after = split_log(request.after.text, prompt=request.prompt).segments
+    return {s.number: s for s in before}, {s.number: s for s in after}
+
+
+def _regroup(
+    outcome: MultiCompareOutcome,
+    kept: list[PairResult],
+    loose: list[Unpaired],
+) -> MultiCompareOutcome:
+    """選び直した後の結果。組は変更前の区間の番号の順に並べて番号を振り直し、相手なしとエラーの出力は
+    (変更前→変更後, 区間の番号)の順にする。全体の状態は組と相手なしから求め直す。AI の答えの値は消す。
+
+    loose は組から外れた区間と、元から相手なし・エラーの出力だった区間のうち残るもの。
+    エラーの出力の区間(is_error_output)は error_outputs、ほかは unpaired に入れる。
+    """
+    pairs = [
+        dataclasses.replace(p, index=k) for k, p in enumerate(sorted(kept, key=lambda p: p.before_number), start=1)
+    ]
+    ordered = sorted(loose, key=lambda u: (u.side != "before", u.segment.number))
+    unpaired = [u for u in ordered if not is_error_output(u.segment)]
+    error_outputs = tuple(u for u in ordered if is_error_output(u.segment))
+    return MultiCompareOutcome(
+        overall_status(pairs, unpaired),
+        pairs,
+        unpaired,
+        single_log=False,
+        llm=None,
+        llm_pairs=(),
+        llm_chosen=None,
+        error_outputs=error_outputs,
+    )
+
+
+def _loose_segments(outcome: MultiCompareOutcome) -> list[Unpaired]:
+    return [*outcome.unpaired, *outcome.error_outputs]
+
+
+@dataclass(frozen=True)
+class PartnerCandidate:
+    """手で相手を選ぶときの候補の区間1つ(REQ-269 §2)。
+
+    state は今の状態: unpaired(相手なし)・error(エラーの出力)・paired(組になっている)。
+    paired のとき、leftover は選ぶと相手を失う組のもう片方の区間、leftover_error はその本文がエラーの出力か
+    (真なら相手なしでなくエラーの出力に戻る)。
+    """
+
+    segment: Segment
+    state: Literal["unpaired", "error", "paired"]
+    leftover: Unpaired | None = None
+    leftover_error: bool = False
+
+
+def partner_candidates(request: CompareRequest, outcome: MultiCompareOutcome, side: SideName) -> list[PartnerCandidate]:
+    """side の側の区間のすべてを、番号の順に候補として返す(相手なし・エラーの出力・組になっている区間のすべて)。"""
+    befores, afters = _numbered(request)
+    segments = befores if side == "before" else afters
+    other = afters if side == "before" else befores
+    unpaired = {u.segment.number for u in outcome.unpaired if u.side == side}
+    errors = {u.segment.number for u in outcome.error_outputs if u.side == side}
+    paired = {(p.before_number if side == "before" else p.after_number): p for p in outcome.pairs}
+    candidates: list[PartnerCandidate] = []
+    for number in sorted(segments):
+        segment = segments[number]
+        if number in paired:
+            pair = paired[number]
+            left_side: SideName = "after" if side == "before" else "before"
+            left = other[pair.after_number if side == "before" else pair.before_number]
+            candidates.append(PartnerCandidate(segment, "paired", Unpaired(left_side, left), is_error_output(left)))
+        elif number in errors:
+            candidates.append(PartnerCandidate(segment, "error"))
+        elif number in unpaired:
+            candidates.append(PartnerCandidate(segment, "unpaired"))
+    return candidates
+
+
+def pair_by_hand(
+    request: CompareRequest,
+    outcome: MultiCompareOutcome,
+    before_number: int,
+    after_number: int,
+    *,
+    on_progress: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> MultiCompareOutcome:
+    """変更前の区間 before_number と変更後の区間 after_number を手で組にし、その1組だけを比べ直す(REQ-269 §3)。
+
+    request は outcome を作ったときの要求(区間の切り分けと組ごとの要求に使う)。1つのログの中で組にした結果・
+    番号の区間が無いときは ValueError。選んだ区間が別の組に入っていれば、その組は解け、残りの区間は相手なし
+    (本文がエラーの出力ならエラーの出力)に戻る。ほかの組の比較はやり直さない(run_compare を呼ぶのは新しい組の1回だけ)。
+    組の名前は変更前の区間のコマンド。種類と機種を決めるコマンドの名前は変更前の区間のコマンドから作る(コマンド不明は None)。
+    中止の印は比べる前に見て、真なら CompareCancelled("pair") を送出する。
+    """
+    if outcome.single_log:
+        raise ValueError("single_log")
+    befores, afters = _numbered(request)
+    if before_number not in befores or after_number not in afters:
+        raise ValueError("no such segment")
+    before, after = befores[before_number], afters[after_number]
+    kept: list[PairResult] = []
+    loose: list[Unpaired] = []
+    for pair in outcome.pairs:
+        if pair.before_number == before_number or pair.after_number == after_number:
+            # 解ける組。選んだ区間でないほうの区間は、相手なしかエラーの出力に戻す
+            if pair.before_number != before_number:
+                loose.append(Unpaired("before", befores[pair.before_number]))
+            if pair.after_number != after_number:
+                loose.append(Unpaired("after", afters[pair.after_number]))
+        else:
+            kept.append(pair)
+    loose += [
+        u
+        for u in _loose_segments(outcome)
+        if not (
+            (u.side == "before" and u.segment.number == before_number)
+            or (u.side == "after" and u.segment.number == after_number)
+        )
+    ]
+    if should_cancel is not None and should_cancel():
+        raise CompareCancelled("pair")
+    key = None if before.command is None else command_key(before.command)
+    pair_req = pair_request(request, SegmentPair(key, before, after))
+    result = _run_one(pair_req, None, on_progress)
+    kept.append(PairResult(before.command, before_number, after_number, pair_req, result, 0, manual=True))
+    return _regroup(outcome, kept, loose)
+
+
+def unpair(request: CompareRequest, outcome: MultiCompareOutcome, position: int) -> MultiCompareOutcome:
+    """outcome.pairs の position の組を外し、両方の区間を相手なし(本文がエラーの出力ならエラーの出力)に戻す(REQ-269 §3)。
+
+    比べない(run_compare を呼ばない)。1つのログの中で組にした結果・position が組の位置でないときは ValueError。
+    """
+    if outcome.single_log:
+        raise ValueError("single_log")
+    if not 0 <= position < len(outcome.pairs):
+        raise ValueError("no such pair")
+    befores, afters = _numbered(request)
+    target = outcome.pairs[position]
+    kept = [p for k, p in enumerate(outcome.pairs) if k != position]
+    loose = [
+        Unpaired("before", befores[target.before_number]),
+        Unpaired("after", afters[target.after_number]),
+        *_loose_segments(outcome),
+    ]
+    return _regroup(outcome, kept, loose)
 
 
 def sendable_pair(pair: PairResult) -> bool:
@@ -213,19 +398,34 @@ def _selected_texts(outcome: CompareOutcome) -> tuple[str, str] | None:
     return before.text, after.text
 
 
-def whole_sections(outcome: MultiCompareOutcome) -> tuple[list[int], list[WholeSection], list[str | None]]:
+def _whole_input(pair: PairResult) -> LlmInputs | None:
+    """まとめて送れる組なら llm_inputs を、送れなければ None を返す(whole_sections と whole_candidates の共通の判定)。"""
+    if not sendable_pair(pair):
+        return None
+    return llm_inputs(pair.request, pair.outcome)
+
+
+def whole_candidates(outcome: MultiCompareOutcome) -> list[int]:
+    """全部の組をまとめて送るときに、送れる組の pairs の位置(whole_sections が組に入れる組。REQ-265)。"""
+    return [position for position, pair in enumerate(outcome.pairs) if _whole_input(pair) is not None]
+
+
+def whole_sections(
+    outcome: MultiCompareOutcome, chosen: Collection[int] | None = None
+) -> tuple[list[int], list[WholeSection], list[str | None]]:
     """全部の組をまとめて送るときの組(ADR-0152 決定3・決定9)。返すのは (組の pairs の位置, 組, 差分の無かった組のコマンド)。
 
     行は core の _llm_analysis が analyze に渡すのと同じ(llm_inputs。区間の本文は outcome.segmentation の selected.text)。
     送らない組(sendable_pair が偽)は、組にも差分の無かったコマンドにも入れない。差分の無かったコマンドは状態が「差分なし」の組だけ。
+    chosen(pairs の位置の集まり)を渡したときは、その中の組だけを入れる(REQ-265)。None なら全部(今と同じ)。
     """
     positions: list[int] = []
     sections: list[WholeSection] = []
     unchanged: list[str | None] = []
     for position, pair in enumerate(outcome.pairs):
-        if not sendable_pair(pair):
+        if chosen is not None and position not in chosen:
             continue
-        inputs = llm_inputs(pair.request, pair.outcome)
+        inputs = _whole_input(pair)
         if inputs is None:
             continue
         if pair.outcome.status == "no_difference":
@@ -254,15 +454,24 @@ def analyze_all(
     *,
     max_total_diffs: int,
     rules_of: Callable[[PairResult], Any] | None = None,
+    chosen: Collection[int] | None = None,
 ) -> MultiCompareOutcome:
     """全部の組をまとめて1回で AI に送り、答えを outcome.llm に入れて返す(比較の窓だけ。ADR-0152 決定3)。
 
     比較の結果(組・状態)は変えない。llm の dry_run・client・承認の照合は analyze と同じに扱う(analyze_whole)。
     rules_of は依頼書の形どおり受け取るが使わない(正規化のルールは組の要求から決まる。llm_inputs と同じ)。
+    chosen は送る組の pairs の位置(REQ-265)。None なら outcome.llm_chosen(送る組を持たせた結果。それも None ならすべて)。
+    全体の上限もその組だけで数え、使った組は結果の llm_chosen に入れる。
     """
-    positions, sections, unchanged = whole_sections(outcome)
+    chosen = chosen if chosen is not None else outcome.llm_chosen
+    positions, sections, unchanged = whole_sections(outcome, chosen)
     analysis, sent = analyze_whole_sent(llm, sections, max_total_diffs=max_total_diffs, unchanged=unchanged)
-    return dataclasses.replace(outcome, llm=analysis, llm_pairs=tuple(positions[index] for index in sent))
+    return dataclasses.replace(
+        outcome,
+        llm=analysis,
+        llm_pairs=tuple(positions[index] for index in sent),
+        llm_chosen=None if chosen is None else tuple(sorted(chosen)),
+    )
 
 
 # 全体を AI に送ったとき、全体の答えを入れた組のほかの組の llm(ADR-0152 決定7)

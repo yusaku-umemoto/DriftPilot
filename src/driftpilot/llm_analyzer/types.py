@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from driftpilot import i18n
 from driftpilot.llm_analyzer.client import LLMClient
+from driftpilot.llm_analyzer.prompt_parts import InstructionEdit, PromptParts
 
 if TYPE_CHECKING:  # api_error は redact → payload → types を読む(循環を避けて型の注記だけ)
     from driftpilot.llm_analyzer.api_error import ApiErrorText
@@ -78,6 +79,7 @@ _TEXTS_JA = {
     "extra_instruction_invalid": "extra_instruction は空でない文字列にしてください",
     "premise_invalid": "premise は空でない {max_chars} 文字以下の文字列にしてください",
     "no_client_reason": "client が無いときは unavailable に理由を入れてください",
+    "instruction_edit_invalid": "instruction_edit は InstructionEdit にしてください",
 }
 _TEXTS_EN = {
     "max_diffs_invalid": "max_diffs must be an integer of 1 or more: {value!r}",
@@ -85,6 +87,7 @@ _TEXTS_EN = {
     "extra_instruction_invalid": "extra_instruction must be a non-empty string",
     "premise_invalid": "premise must be a non-empty string of at most {max_chars} characters",
     "no_client_reason": "When there is no client, give the reason in unavailable",
+    "instruction_edit_invalid": "instruction_edit must be an InstructionEdit",
 }
 _T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
@@ -123,8 +126,17 @@ class LlmRequest:
     # API が返したエラーの文と待つ秒を受け取る(比較の窓の AI の面と CLI の compare --llm の標準エラー。ADR-0168 決定5)。
     # 利用者の秘密の語でもう一度掃除した後の値(api_error.for_display)だけが届く。結果(LlmAnalysis)には入れない
     on_api_error: "Callable[[ApiErrorText], None] | None" = field(default=None, compare=False, repr=False)
+    # 組み立てた送る文を、指示・差分・全文の部分に区切って受け取る(比較の窓の送信前の確認。REQ-266)。
+    # 比べるとき・表示するときには使わない。結果(LlmAnalysis)には入れない。受け取り口の失敗は握りつぶす
+    on_prompt_parts: "Callable[[PromptParts], None] | None" = field(default=None, compare=False, repr=False)
+    # 送信前の確認で直した指示(この1回の送信だけ。REQ-266)。None なら承認した文をそのまま送る(今と同じ)。
+    # 表示しない(中身を repr に出さない)
+    instruction_edit: InstructionEdit | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.instruction_edit is not None and not isinstance(self.instruction_edit, InstructionEdit):
+            # 文に中身を入れない
+            raise ValueError(_T["instruction_edit_invalid"])
         # 無制限の経路を作らない(0 や負の数を受け付けない)
         if type(self.max_diffs) is not int or self.max_diffs < 1:
             raise ValueError(_T["max_diffs_invalid"].format(value=self.max_diffs))

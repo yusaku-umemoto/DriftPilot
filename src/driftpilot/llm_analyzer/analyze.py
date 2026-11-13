@@ -19,8 +19,10 @@ from driftpilot.llm_analyzer.follow_up import check_question, prompt_too_long
 from driftpilot.llm_analyzer.payload import MAX_FULL_TEXT_CHARS, WholeSection, build_payload, whole_body
 from driftpilot.llm_analyzer.prompt import (
     WHOLE_VERSION_SUFFIX,
-    build_prompt,
+    after_text_section,
+    build_prompt_span,
     diff_format_text,
+    diff_region,
     prompt_version_of,
     template_for,
     with_after_text,
@@ -28,6 +30,7 @@ from driftpilot.llm_analyzer.prompt import (
     with_premise,
     with_whole_rules,
 )
+from driftpilot.llm_analyzer.prompt_parts import DIFF, FULL, InstructionEdit, PromptParts
 from driftpilot.llm_analyzer.types import LlmAnalysis, LlmReason, LlmRequest
 
 
@@ -107,7 +110,7 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
         return LlmAnalysis(status="skipped", reason="nothing_to_send", **built)
     if (refused := _premise_refusal(request, words, built)) is not None:
         return refused
-    prompt = build_prompt(
+    prompt, diff_start, diff_end = build_prompt_span(
         source=payload.source,
         body=payload.body,
         diff_total=payload.diff_total,
@@ -116,6 +119,8 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
         unsent_lines=payload.unsent.lines,
         template=template,
     )
+    # 直せない範囲(差分の欄と全文の節。REQ-266)。以降の文は後ろに足すだけなので、この位置は動かない
+    spans = [(*diff_region(prompt, diff_start, diff_end), DIFF)]
     after_text = payload.after_text  # show の比較でも足す(ADR-0182 決定2)
     if after_text is not None:
         # 変更後の全文(ADR-0158 決定4・5)。上限を超えたら全文も差分も送らない(切り詰めない。送信前の確認にも進まない)
@@ -124,6 +129,7 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
         prompt = with_after_text(prompt, after_text)
         if prompt_too_long(prompt):
             return LlmAnalysis(status="skipped", reason="full_text_too_long", **built)
+        spans.append((len(prompt) - len(after_text_section(after_text)), len(prompt), FULL))
     # 毎回付ける前提の文(ADR-0172 決定2)。全文の節の後ろ、打った文の前。送らない1回目にも入る(確認の全文と照合に同じ文が出る)
     prompt = with_premise(prompt, request.premise)
     if after_text is not None and request.premise is not None and prompt_too_long(prompt):
@@ -131,7 +137,7 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
         return LlmAnalysis(status="skipped", reason="full_text_too_long", **built)
     # 利用者が解析の前に打った文(REQ-206)。前提の後ろに置く。送らない1回目にも入るので、送信前の確認の全文と送る直前の照合に同じ文が出る
     prompt = with_extra_instruction(prompt, request.extra_instruction)
-    return _send(request, prompt, built, clock)
+    return _send(request, prompt, built, clock, spans)
 
 
 def _premise_refusal(request: LlmRequest, words: Sequence[str], built: dict) -> LlmAnalysis | None:
@@ -148,17 +154,38 @@ def _premise_refusal(request: LlmRequest, words: Sequence[str], built: dict) -> 
     return LlmAnalysis(status="skipped", reason="premise_refused", detail={"refused": refused}, **built)
 
 
-def _send(request: LlmRequest, prompt: str, built: dict, clock: Callable[[], str]) -> LlmAnalysis:
+def _send(
+    request: LlmRequest,
+    prompt: str,
+    built: dict,
+    clock: Callable[[], str],
+    spans: Sequence[tuple[int, int, str]] = (),
+) -> LlmAnalysis:
     """送る段(1組の解析と、全部の組をまとめた解析で共有する)。dry_run・client なし・承認と違う・中止・接続の失敗を同じ形にする。
 
     built は結果に入れる件数などの値(source・diff_total・sent_diffs・truncated・unsent と共通の値)。
+    spans は送る文の中の直せない範囲(始まり, 終わり, 種類)。送信前の確認で指示を直せるようにするために使う(REQ-266)。
     """
+    parts = PromptParts.from_spans(prompt, spans)
+    if request.on_prompt_parts is not None:
+        try:
+            request.on_prompt_parts(parts)
+        except Exception:  # noqa: BLE001 - 受け取り口の失敗で比較を止めない
+            pass
     if request.dry_run:
         return LlmAnalysis(status="skipped", reason="dry_run", payload=prompt, **built)
     client = request.client
     if client is None:
         return LlmAnalysis(status="skipped", reason=request.unavailable, payload=prompt, **built)
     model = _model_name(client)
+    edit = request.instruction_edit
+    if edit is not None:
+        # 直した指示で送る(REQ-266 §3)。組み立て直した文が確認に出した文と1字でも違えば(前提や差分が変わった)送らない。
+        # 送る文は、組み立て直した差分・全文の部分に、直した指示の部分を合わせてつないだ文(差分は画面から受け取らない)
+        composed = _compose_edit(parts, prompt, edit)
+        if composed is None:
+            return LlmAnalysis(status="skipped", reason="changed_after_approval", model=model, payload=prompt, **built)
+        prompt = composed
     asked_at = clock()
     api_text = None  # API が返したエラーの文と秒(結果には入れず、on_api_error にだけ渡す。ADR-0168 決定5)
     try:
@@ -190,6 +217,16 @@ def _send(request: LlmRequest, prompt: str, built: dict, clock: Callable[[], str
     return LlmAnalysis(
         status="skipped", reason=reason, detail=detail, model=model, asked_at=asked_at, transmitted=True, payload=prompt, **built
     )
+
+
+def _compose_edit(parts: PromptParts, prompt: str, edit: InstructionEdit) -> str | None:
+    """組み立て直した文(prompt)が確認に出した文(edit.shown)と同じなら、直した指示の部分でつないだ文。違う・つなげないときは None。"""
+    if prompt != edit.shown:
+        return None
+    try:
+        return parts.compose(edit.parts)
+    except ValueError:
+        return None
 
 
 def _tell_api_error(request: LlmRequest, api_text: object) -> None:
@@ -277,7 +314,7 @@ def _analyze_whole(request, sections, max_total_diffs, unchanged, clock) -> tupl
         return LlmAnalysis(status="skipped", reason="over_total_limit", **built), ()
     if (refused := _premise_refusal(request, words, built)) is not None:
         return refused, ()
-    prompt = build_prompt(
+    prompt, diff_start, diff_end = build_prompt_span(
         source=whole.sources[0],
         body=whole.body,
         diff_total=whole.diff_total,
@@ -291,8 +328,9 @@ def _analyze_whole(request, sections, max_total_diffs, unchanged, clock) -> tupl
     )
     # 答える内容の決まりは送る文に入れる(確認の全文に出る)。見え方の決まり(LOOK_RULES)は本物の client が後ろに足す。
     # 前提の文(ADR-0172 決定2)は WHOLE_RULES の後ろ、打った文の前
+    spans = [(*diff_region(prompt, diff_start, diff_end), DIFF)]  # 直せない範囲。以降は後ろに足すだけ(REQ-266)
     prompt = with_extra_instruction(with_premise(with_whole_rules(prompt), request.premise), request.extra_instruction)
-    return _send(request, prompt, built, clock), whole.sent
+    return _send(request, prompt, built, clock, spans), whole.sent
 
 
 def _model_name(client) -> str | None:

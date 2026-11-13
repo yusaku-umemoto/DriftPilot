@@ -58,9 +58,12 @@ class AiPaneApi(Api):
         """「プロンプト」を選んだとき(比較の窓と同じく使用中を変える)。"""
         return self._with_form(self._compare._use_profile, index, label, "prompt")
 
-    def answer_preview(self, yes: Any) -> dict[str, Any]:
-        """送信前の確認の答え。「送信する」(yes が真)のときだけ送る。"""
-        return self._with_form(self._compare._answer_preview, yes)
+    def answer_preview(self, yes: Any, instructions: Any = None) -> dict[str, Any]:
+        """送信前の確認の答え。「送信する」(yes が真)のときだけ送る。
+
+        instructions は指示の欄を直したときだけ渡す、指示の部分の文の並び(REQ-266。直さなければ None)。
+        """
+        return self._with_form(self._compare._answer_preview, yes, instructions)
 
     def cancel(self) -> dict[str, Any]:
         """「中止」(比較の窓と同じ。送った要求は止められないので、届いた答えを捨てる)。"""

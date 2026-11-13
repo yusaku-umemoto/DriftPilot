@@ -157,6 +157,12 @@
       <button type="button" class="pilot-button pilot-button--secondary" id="close-result" data-text="compare.button.close_result"></button>
     </div>
     <div class="pilot-band pilot-band--warning" id="banner" role="status" hidden><span class="pilot-lines" id="banner-text"></span></div>
+    <!-- 複数の機器が入ったログの知らせ（REQ-267 / ADR-0194）。文と、押せるか・押せない理由は Python が返す（view.devices）。
+         押せないときは disabled 属性を使わず aria-disabled と title（理由）で表す -->
+    <div class="pilot-band pilot-band--info" id="devices" role="status" hidden>
+      <span class="pilot-lines pilot-grow" id="devices-text"></span>
+      <button type="button" class="pilot-button pilot-button--secondary" id="split-devices" data-text="compare.split_devices"></button>
+    </div>
 
     <!-- 左右の面（ADR-0148 決定2）。左が結果、右が AI の面。初めの幅は 58:42、どちらも最小 220px。760px 未満は縦に積む。幅は保存しない -->
     <div class="pilot-fill pilot-split pilot-split--resizable" id="split">
@@ -166,15 +172,18 @@
       <section class="pilot-split-side" id="multi" hidden>
         <h2 class="pilot-group-title" data-text="compare.multi.title"></h2>
         <div class="pilot-table-wrap" id="multi-wrap" tabindex="0">
-          <!-- 列はコマンド（残りを埋める列）・状態・差分の数。列の幅は見出しの境目で変える（REQ-224 / ADR-0163） -->
+          <!-- 列は AI に送る（チェック。まとめて比べたときだけ。REQ-265）・コマンド（残りを埋める列）・状態・差分の数。
+               列の幅は見出しの境目で変える（REQ-224 / ADR-0163）。先頭のチェックの列は 36px 固定で境目は付けない -->
           <table class="pilot-table pilot-table--fixed" id="multi-table">
             <colgroup>
+              <col class="pilot-col-check">
               <col>
               <col class="pilot-col-multi-status">
               <col class="pilot-col-multi-diffs">
             </colgroup>
             <thead>
               <tr>
+                <th scope="col" class="pilot-col-check" id="multi-send-col"><input type="checkbox" class="pilot-check" id="multi-send-all" data-label="compare.multi.send_all" data-title="compare.multi.col.send"></th>
                 <th scope="col" data-text="compare.multi.col.command"></th>
                 <th scope="col" data-text="compare.multi.col.status"></th>
                 <th scope="col" data-text="compare.multi.col.diffs"></th>
@@ -182,6 +191,12 @@
             </thead>
             <tbody></tbody>
           </table>
+        </div>
+        <!-- 組の手での選び直し（REQ-269）。まとめて比べた結果のときだけ出す（開いた保存の結果と 1 つのログの中で組にしたときは隠す）。
+             押せるかは Python が決める（選んだ行が相手なし・エラーの出力なら「相手を選ぶ…」、組なら「組を外す」） -->
+        <div class="pilot-row pilot-multi-pairing" id="multi-pairing" hidden>
+          <button type="button" class="pilot-button pilot-button--secondary" id="choose-partner" data-text="compare.multi.choose_partner"></button>
+          <button type="button" class="pilot-button pilot-button--secondary" id="unpair" data-text="compare.multi.unpair"></button>
         </div>
       </section>
       <!-- コマンドの組の一覧と比較の表の境目（REQ-224 / ADR-0163）。まとめて比べたときだけ出す。左右の矢印のキーで 20px ずつ、
@@ -191,7 +206,7 @@
         <!-- タブの行。AI の面を別の窓で出している間だけ、右端に「↗」（別の窓を前に出す。ADR-0160 決定1）を出す。タブの並び（tablist）の外に置く -->
         <div class="pilot-tabs-bar">
           <div class="pilot-tabs" role="tablist">
-            <!-- 「全部」のタブ（ADR-0152 決定7）。まとめて比べたときだけ出す（題は Python が「全部 (N)」で渡す） -->
+            <!-- 「全コマンド比較結果」のタブ（ADR-0152 決定7・ADR-0193 決定5）。まとめて比べたときだけ出す（題は Python が「全コマンド比較結果 (N)」で渡す） -->
             <button type="button" class="pilot-tab" role="tab" id="tab-all" aria-controls="panel-all" aria-selected="false" data-text="compare.tab.all" hidden></button>
             <button type="button" class="pilot-tab" role="tab" id="tab-structured" aria-controls="panel-structured" aria-selected="true" data-text="compare.tab.structured"></button>
             <button type="button" class="pilot-tab" role="tab" id="tab-raw" aria-controls="panel-raw" aria-selected="false" data-text="compare.tab.raw"></button>
@@ -405,6 +420,9 @@
           <!-- 1つのボタン（ADR-0148 決定5）。名前と押せるかは Python が渡す材料で決まる -->
           <button type="button" class="pilot-button pilot-button--secondary pilot-ai-ask" id="ai-ask"></button>
         </div>
+        <!-- まとめて比べたとき、AI に送る組の数と、1 つもチェックしていないときの押せない理由（REQ-265）。Python が渡す文を出すだけ -->
+        <p class="pilot-note pilot-lines" id="ai-send-pairs" hidden></p>
+        <p class="pilot-note pilot-lines" id="ai-send-reason" hidden></p>
         <p class="pilot-note pilot-lines" id="ai-note" hidden></p>
       </div>
     </section>

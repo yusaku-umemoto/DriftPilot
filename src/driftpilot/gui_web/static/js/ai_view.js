@@ -442,6 +442,9 @@ function renderAi(ai) {
     select.disabled = !ai.can_choose || names.length === 0;
   }
   note("ai-note", ai.note);
+  // まとめて比べたとき: 送る組の数と、1 つもチェックしていないときの押せない理由（REQ-265。文は Python が決める）
+  note("ai-send-pairs", ai.send_pairs ?? null);
+  note("ai-send-reason", ai.send_reason ?? null);
   question.disabled = !ai.input_enabled;
   // 承認して送った答えが届いたら、解析の前に打った文を欄から消す（「送信しない」・中止・失敗では残す。REQ-206 §6）
   if (ai.clear !== shown.clear) {
@@ -480,6 +483,9 @@ function renderAsk() {
   const ask = askMode() === "ask";
   text($("ai-ask"), ask ? view.ai.ask_label : view.ai.send_label);
   $("ai-ask").disabled = aiPending || (ask ? false : !view.ai.can_send_llm);
+  // 「AI で解析」の形で押せない理由があるときだけ、ボタンの title にも出す（ADR-0175 の出し方と同じ）
+  const reason = view.ai.send_reason ?? null;
+  $("ai-ask").title = !ask && !view.ai.can_send_llm && reason !== null ? reason : "";
 }
 
 // ボタン（と Enter）の動き。「質問する」は ask_follow_up、「AI で解析」は send_llm に欄の文を渡す（確かめと送るかは Python が決める）。
@@ -543,7 +549,50 @@ function area(value, className) {
   return el;
 }
 
+// 直せる指示の欄（REQ-266）。original は直す前の文（「元に戻す」で戻す）。edited は直したか（input の事象があったときだけ真。
+// 改行の違いだけでは直したことにしない）。
+function instructionArea(piece, state) {
+  const el = make("textarea", "pilot-input pilot-mono pilot-nowrap", null);
+  el.value = piece.text;
+  el.spellcheck = false;
+  const box = { el, original: piece.text };
+  el.addEventListener("input", () => {
+    state.edited = true;
+  });
+  return box;
+}
+
+// 部分に分かれた確認（REQ-266）。部分は Python が元の並びで渡す。直せるのは指示の部分だけで、差分と全文の部分は読むだけ。
+// 返すのは、本文に並べる要素と、指示の欄の箱の並び。
+function partsBody(preview, state) {
+  const body = [];
+  const boxes = [];
+  body.push(make("p", "", preview.edit_note));
+  for (const piece of preview.parts) {
+    body.push(make("p", "", piece.title));
+    if (piece.editable) {
+      const box = instructionArea(piece, state);
+      boxes.push(box);
+      body.push(box.el);
+    } else {
+      body.push(area(piece.text, "pilot-input pilot-mono pilot-nowrap"));
+    }
+  }
+  // 「元に戻す」: 指示の欄をすべて直す前の文に戻し、直した印も消す
+  const reset = make("button", "pilot-button pilot-button--secondary", preview.reset);
+  reset.type = "button";
+  reset.addEventListener("click", () => {
+    for (const box of boxes) {
+      box.el.value = box.original;
+    }
+    state.edited = false;
+  });
+  body.push(reset);
+  return { body, boxes };
+}
+
 // 送信前のプレビュー（ADR-0018 決定6）。既定のフォーカスと Esc は「送信しない」。答えを Python に渡すだけで、送るかは Python が決める。
+// 指示の欄を直したときだけ、指示の欄の文の並びを渡す（直さなければ null。Python が確かめて送るかを決める）。
 async function showPreview(preview) {
   const parts = [];
   if (preview.full_text !== null) {
@@ -554,12 +603,21 @@ async function showPreview(preview) {
   if (preview.notes.length > 0) {
     parts.push(make("p", "pilot-lines", preview.notes.join("\n")));
   }
-  parts.push(make("p", "", preview.payload_title), area(preview.payload, "pilot-input pilot-mono pilot-nowrap"));
+  const state = { edited: false };
+  let boxes = [];
+  if (preview.parts !== null) {
+    const built = partsBody(preview, state);
+    boxes = built.boxes;
+    parts.push(...built.body);
+  } else {
+    parts.push(make("p", "", preview.payload_title), area(preview.payload, "pilot-input pilot-mono pilot-nowrap"));
+  }
   if (preview.unsent_shapes.length > 0) {
     parts.push(area(preview.unsent_shapes.join("\n"), "pilot-input pilot-mono pilot-nowrap"));
   }
   const yes = await panel(preview.title, parts, preview.send, preview.dont_send);
-  await afterPreview(await call("answer_preview", yes));
+  const instructions = yes && state.edited ? boxes.map((box) => box.el.value) : null;
+  await afterPreview(await call("answer_preview", yes, instructions));
 }
 
 // --- 作る ---

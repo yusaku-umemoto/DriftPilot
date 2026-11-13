@@ -37,6 +37,9 @@ from driftpilot.segmentation import Exposure
 RECORD_KEYS = ("schema_version", "saved_at", "inputs", "settings", "tools", "contains_config_values", "result")
 # 一括比較の1行だけが持つ最上位のキー(REQ-15)。あれば JobMeta として検査する。無いのが1件の比較
 JOB_KEY = "job"
+# REQ-269 で足した job の項目。比較の窓で手で組にした行だけ true を書く(自動の組の行・今の保存は今と1文字も変えない)。
+# 版を据え置いたため、無い保存も読む(あれば true か false だけ受け取る)
+PAIRED_BY_HAND_KEY = "paired_by_hand"
 # REQ-16 で足した result の項目。版を据え置いたため、これが無い保存(REQ-16 より前)も読む(docs/notes/req-14-storage.md)
 LLM_KEY = "llm"
 # REQ-22 で足した result の項目。同じく版を据え置いたため、これが無い保存(REQ-22 より前)も空のリストとして読む
@@ -518,6 +521,10 @@ def from_record(record: Any) -> StoredRecord:
         meta["settings"][RAW_OPTIONS_KEY] = settings[RAW_OPTIONS_KEY]
     if JOB_KEY in record:
         meta[JOB_KEY] = _build(JobMeta, record[JOB_KEY], JOB_KEY)
+        job = record[JOB_KEY]
+        if PAIRED_BY_HAND_KEY in job:
+            # JobMeta には無いキー(platform_used と同じ扱い)。あれば真偽値だけを受け取る(REQ-269 §4)
+            meta[JOB_KEY][PAIRED_BY_HAND_KEY] = _build(bool, job[PAIRED_BY_HAND_KEY], f"{JOB_KEY}.{PAIRED_BY_HAND_KEY}")
     return StoredRecord(meta, outcome)
 
 

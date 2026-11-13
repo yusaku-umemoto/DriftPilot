@@ -69,9 +69,28 @@ $Base = (Resolve-Path "$Root\dist").Path
 $Stream = [IO.File]::Open("$Root\$Zip", [IO.FileMode]::CreateNew)
 $Archive = New-Object IO.Compression.ZipArchive($Stream, [IO.Compression.ZipArchiveMode]::Create, $false, [Text.Encoding]::UTF8)
 try {
-    Get-ChildItem -Recurse -File "$Root\$Out" | ForEach-Object {
-        $Name = $_.FullName.Substring($Base.Length + 1).Replace("\", "/")
-        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Archive, $_.FullName, $Name, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    # フォルダーの項目（名前の最後が /・中身は空）を、ファイルより先に入れる。
+    # Windows 標準の「すべて展開」が途中で止まった件（ADR-0192 追記・REQ-270）への対応。7-Zip やエクスプローラーが作る zip は
+    # フォルダーの項目を持つので、ふつうの形に近づける。
+    # 並べ方: フォルダーを浅い順（/ の数）、次に名前の順にすべて入れ、続けてファイルを入れる。
+    # 項目の外部属性を決める API は .NET Framework（PowerShell 5.1）に無いので使わない（名前の最後の / だけでフォルダーの項目になる）。
+    $Files = @(Get-ChildItem -Recurse -File "$Root\$Out" | ForEach-Object {
+        [pscustomobject]@{ Path = $_.FullName; Name = $_.FullName.Substring($Base.Length + 1).Replace("\", "/") }
+    })
+    # 大文字と小文字を区別する集合（PowerShell の連想配列は区別しない）
+    $Folders = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($f in $Files) {
+        $Parts = $f.Name.Split("/")
+        for ($i = 1; $i -lt $Parts.Length; $i++) {
+            [void]$Folders.Add(($Parts[0..($i - 1)] -join "/") + "/")
+        }
+    }
+    $Sorted = $Folders | Sort-Object -Property @{ Expression = { $_.Split("/").Length } }, @{ Expression = { $_ } }
+    foreach ($FolderName in $Sorted) {
+        $Archive.CreateEntry($FolderName) | Out-Null
+    }
+    foreach ($f in $Files) {
+        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Archive, $f.Path, $f.Name, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
     }
 } finally {
     $Archive.Dispose()
@@ -81,3 +100,4 @@ try {
 Write-Host "== 6/6 できたもの"
 "{0}  {1:N1} MB" -f $Out, ((Get-ChildItem -Recurse $Out | Measure-Object Length -Sum).Sum / 1MB)
 "{0}  {1:N1} MB" -f $Zip, ((Get-Item $Zip).Length / 1MB)
+Invoke-Checked $Py @("tools\release\check_windows_zip.py", $Zip)

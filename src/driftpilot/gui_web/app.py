@@ -26,6 +26,9 @@
 - 画面の色(ADR-0189 / REQ-256 §5): 設定ファイルの [gui] theme を run の中で 1 回読み、比較・--settings・見本の窓の url に
   付ける(gui_web/theme.py。light・dark だけ。URL の # の後ろ)。設定・一括比較・AI の窓は WebSession が開くときに付ける
 
+- Windows の exe で画面を開けなかったときは、今の知らせの前に同梱のファイルの抜けを確かめ、欠けていれば展開し直すよう
+  知らせる(ADR-0192 / REQ-263。gui_web/bundled_files.py。run の 3 か所の知らせ)
+
 webview は run() の中で読む(このモジュールは pywebview 無しでも読める。テストは偽物に差し替える)。
 """
 
@@ -39,6 +42,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from driftpilot.gui_web import bundled_files
 from driftpilot.gui_web import theme as theme_module
 from driftpilot.gui_web.bridge import Api
 from driftpilot.gui_web.compare_api import CompareApi
@@ -46,7 +50,13 @@ from driftpilot.gui_web.session import WebSession
 from driftpilot.gui_web.settings_api import SettingsApi
 from driftpilot.gui_web.theme import themed_url, themed_window
 from driftpilot.llm_settings import portable_settings_dir
-from driftpilot.messages import COMPARE_TITLE, SETTINGS_TITLE, gui_web_start_failed, webview2_missing
+from driftpilot.messages import (
+    COMPARE_TITLE,
+    SETTINGS_TITLE,
+    gui_web_files_missing,
+    gui_web_start_failed,
+    webview2_missing,
+)
 
 TITLE = "DriftPilot"
 SIZE = (1180, 860)
@@ -175,6 +185,20 @@ def _finish(code: int) -> None:
     _exit(code)
 
 
+def _bundle_notice() -> str | None:
+    """Windows の exe で同梱のファイルが欠けているときの知らせ(ADR-0192)。欠けていない・確かめない・確かめで例外が出たら None。
+
+    例外は握りつぶす(確かめのせいで今の知らせが出ないことが無いように)。
+    """
+    try:
+        missing = bundled_files.missing_bundled_files()
+        if not missing:
+            return None
+        return gui_web_files_missing(bundled_files.windows_name(missing[0]), len(missing) - 1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run(
     sample: bool = False,
     settings: bool = False,
@@ -202,10 +226,10 @@ def run(
     try:
         screens = list(webview.screens)  # 表示部品の初期化もここで起きる(webview.renderer が決まる)
     except Exception as exc:  # noqa: BLE001 - pythonnet・pyobjc の抜けは様々な例外になる。型名だけを添える
-        tell(gui_web_start_failed(type(exc).__name__))
+        tell(_bundle_notice() or gui_web_start_failed(type(exc).__name__))
         return 2
     if uses_legacy_engine(platform.system(), webview.renderer):
-        tell(webview2_missing())
+        tell(_bundle_notice() or webview2_missing())
         return 2
     # 画面の色(ADR-0189)。最初に開く窓の url に付ける(light・dark だけ。system は付けない)。
     # 設定・一括比較・AI の窓を WebSession が開くときは、そのつど読む(settings_window など元の url のまま渡す)
@@ -283,7 +307,7 @@ def run(
         else:
             webview.start(storage_path=str(portable / WEBVIEW_STORAGE_DIR))
     except webview.WebViewException as exc:
-        tell(gui_web_start_failed(type(exc).__name__))
+        tell(_bundle_notice() or gui_web_start_failed(type(exc).__name__))
         return 2
     _finish(0)
     return 0

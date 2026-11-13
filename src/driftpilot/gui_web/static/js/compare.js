@@ -14,6 +14,7 @@
 
 import { call, on } from "./bridge.js";
 import { notice, panel } from "./dialog.js";
+import { confirm } from "./dialog.js"; // 「機器ごとに分けて…」の書き出す前の注意（REQ-267）
 import { choose } from "./dialog.js"; // 「HTML・CSV で出力…」の形を選ぶ（ADR-0156）
 import { make, text } from "./dom.js";
 import { createAiView } from "./ai_view.js"; // AI の面（REQ-220 §5.1）
@@ -35,14 +36,16 @@ const DIALOG_TEXTS = [
   "compare.export.title",
   "compare.export.body",
   "compare.col.resize",
+  "compare.multi.paired_by_hand", // 手で組にした組の印（REQ-269）
 ];
-// 列の幅の境目を付ける 5 つの表（REQ-224 / ADR-0163）。fill は残りを埋める列の番号（無ければ最後の列）、fillMin はその最低の幅（px）
+// 列の幅の境目を付ける 5 つの表（REQ-224 / ADR-0163）。fill は残りを埋める列の番号（無ければ最後の列）、fillMin はその最低の幅（px）。
+// multi-table の fill は先頭の「AI に送る」のチェックの列を出しているときの番号（出していないときは 1 つ前。REQ-265）
 const COLUMN_TABLES = [
   { id: "all-table", fillMin: 160 },
   { id: "structured-table", fillMin: 160 },
   { id: "raw-table", fillMin: 160 },
   { id: "unparsed-table", fillMin: 160 },
-  { id: "multi-table", fill: 0, fillMin: 120 },
+  { id: "multi-table", fill: 1, fillMin: 120 },
 ];
 // AI の面から呼ぶメソッドのうち、form（比較の設定の欄の値）を足すもの。AI の窓では Python が持つ form を使う
 const AI_FORM_METHODS = new Set([
@@ -68,8 +71,10 @@ const shown = {
   fill: null,
   focus: 0,
   result: 0,
+  rows: null, // 描いた表の中身の番号（Python の result の rows_revision）
   notice: null,
   multi: null,
+  send: null, // 描いた一覧に「AI に送る」の列があったか（REQ-265）
   all: null, // 描いた「全部」のタブの行の番号
   tab: null, // 移したタブの番号（Python の tab_revision）
   rawOptions: null, // 単純比較の設定の欄を入れ直した番号（Python の raw_options.fill）
@@ -290,6 +295,11 @@ function render(next) {
   text($("opened-note"), next.opened === null ? "" : next.opened.note);
   $("banner").hidden = next.banner === null;
   text($("banner-text"), next.banner);
+  // 複数の機器が入ったログの知らせとボタン（REQ-267）。押せないときは aria-disabled と title（理由）で表す
+  $("devices").hidden = next.devices === null;
+  text($("devices-text"), next.devices === null ? "" : next.devices.text);
+  $("split-devices").setAttribute("aria-disabled", next.devices !== null && next.devices.enabled ? "false" : "true");
+  $("split-devices").title = next.devices === null ? "" : next.devices.reason || "";
   renderRawOptions(next);
 
   $("run").disabled = !next.can_run;
@@ -387,13 +397,21 @@ function renderMulti(multi) {
   $("tab-all").hidden = multi === null;
   if (multi === null) {
     shown.multi = null;
+    shown.send = null;
     shown.all = null;
     shown.tab = null;
+    $("multi-pairing").hidden = true;
     if (!$("panel-all").hidden) {
       selectTab("structured");
     }
     return;
   }
+  // 組の手での選び直し（REQ-269）。multi.pairing が null（開いた保存の結果・1 つのログの中で組にしたとき）なら並びごと隠す。
+  // 押せるかは Python の値のまま
+  const pairing = multi.pairing ?? null;
+  $("multi-pairing").hidden = pairing === null;
+  $("choose-partner").disabled = pairing === null || !pairing.choose;
+  $("unpair").disabled = pairing === null || !pairing.unpair;
   text($("tab-all"), multi.all_title);
   if (multi.all_revision !== shown.all) {
     shown.all = multi.all_revision;
@@ -407,12 +425,24 @@ function renderMulti(multi) {
     selectTab(multi.tab);
   }
   const body = $("multi-table").tBodies[0];
-  if (multi.revision !== shown.multi) {
+  // 「AI に送る」の列は、まとめて比べた結果のときだけ出す（開いた保存の結果では multi.send が null。REQ-265 §2）
+  const withSend = multi.send !== null;
+  setSendColumn(withSend);
+  if (multi.revision !== shown.multi || withSend !== shown.send) {
     shown.multi = multi.revision;
+    shown.send = withSend;
     const fragment = document.createDocumentFragment();
     for (const row of multi.rows) {
       const tr = document.createElement("tr");
-      tr.append(make("td", "", row.name), make("td", "", row.status), make("td", "pilot-num", row.diffs));
+      if (withSend) {
+        tr.append(sendCell(row));
+      }
+      const status = make("td", "", row.status);
+      if (row.manual) {
+        // 手で組にした印（REQ-269）。状態の文の後ろに足す。textContent だけで描く
+        status.append(" ", make("span", "pilot-manual-mark", texts["compare.multi.paired_by_hand"]));
+      }
+      tr.append(make("td", "", row.name), status, make("td", "pilot-num", row.diffs));
       tr.title = row.name;
       if (row.unpaired) {
         tr.dataset.unpaired = "true";
@@ -423,6 +453,46 @@ function renderMulti(multi) {
   }
   Array.from(body.rows).forEach((tr, index) => {
     tr.setAttribute("aria-selected", String(index === multi.selected));
+  });
+  drawSendChecks(multi, body);
+}
+
+// 行の先頭の「AI に送る」のチェックのセル。状態は描くたびに Python の値で入れる（drawSendChecks）。
+// チェックのセルの中のクリックでは行を選ばない（行の選びとチェックは別の操作）
+function sendCell(row) {
+  const td = make("td", "pilot-check-cell", null);
+  const check = make("input", "pilot-check", null);
+  check.type = "checkbox";
+  check.setAttribute("aria-label", `${texts["compare.multi.col.send"]}: ${row.name}`);
+  check.addEventListener("change", () => {
+    const tr = check.closest("tr");
+    act("set_send_pair", tr.sectionRowIndex, check.checked);
+  });
+  td.append(check);
+  return td;
+}
+
+// チェックの状態を Python の値（multi.send）で描く。rows は行ごとに true・false・null（送れない組。押せない）。
+// 見出しは全部・一部（途中の印）・なし。押せる組の数とチェックの数から決める（batch.js の drawAllCheck と同じ決まり）
+function drawSendChecks(multi, body) {
+  const send = multi.send;
+  const all = $("multi-send-all");
+  if (send === null) {
+    return;
+  }
+  const targets = send.rows.filter((value) => value !== null);
+  const on = targets.filter((value) => value).length;
+  all.checked = targets.length > 0 && on === targets.length;
+  all.indeterminate = on > 0 && on < targets.length;
+  all.disabled = targets.length === 0 || !send.enabled;
+  Array.from(body.rows).forEach((tr, index) => {
+    const check = tr.querySelector(".pilot-check-cell .pilot-check");
+    if (check === null) {
+      return;
+    }
+    const value = send.rows[index] ?? null;
+    check.checked = value === true;
+    check.disabled = value === null || !send.enabled;
   });
 }
 
@@ -635,6 +705,15 @@ function nextRaw(step) {
 }
 
 function drawResult(result) {
+  // 表の中身の番号（rows_revision）が前に描いたものと同じなら、AI の答えだけが変わった（「AI で解析」の確認・答え。REQ-264 §2）。
+  // 表・絞り込み・選んでいる行・スクロールには触らず、AI の答えとキャラクターの場面だけを描き直す
+  if (result.rows_revision === shown.rows) {
+    aiView.drawResult(result);
+    scene.noDiff = result.no_diff === true;
+    scene.neverCompared = result.never_compared === true;
+    return;
+  }
+  shown.rows = result.rows_revision;
   // 「全部」のタブの題は view.multi から描く（renderMulti）。ここでは組ごとのタブだけ
   for (const tab of TABS.filter((name) => name !== "all")) {
     text($(`tab-${tab}`), result.titles[tab]);
@@ -870,18 +949,63 @@ window.addEventListener("resize", () => {
 // --- 5 つの表の列の幅（REQ-224 / ADR-0163）。読み込んだときに 1 回だけ付ける（表を描き直しても見出しと <colgroup> は作り直さない） ---
 
 // 見出しのセルに境目を足し、列の幅の部品につなぐ。隠れたタブの表は、開いて枠に幅が付いたときに固まる。
-function bindTableColumns() {
+// 先頭の「AI に送る」のチェックの列（pilot-col-check）は幅を決め打ちで、境目は付けない（REQ-265）。
+// only は 1 つの表だけつなぎ直すときの表の id（multi-table はチェックの列を足し引きするので、そのたびにつなぎ直す）。
+const columnBindings = new Map();
+
+function bindTableColumns(only = null) {
   for (const item of COLUMN_TABLES) {
+    if (only !== null && item.id !== only) {
+      continue;
+    }
     const target = $(item.id);
     const cols = Array.from(target.querySelectorAll("colgroup > col"));
     const heads = Array.from(target.tHead.rows[0].cells);
     const columns = heads.map((head, index) => {
+      if (head.classList.contains("pilot-col-check")) {
+        return { col: cols[index], head, handle: null };
+      }
       const grip = makeGrip(texts["compare.col.resize"]);
       head.append(grip);
       return { col: cols[index], head, handle: grip };
     });
-    bindColumnWidths(target, columns, { fill: item.fill, fillMin: item.fillMin });
+    // チェックの列を出していないとき（開いた保存の結果）は、埋める列の番号を 1 つ前にする
+    const lead = heads.filter((head) => head.classList.contains("pilot-col-check")).length;
+    const fill = item.fill === undefined ? undefined : item.fill - (1 - lead);
+    columnBindings.set(item.id, bindColumnWidths(target, columns, { fill, fillMin: item.fillMin }));
   }
+}
+
+// 一覧の「AI に送る」のチェックの列を出す・外す（REQ-265）。列の組み立てが変わるので、幅の部品を止めてから境目も作り直してつなぎ直す
+// （column_width.js の決まり）。外した列は持っておき、戻すときに先頭へ戻す。幅は決め直す（動かした幅は覚えない）
+const sendColumn = { col: null, head: null, shown: true };
+
+function setSendColumn(visible) {
+  if (visible === sendColumn.shown) {
+    return;
+  }
+  const table = $("multi-table");
+  const colgroup = table.querySelector("colgroup");
+  const headRow = table.tHead.rows[0];
+  columnBindings.get("multi-table")?.disconnect();
+  for (const old of headRow.querySelectorAll(".pilot-col-resize")) {
+    old.remove();
+  }
+  if (visible) {
+    colgroup.prepend(sendColumn.col);
+    headRow.prepend(sendColumn.head);
+  } else {
+    sendColumn.col = colgroup.querySelector("col.pilot-col-check");
+    sendColumn.head = $("multi-send-col");
+    sendColumn.col.remove();
+    sendColumn.head.remove();
+  }
+  sendColumn.shown = visible;
+  for (const col of colgroup.querySelectorAll("col")) {
+    col.style.width = "";
+  }
+  table.style.width = "";
+  bindTableColumns("multi-table");
 }
 
 // --- ダイアログ ---
@@ -904,6 +1028,46 @@ async function paste(side) {
   }
 }
 
+// 「相手を選ぶ…」（REQ-269）。選んでいる行の相手の候補（もう片方の側の区間のすべてと、それぞれの今の状態）を Python から受け取り、
+// ラジオボタンの一覧を出す。既定のフォーカスは「キャンセル」。OK で選ばれていれば、選んだ区間の番号を Python に渡す（組にして比べるのは Python）
+async function choosePartner() {
+  if (view === null || view.multi === null || view.multi.pairing === null || !view.multi.pairing.choose) {
+    return;
+  }
+  const row = view.multi.selected;
+  const result = await call("partner_choices", row);
+  if (!result.ok) {
+    await handle(result);
+    return;
+  }
+  const partners = result.partners ?? null;
+  if (partners === null) {
+    return;
+  }
+  let picked = null;
+  const list = make("div", "pilot-stack", null);
+  for (const choice of partners.choices) {
+    const line = make("label", "pilot-radio", null);
+    const input = make("input", "pilot-check", null);
+    input.type = "radio";
+    input.name = "partner-choice";
+    input.addEventListener("change", () => {
+      picked = choice.number;
+    });
+    line.append(input, make("span", "pilot-mono", choice.label), make("span", "pilot-note", choice.state));
+    list.append(line);
+  }
+  const ok = await panel(
+    partners.title,
+    [make("p", "", partners.prompt), list],
+    texts["compare.dialog.ok"],
+    texts["compare.dialog.cancel"],
+  );
+  if (ok && picked !== null) {
+    await act("choose_partner", row, picked);
+  }
+}
+
 // 「HTML・CSV で出力…」（ADR-0156）。本文は伏せる決まりの案内（決定9）、選択肢は Python が渡す。既定のフォーカスは HTML、Esc は「やめる」。
 // 「やめる」でなければ選んだ形を Python に渡す（出すかどうか・保存の場所・伏せることは Python が決める）。
 async function exportResult() {
@@ -914,6 +1078,24 @@ async function exportResult() {
   if (kind !== "cancel") {
     await act("export_result", kind);
   }
+}
+
+// 「機器ごとに分けて一括比較で開く…」（REQ-267）。押せないときは何もしない。1 回目で Python が書き出す前の注意（split_confirm）を返したら、
+// dialog.js の confirm で聞き（既定は「キャンセル」）、「フォルダーを選ぶ…」のときだけ confirmed=true で呼び直す。フォルダーは Python が選ぶ
+async function splitDevices() {
+  if (view === null || $("split-devices").getAttribute("aria-disabled") === "true") {
+    return;
+  }
+  const result = await call("split_devices", form());
+  if (result.ok && result.split_confirm) {
+    const ask = result.split_confirm;
+    render(result.view);
+    if (await confirm(ask.title, ask.body, ask.yes, ask.no)) {
+      await handle(await call("split_devices", form(), true));
+    }
+    return;
+  }
+  await handle(result);
 }
 
 // --- 操作を Python に渡す ---
@@ -1066,10 +1248,20 @@ $("rawopt-fields").addEventListener("change", () => act("form_changed"));
 bind("rawopt-reset", async () => handle(await call("reset_raw_options")));
 // まとめての比較の一覧の行を選ぶ（どの組の結果を出すかは Python が決め、result() で取る）。矢印のキーでも動かす
 $("multi-table").tBodies[0].addEventListener("click", (event) => {
+  if (event.target.closest(".pilot-check-cell") !== null) {
+    return; // 「AI に送る」のチェックのセルでは行を選ばない（チェックは別の操作。REQ-265）
+  }
   const tr = event.target.closest("tr");
   if (tr) {
     act("select_pair", tr.sectionRowIndex);
   }
+});
+// 見出しのチェック: すべて選ぶ・すべて外す（全部チェック済みなら外す。それ以外は選ぶ）。結果は Python の値で描き直す
+$("multi-send-all").addEventListener("change", () => {
+  const rows = view !== null && view.multi !== null && view.multi.send !== null ? view.multi.send.rows : [];
+  const targets = rows.filter((value) => value !== null);
+  const on = !(targets.length > 0 && targets.every((value) => value));
+  act("set_send_all", on);
 });
 $("multi-wrap").addEventListener("keydown", (event) => {
   if ((event.key === "ArrowDown" || event.key === "ArrowUp") && view !== null && view.multi !== null) {
@@ -1078,6 +1270,13 @@ $("multi-wrap").addEventListener("keydown", (event) => {
     if (next >= 0 && next < view.multi.rows.length) {
       act("select_pair", next);
     }
+  }
+});
+// 組の手での選び直し（REQ-269）。押せるかと、組にして比べるかは Python が決める
+bind("choose-partner", () => choosePartner());
+bind("unpair", () => {
+  if (view !== null && view.multi !== null) {
+    return act("unpair", view.multi.selected);
   }
 });
 bind("swap", () => act("swap"));
@@ -1090,6 +1289,7 @@ bind("save", () => act("save"));
 bind("open-result", () => act("open_result"));
 bind("close-result", () => act("close_result"));
 bind("export", () => exportResult());
+bind("split-devices", () => splitDevices());
 // AI の面を別の窓で開く「↗」と、別の窓が開いている間の「↗」（前に出す）。どちらも同じメソッド（開くか前に出すかは Python が決める）
 bind("ai-detach", async () => handle(await call("open_ai_pane")));
 bind("ai-front", async () => handle(await call("open_ai_pane")));

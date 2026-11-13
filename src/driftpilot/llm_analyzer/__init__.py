@@ -67,6 +67,7 @@ from driftpilot.llm_analyzer.prompt import (
     prompt_version_of,
     template_for,
 )
+from driftpilot.llm_analyzer.prompt_parts import InstructionEdit, PromptParts
 from driftpilot.llm_analyzer.thinking import THINKING_CUT_NOTE, THINKING_MAX_CHARS, ThinkingBuffer
 from driftpilot.llm_analyzer.types import (
     DEFAULT_MAX_DIFFS,
@@ -132,6 +133,7 @@ __all__ = [
     "CustomHttpJson",
     "CustomHttpJsonClient",
     "CustomProblem",
+    "InstructionEdit",
     "LLMClient",
     "LLMClientUnavailable",
     "LLMConnectionError",
@@ -145,6 +147,7 @@ __all__ = [
     "OpenAIApiKeyClient",
     "PairReading",
     "PromptNotApproved",
+    "PromptParts",
     "ShapeNode",
     "ShapedClient",
     "StreamStopped",

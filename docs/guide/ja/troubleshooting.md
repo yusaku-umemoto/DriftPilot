@@ -11,6 +11,23 @@ DriftPilot は Apple や Microsoft の署名をしていないので、初めて
 
 Windows 10 では、Microsoft Edge WebView2 Runtime が要ることがあります。
 
+## Windows で「画面の表示部品を使えません」と出る
+
+英語の画面では "Cannot use the display component" と出ます。展開が途中で止まっている見込みが高いです。Windows 標準の **すべて展開** は、誤りを出さずに途中で止まり、`_internal\pythonnet\runtime\Python.Runtime.dll` など、画面に要るファイルが出ないことがあります。zip そのものは壊れていません。
+
+1. DriftPilot を閉じて、展開したフォルダーを消します。
+2. zip のあるフォルダーで、PowerShell で展開し直します（7-Zip などほかのソフトでもかまいません）。
+
+   ```powershell
+   Expand-Archive -Path .\DriftPilot-<版>-windows-x64.zip -DestinationPath C:\Tools
+   ```
+
+3. `C:\Tools\DriftPilot\DriftPilot.exe` を開きます。
+
+取った zip が欠けていないかは、`Get-FileHash .\DriftPilot-<版>-windows-x64.zip` の結果と、[Releases のページ](https://github.com/yusaku-umemoto/DriftPilot/releases) の `SHA256SUMS.txt` を比べて確かめられます。
+
+PowerShell や 7-Zip で展開しても出るときは、[GitHub の Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) で知らせてください。
+
 ## 画面が英語で、日本語にしたい
 
 **Settings… → Display → Language → 日本語 → Save** の後、DriftPilot を開き直します。

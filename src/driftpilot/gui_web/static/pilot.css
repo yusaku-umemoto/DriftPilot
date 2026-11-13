@@ -890,8 +890,11 @@ body {
   background: var(--pilot-color-danger-hover);
 }
 
+/* aria-disabled="true" は disabled 属性を使わず、フォーカスが止まれて理由を title で読めるボタン(REQ-267 の「機器ごとに分けて…」) */
 .pilot-button:disabled,
-.pilot-button:disabled:hover {
+.pilot-button:disabled:hover,
+.pilot-button[aria-disabled="true"],
+.pilot-button[aria-disabled="true"]:hover {
   border-color: var(--pilot-color-border);
   background: var(--pilot-color-disabled);
   color: var(--pilot-color-disabled-text);
@@ -1502,6 +1505,20 @@ body[data-pair-dragging="true"] [data-drop-blocked="true"] * {
 
 .pilot-col-multi-diffs {
   width: 56px;
+}
+
+/* 組の手での選び直し（REQ-269）: 一覧の下のボタンの並びと、手で組にした組の小さな印（状態の文の後ろ）。色は変数なのでダークモードでも切り替わる */
+.pilot-multi-pairing {
+  margin-top: var(--pilot-space-2);
+}
+
+.pilot-manual-mark {
+  padding: 0 var(--pilot-space-1);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: 8px;
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+  white-space: nowrap;
 }
 
 /* 未解釈: 操作 60・行 460・親 380 */

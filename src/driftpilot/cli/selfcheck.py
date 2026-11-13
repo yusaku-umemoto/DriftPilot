@@ -329,6 +329,13 @@ def _check_gui_web(installed: bool) -> Check:
     """pywebview の画面の部品(REQ-103 §7)。窓は開かない。gui extra で入っているかを決める。"""
     if not installed:
         return Check(SELFCHECK_GUI_WEB, True, selfcheck_not_installed("gui"), installed=False)
+    # Windows の exe で同梱のファイルが欠けていれば、取り込みの失敗ではなくファイルの抜けとして出す(ADR-0192 決定3。
+    # Windows の exe でなければ空の一覧で、結果は今のまま)。webview はこのモジュールを読まない形のまま
+    from driftpilot.gui_web import bundled_files
+
+    missing = bundled_files.missing_bundled_files()
+    if missing:
+        raise _Failed(selfcheck_unreadable(bundled_files.windows_name(missing[0]), "FileNotFoundError"))
     # import は文字ではなく文で書く(PyInstaller がコマンド版に gui_web と webview を入れるように)
     module = "driftpilot.gui_web"
     try:

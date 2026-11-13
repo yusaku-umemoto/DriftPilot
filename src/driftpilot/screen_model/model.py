@@ -8,14 +8,21 @@
 import copy
 import json
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 import driftpilot.inline_marks as inline_marks
-from driftpilot.batch_io import multi_filename, pair_record, write_records
+from driftpilot.batch_io import (
+    DeviceSplitWritten,
+    find_devices,
+    multi_filename,
+    pair_record,
+    write_device_split,
+    write_records,
+)
 from driftpilot.core import (
     AUTO_PLATFORM,
     CONFIG_PLATFORMS,
@@ -37,18 +44,24 @@ from driftpilot.core import (
     SideSelection,
     Unpaired,
     analyze_all,
+    analyze_compared,
     check_raw_options,
     compare_all,
     multi_overall_status,
     options_to_plain,
+    pair_by_hand,
+    partner_candidates,
     run_compare,
     wants_all,
+    whole_candidates,
 )
+from driftpilot.core import unpair as unpair_pair
 # 全体の答えを組に配る部品は core に置いた(一括比較の保存からも使う。REQ-240 §4)。今までどおりここからも読める
 from driftpilot.core import IN_WHOLE, whole_holder, whole_pair_results  # noqa: F401
 # ApprovedPromptClient / PromptNotApproved は一括比較と共有するため llm_analyzer に移した(ここからも読める。REQ-27)
 from driftpilot.llm_analyzer import (
     ApprovedPromptClient,
+    InstructionEdit,
     LLMClient,
     LlmAnalysis,
     LlmRequest,
@@ -63,6 +76,10 @@ from driftpilot.llm_settings import build_request as build_llm_request
 from driftpilot.messages import (
     SMODEL_TEXTS,
     AUTO_PLATFORM_LABEL,
+    DEVICE_SPLIT_BUSY,
+    DEVICE_SPLIT_NO_DEVICE,
+    DEVICE_SPLIT_SAME_LOG,
+    device_notice_text,
     COMPARE_KIND_TROUBLE,
     COMPARE_PLATFORM_TROUBLE,
     COMPARE_TAB_OFF_MODE_RAW,
@@ -70,11 +87,13 @@ from driftpilot.messages import (
     COMPARE_TAB_RAW,
     COMPARE_TAB_STRUCTURED,
     COMPARE_TAB_UNPARSED,
+    COMPARE_PARTNER_TITLE,
     EXPORT_CHOICE_CANCEL,
     EXPORT_CHOICE_DIFFS,
     EXPORT_CHOICE_HTML,
     EXPORT_CHOICE_PAIRS,
     EXPORT_TITLE_COMPARE,
+    MULTI_ERROR_OUTPUT,
     MULTI_SINGLE,
     MULTI_SINGLE_NOTE,
     MULTI_UNPAIRED_NOT_IN_FILE,
@@ -118,7 +137,10 @@ from driftpilot.messages import (
     STATUS_LABEL,
     STATUS_ORDER_ONLY,
     auto_platform_text,
+    compare_pair_progress,
+    compare_partner_prompt,
     compare_warning_line,
+    error_output_note,
     llm_screen_lines,
     llm_section_lines,
     llm_column,
@@ -129,6 +151,8 @@ from driftpilot.messages import (
     notice_line,
     open_result_too_large,
     opened_band,
+    partner_state_paired,
+    partner_state_paired_error,
     platform_label,
     raw_defaults_unreadable,
     raw_move_mark,
@@ -168,6 +192,7 @@ from driftpilot.report_output import Report, ReportPair, render_diffs_csv, rende
 from driftpilot.segmentation.input_forms import InputDecodeError, InputNote, normalize_text, read_config_input
 from driftpilot.storage import (
     JOB_KEY,
+    PAIRED_BY_HAND_KEY,
     StorageError,
     StorageFormatError,
     StoredRecord,
@@ -209,8 +234,22 @@ CANCELLED = SM_CANCELLED
 STALE_RESULT = SM_STALE_RESULT
 
 
-def stage_label(stage: str) -> str:
-    """工程名の表示。core に工程が増えても落ちない(未知の工程名はそのまま出す)。"""
+@dataclass(frozen=True)
+class PairProgress:
+    """まとめて比べているときの進み具合(REQ-264 §3)。index は何組目か(1始まり)、total は比べる組の数、command はコマンドの文(不明は None)。"""
+
+    index: int
+    total: int
+    command: str | None
+
+
+ProgressSink = Callable[[str | PairProgress], None]
+
+
+def stage_label(stage: str | PairProgress) -> str:
+    """工程名の表示。core に工程が増えても落ちない(未知の工程名はそのまま出す)。まとめての比較の進み具合(PairProgress)は組の文にする。"""
+    if isinstance(stage, PairProgress):
+        return compare_pair_progress(stage.index, stage.total, stage.command)
     return STAGE_LABEL.get(stage, stage)
 
 
@@ -1386,11 +1425,17 @@ def preview_view(llm: LlmAnalysis) -> PreviewView:
     )
 
 
-def approve(plan: LlmPlan, preview: LlmAnalysis) -> LlmRequest:
-    """プレビューで「送信する」を押したときの要求。承認した内容(preview.payload)以外は送らない。"""
+def approve(plan: LlmPlan, preview: LlmAnalysis, edit: InstructionEdit | None = None) -> LlmRequest:
+    """プレビューで「送信する」を押したときの要求。承認した内容(preview.payload)以外は送らない。
+
+    edit(送る前の確認で直した指示。REQ-266)があれば、承認する文は直した後の文(edit.text)で、core が組み立て直した差分と
+    直した指示でつないだ文と1字でも違えば送らない。edit が無ければ今と同じ。
+    """
     if plan.send is None or plan.send.client is None or preview.payload is None:
         raise ValueError(SMODEL_TEXTS["no_plan_or_preview"])
-    return replace(plan.send, client=ApprovedPromptClient(plan.send.client, preview.payload))
+    if edit is None:
+        return replace(plan.send, client=ApprovedPromptClient(plan.send.client, preview.payload))
+    return replace(plan.send, client=ApprovedPromptClient(plan.send.client, edit.text), instruction_edit=edit)
 
 
 # 前提のファイルを読めないときに送る要求に入れる、どの文も承認していない印(空の文は送る文にならない)
@@ -1542,7 +1587,7 @@ def compare_screen(
     request: CompareRequest,
     *,
     llm: LlmRequest | None = None,
-    on_progress: Callable[[str], None] | None = None,
+    on_progress: ProgressSink | None = None,
     should_cancel: Callable[[], bool] | None = None,
     runner: Callable[..., CompareOutcome] = run_compare,
     max_total_diffs: int = DEFAULT_MAX_TOTAL_DIFFS,
@@ -1566,7 +1611,7 @@ def auto_send_all(
     plan: LlmPlan,
     max_total_diffs: int,
     llm: LlmRequest | None = None,
-    on_progress: Callable[[str], None] | None = None,
+    on_progress: ProgressSink | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> MultiCompareOutcome:
     """自動送信(REQ-117)のまとめての比較。確認なしに、全部の組をまとめて1回で送る(ADR-0152 決定3)。
@@ -1585,7 +1630,7 @@ def send_approved(
     *,
     llm: LlmRequest | None,
     max_total_diffs: int = DEFAULT_MAX_TOTAL_DIFFS,
-    on_progress: Callable[[str], None] | None = None,
+    on_progress: ProgressSink | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> MultiCompareOutcome:
     """まとめて比べ、llm があれば全部の組をまとめて1回で解析する(core.analyze_all。ADR-0152 決定3)。
@@ -1594,16 +1639,52 @@ def send_approved(
     1組の run_compare と同じく、工程の境目(解析の前と後)で中止の印を見る(解析の前なら送らない。答えの途中で中止したときは
     CompareCancelled になり、窓は前の結果と途中の答えを残す)。
     """
-    outcome = compare_all(request, should_cancel=should_cancel, on_progress=on_progress)
+    # 進み具合は組ごとに「何組目か・組の数・コマンド」で知らせる(REQ-264 §3)。組の中の工程の名前は流さない
+    # (何組目かの文が工程の名前で上書きされないように。組の境目の中止の確かめは compare_all が今のまま行う)
+    def on_pair(index: int, total: int, command: str | None) -> None:
+        if on_progress is not None:
+            on_progress(PairProgress(index, total, command))
+
+    outcome = compare_all(request, should_cancel=should_cancel, on_pair=on_pair)
+    if llm is None:
+        return outcome
+    return analyze_screen(
+        request, outcome=outcome, llm=llm, max_total_diffs=max_total_diffs, on_progress=on_progress, should_cancel=should_cancel
+    )
+
+
+def analyze_screen(
+    request: CompareRequest,
+    *,
+    outcome: CompareOutcome | MultiCompareOutcome,
+    llm: LlmRequest | None,
+    max_total_diffs: int = DEFAULT_MAX_TOTAL_DIFFS,
+    on_progress: ProgressSink | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    chosen: Collection[int] | None = None,
+) -> CompareOutcome | MultiCompareOutcome:
+    """比べ終わった結果から AI の解析の工程だけを行う(比較の窓の「AI で解析」。REQ-264 §2。CompareWorker の runner)。
+
+    chosen はまとめての結果で送る組の pairs の位置(REQ-265。None はすべて。1つのコマンドの結果では使わない)。
+
+    切り分け・組にすること・比較・安全網はやり直さない。まとめての結果は全部の組を1回で解析し(analyze_all。ADR-0152 決定3)、
+    1つのコマンドの結果は run_compare の最後の工程と同じ判断で解析する(analyze_compared)。工程の境目(解析の前と後)で
+    中止の印を見る(send_approved と同じ順)。llm が無ければ結果をそのまま返す。
+    """
     if llm is None:
         return outcome
     _enter("llm", on_progress, should_cancel)
-    analyzed = analyze_all(outcome, llm, max_total_diffs=max_total_diffs)
+    if isinstance(outcome, MultiCompareOutcome):
+        analyzed: CompareOutcome | MultiCompareOutcome = analyze_all(
+            outcome, llm, max_total_diffs=max_total_diffs, chosen=chosen
+        )
+    else:
+        analyzed = analyze_compared(request, outcome, llm)
     _enter("done", on_progress, should_cancel)
     return analyzed
 
 
-def _enter(stage: str, on_progress: Callable[[str], None] | None, should_cancel: Callable[[], bool] | None) -> None:
+def _enter(stage: str, on_progress: ProgressSink | None, should_cancel: Callable[[], bool] | None) -> None:
     """工程の入口(core の run_compare と同じ順。中止の印を見てから進捗を知らせる)。"""
     if should_cancel is not None and should_cancel():
         raise CompareCancelled(stage)
@@ -1629,7 +1710,9 @@ def segment_views(outcome: MultiCompareOutcome, request: CompareRequest) -> dict
             }
     views: dict[Side, SideView] = {}
     for side in SIDES:
-        segments = sorted((u.segment for u in outcome.unpaired if u.side == side), key=lambda s: s.number)
+        # 相手なしの区間とエラーの出力の区間(組にしなかった区間)を合わせて番号の順にする
+        left = (*outcome.unpaired, *outcome.error_outputs)
+        segments = sorted((u.segment for u in left if u.side == side), key=lambda s: s.number)
         name = request.before.name if side == "before" else request.after.name
         views[side] = SideView(name, len(segments), _segment_choices(segments), None, False)
     return views
@@ -1643,6 +1726,8 @@ class MultiRow:
     status: str
     diffs: str
     unpaired: bool
+    # 比較の窓で手で組にした組か(REQ-269。状態の近くに「手で組にした」の印を出す)
+    manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -1657,6 +1742,8 @@ class MultiEntry:
     # 相手なしの行のコマンドと「変更前 区間 3」(「全部」のタブの列に使う。ADR-0164 決定4)。ほかの行は None
     command: str | None = None
     place: str | None = None
+    # エラーの出力の区間の行(自動の組から外した。比べていない。全体の文の分母に数えない。「全部」のタブに出さない。ADR-0195 決定1)
+    error: bool = False
 
 
 @dataclass(frozen=True)
@@ -1682,8 +1769,8 @@ def diff_count(outcome: CompareOutcome) -> str:
     return NO_COUNT
 
 
-def outcome_entry(name: str, outcome: CompareOutcome) -> MultiEntry:
-    return MultiEntry(MultiRow(name, STATUS_LABEL[outcome.status], diff_count(outcome), False), outcome)
+def outcome_entry(name: str, outcome: CompareOutcome, manual: bool = False) -> MultiEntry:
+    return MultiEntry(MultiRow(name, STATUS_LABEL[outcome.status], diff_count(outcome), False, manual), outcome)
 
 
 def unpaired_entry(unpaired: Unpaired) -> MultiEntry:
@@ -1707,6 +1794,19 @@ def single_entry(unpaired: Unpaired) -> MultiEntry:
     return MultiEntry(row, None, MULTI_SINGLE_NOTE, single=True)
 
 
+def error_entry(unpaired: Unpaired, single_log: bool) -> MultiEntry:
+    """エラーの出力の区間の行(ADR-0195 決定1)。名前は相手なしの行(1つのログの中で組にしたときは「1回だけ」の行)と同じ決まり。"""
+    segment = unpaired.segment
+    command = segment.command if segment.command is not None else UNKNOWN_COMMAND
+    name = (
+        single_row_name(segment.number, command)
+        if single_log
+        else unpaired_row_name(unpaired.side, segment.number, command)
+    )
+    row = MultiRow(name, MULTI_ERROR_OUTPUT, NO_COUNT, True)
+    return MultiEntry(row, None, error_output_note(command, segment.line_count), error=True)
+
+
 def first_row(entries: Sequence[MultiEntry]) -> int:
     return next((k for k, e in enumerate(entries) if e.outcome is not None and e.outcome.status == "difference"), 0)
 
@@ -1716,7 +1816,7 @@ def overall_text(status: MultiStatus, entries: Sequence[MultiEntry]) -> str:
 
     1回だけのコマンドの行(1つのログの中で組にしたとき)は分母にも数にも入れない(全体の状態に数えないため。ADR-0152 決定2)。
     """
-    counted = [e for e in entries if not e.single]
+    counted = [e for e in entries if not e.single and not e.error]
     if status == "difference":
         count = sum(1 for e in counted if e.outcome is None or e.outcome.status == "difference")
     else:
@@ -1739,9 +1839,130 @@ def multi_view(outcome: MultiCompareOutcome) -> MultiView:
         name = p.command if p.command is not None else UNKNOWN_COMMAND
         if outcome.single_log:
             name = single_pair_name(name, p.before_number, p.after_number)
-        entries.append(outcome_entry(name, p.outcome))
-    entries += [single_entry(u) if outcome.single_log else unpaired_entry(u) for u in outcome.unpaired]
+        entries.append(outcome_entry(name, p.outcome, p.manual))
+    for u, is_error in multi_rest(outcome):
+        if is_error:
+            entries.append(error_entry(u, outcome.single_log))
+        else:
+            entries.append(single_entry(u) if outcome.single_log else unpaired_entry(u))
     return _multi(entries, outcome.status, outcome.llm)
+
+
+def multi_rest(outcome: MultiCompareOutcome) -> list[tuple[Unpaired, bool]]:
+    """一覧の組でない行の並び(組の後ろ)。(区間, エラーの出力か)。
+
+    組にならなかった区間(相手なし・1回だけ)とエラーの出力の区間を、(変更前→変更後, 区間の番号)の順に並べる(ADR-0195 決定1)。
+    一覧の作り方(multi_view)と、行の番号から区間を引く処理(row_target)が同じ順を使う。
+    """
+    rest = [(u, False) for u in outcome.unpaired] + [(u, True) for u in outcome.error_outputs]
+    rest.sort(key=lambda item: (item[0].side != "before", item[0].segment.number))
+    return rest
+
+
+def row_target(outcome: MultiCompareOutcome, row: int) -> tuple[Any, ...] | None:
+    """一覧の行の番号から対象を返す(REQ-269)。
+
+    組の行なら ("pair", 組の位置)。組でない行なら ("segment", 側, 区間の番号, エラーの出力か)。範囲の外は None。
+    """
+    if 0 <= row < len(outcome.pairs):
+        return ("pair", row)
+    rest = multi_rest(outcome)
+    position = row - len(outcome.pairs)
+    if not 0 <= position < len(rest):
+        return None
+    unpaired, is_error = rest[position]
+    return ("segment", unpaired.side, unpaired.segment.number, is_error)
+
+
+@dataclass(frozen=True)
+class PartnerChoice:
+    """相手を選ぶ窓の候補1つ。label は区間の表示(「3 : show running-config」)、state は今の状態の文。"""
+
+    number: int
+    label: str
+    state: str
+
+
+@dataclass(frozen=True)
+class PartnerList:
+    """相手を選ぶ窓の中身(題・案内の文・候補の並び。候補は相手の側の区間のすべて)。"""
+
+    title: str
+    prompt: str
+    choices: tuple[PartnerChoice, ...]
+
+
+def partner_choices(request: CompareRequest, outcome: MultiCompareOutcome, row: int) -> PartnerList | None:
+    """一覧の row 行が相手なしかエラーの出力のとき、もう片方の側の区間のすべてを候補にした窓の中身を返す。ほかの行は None。"""
+    target = row_target(outcome, row)
+    if target is None or target[0] != "segment":
+        return None
+    _kind, side, number, _is_error = target
+    other: Side = "after" if side == "before" else "before"
+    rest = {(u.side, u.segment.number): u for u, _e in multi_rest(outcome)}
+    unpaired = rest[(side, number)]
+    command = unpaired.segment.command if unpaired.segment.command is not None else UNKNOWN_COMMAND
+    name = unpaired_row_name(side, number, command)
+    choices = []
+    for candidate in partner_candidates(request, outcome, other):
+        segment = candidate.segment
+        if candidate.state == "unpaired":
+            state = unpaired_status(other)
+        elif candidate.state == "error":
+            state = MULTI_ERROR_OUTPUT
+        else:
+            assert candidate.leftover is not None
+            left = candidate.leftover.segment
+            left_command = left.command if left.command is not None else UNKNOWN_COMMAND
+            place = unpaired_place(candidate.leftover.side, left.number)
+            text = partner_state_paired_error if candidate.leftover_error else partner_state_paired
+            state = text(place, left_command)
+        choices.append(PartnerChoice(segment.number, segment_label(segment), state))
+    return PartnerList(COMPARE_PARTNER_TITLE, compare_partner_prompt(other, name), tuple(choices))
+
+
+def carry_send_checks(
+    old: MultiCompareOutcome,
+    old_checked: Collection[int],
+    new: MultiCompareOutcome,
+    new_key: tuple[int, int] | None,
+) -> frozenset[int]:
+    """組を選び直した後の「AI に送る」のチェックの位置(REQ-265・REQ-269 §3)。
+
+    組は (変更前の番号, 変更後の番号) で見分ける。新しい結果の送れる組のうち、前にチェックしていた組と同じ組はチェックしたままにし、
+    新しく作った組(new_key)は送れる組ならチェックする。外した組は新しい結果に無いので自然に消える。
+    """
+    before_checked = {
+        (old.pairs[k].before_number, old.pairs[k].after_number) for k in old_checked if 0 <= k < len(old.pairs)
+    }
+    keep = before_checked | ({new_key} if new_key is not None else set())
+    return frozenset(
+        k for k in whole_candidates(new) if (new.pairs[k].before_number, new.pairs[k].after_number) in keep
+    )
+
+
+def pair_by_hand_screen(
+    request: CompareRequest,
+    *,
+    outcome: MultiCompareOutcome,
+    before_number: int,
+    after_number: int,
+    llm: LlmRequest | None = None,
+    on_progress: ProgressSink | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> MultiCompareOutcome:
+    """手で選んだ2つの区間を組にして、その1組だけを比べ直す(比較の窓の「相手を選ぶ…」。CompareWorker の runner。REQ-269)。
+
+    llm は CompareWorker が渡す値で、使わない(AI は呼ばない)。進み具合は core の工程の名前をそのまま流す。
+    """
+    return pair_by_hand(
+        request, outcome, before_number, after_number, on_progress=on_progress, should_cancel=should_cancel
+    )
+
+
+def unpair_screen(request: CompareRequest, outcome: MultiCompareOutcome, position: int) -> MultiCompareOutcome:
+    """組を外して、2つの区間を戻す(比べない。REQ-269)。"""
+    return unpair_pair(request, outcome, position)
 
 
 def whole_answer_lines(llm: LlmAnalysis | None) -> tuple[list[str] | None, str | None]:
@@ -1817,7 +2038,7 @@ def all_rows(entries: Sequence[MultiEntry]) -> list[AllRow]:
     """
     rows: list[AllRow] = []
     for entry in entries:
-        if entry.single:
+        if entry.single or entry.error:
             continue
         name = entry.row.name
         outcome = entry.outcome
@@ -1941,7 +2162,11 @@ def opened_multi(records: Sequence[StoredRecord]) -> tuple[MultiView, str]:
     帯は1行目の保存日時と入力の名前に、相手なしの区間は保存に入っていないことを足す(一括比較で保存した .jsonl も同じ。
     相手なしがあったかどうかはファイルから分からないので、いつも出す)。
     """
-    entries = [outcome_entry(record_name(r), r.outcome) for r in records]
+    # 手で組にした行(job.paired_by_hand が true。REQ-269 §4)には印を付ける。無い保存・一括比較の保存は印なし
+    entries = [
+        outcome_entry(record_name(r), r.outcome, (r.meta.get(JOB_KEY) or {}).get(PAIRED_BY_HAND_KEY) is True)
+        for r in records
+    ]
     inputs = records[0].meta["inputs"]
     band = opened_band(records[0].meta["saved_at"], inputs["before"]["name"], inputs["after"]["name"])
     return _multi(entries, multi_overall_status(records, []), opened_whole(records)), f"{band}\n{MULTI_UNPAIRED_NOT_IN_FILE}"
@@ -2243,3 +2468,49 @@ def export_bytes(report: Report, kind: str, saved_at: datetime) -> bytes:
     if kind == EXPORT_PAIRS:
         return render_pairs_csv(report)
     raise ValueError(SMODEL_TEXTS["export_kind"].format(kind=kind))
+
+
+# --- 複数の機器が入ったログを、機器ごとのファイルに分けて一括比較で開く(ADR-0194 / REQ-267) ---
+
+
+@dataclass(frozen=True)
+class DeviceNotice:
+    """比較の窓の、複数の機器の知らせ。比べたときの入力の文だけから作る(ファイルを読み直さない)。
+
+    before・after は、各側の機器の名前(ログに最初に出た順)。同じ文のときは same。
+    """
+
+    before: tuple[str, ...]
+    after: tuple[str, ...]
+    text: str
+    same: bool
+
+    @property
+    def missing(self) -> bool:
+        """機器が 1 つも見つからない側があるか。"""
+        return not self.before or not self.after
+
+
+def device_notice(inp: ScreenInput) -> DeviceNotice | None:
+    """どちらかの側が複数の機器のログなら知らせ。どちらも 1 台以下なら None(何も出さない)。"""
+    before = find_devices(inp.before.text)
+    after = find_devices(inp.after.text)
+    if len(before) < 2 and len(after) < 2:
+        return None
+    return DeviceNotice(before, after, device_notice_text(before, after), inp.before.text == inp.after.text)
+
+
+def device_split_reason(notice: DeviceNotice, busy: bool) -> str | None:
+    """ボタンを押せない理由の文。押せるなら None。理由は、機器が見つからない・同じ文・動いている間の順に 1 つ返す。"""
+    if notice.missing:
+        return DEVICE_SPLIT_NO_DEVICE
+    if notice.same:
+        return DEVICE_SPLIT_SAME_LOG
+    if busy:
+        return DEVICE_SPLIT_BUSY
+    return None
+
+
+def write_device_files(before_text: str, after_text: str, parent: Path, now: datetime | None = None) -> DeviceSplitWritten:
+    """比べたときの 2 つの文を機器ごとに分けて、parent の下の新しいフォルダーに書く。書けなければ DeviceSplitError。"""
+    return write_device_split(before_text, after_text, parent, now)

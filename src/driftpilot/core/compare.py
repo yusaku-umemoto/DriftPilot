@@ -315,18 +315,19 @@ def run_compare(
     if error is not None and hints:
         error = _with_hints(error, hints)
     enter("llm")
-    if llm is not None and kind == "config" and request.platform == "fujitsu_sir" and looks_not_sir(before, after):
-        # Si-R の読み方は FortiGate の場所を持たないので、場所の条件のある形が当たらない。送る文も作らない
-        # (analyze・build_payload を呼ばない。ADR-0161 の追記。REQ-222)。比較の結果は変えない
-        llm_result = LlmAnalysis(status="skipped", reason="platform_not_sir")
-    else:
-        if auto_platform is not None and auto_platform.conflict and llm is not None:
-            # 違う機種どうしの比較は送らない。送信前の確認にも進めない(ADR-0151 決定2)
-            llm = dataclasses.replace(llm, client=None, dry_run=False, unavailable="platform_conflict")
-        if error is not None and llm is not None and llm.skip_failed and llm.client is not None:
-            # 失敗した比較の結果は送らない(一括比較の送る段。送る内容は作り、理由を残す)
-            llm = dataclasses.replace(llm, client=None, unavailable="compare_failed")
-        llm_result = _llm_analysis(llm, rules, before, after, structured, raw, show)
+    llm_result = _llm_step(
+        llm,
+        request=request,
+        kind=kind,
+        error=error,
+        auto_platform=auto_platform,
+        rules=rules,
+        before=before,
+        after=after,
+        structured=structured,
+        raw=raw,
+        show=show,
+    )
     enter("done")
     return CompareOutcome(
         status="error" if error else ("difference" if has_diff else "no_difference"),
@@ -345,6 +346,64 @@ def run_compare(
         exclusions=exclusions,
         auto_platform=auto_platform,
     )
+
+
+def _llm_step(
+    llm: LlmRequest | None,
+    *,
+    request: CompareRequest,
+    kind: str,
+    error: CompareError | None,
+    auto_platform: AutoPlatform | None,
+    rules: list[NormalizationRule],
+    before: str,
+    after: str,
+    structured: CompareResult | None,
+    raw: RawCompareResult | None,
+    show: ShowCompareResult | None,
+) -> LlmAnalysis:
+    """比較の最後の工程(llm)。送らない場合の判断と _llm_analysis の呼び出し。run_compare と analyze_compared が共有する。"""
+    if llm is not None and kind == "config" and request.platform == "fujitsu_sir" and looks_not_sir(before, after):
+        # Si-R の読み方は FortiGate の場所を持たないので、場所の条件のある形が当たらない。送る文も作らない
+        # (analyze・build_payload を呼ばない。ADR-0161 の追記。REQ-222)。比較の結果は変えない
+        return LlmAnalysis(status="skipped", reason="platform_not_sir")
+    if auto_platform is not None and auto_platform.conflict and llm is not None:
+        # 違う機種どうしの比較は送らない。送信前の確認にも進めない(ADR-0151 決定2)
+        llm = dataclasses.replace(llm, client=None, dry_run=False, unavailable="platform_conflict")
+    if error is not None and llm is not None and llm.skip_failed and llm.client is not None:
+        # 失敗した比較の結果は送らない(一括比較の送る段。送る内容は作り、理由を残す)
+        llm = dataclasses.replace(llm, client=None, unavailable="compare_failed")
+    return _llm_analysis(llm, rules, before, after, structured, raw, show)
+
+
+def analyze_compared(request: CompareRequest, outcome: CompareOutcome, llm: LlmRequest | None) -> CompareOutcome:
+    """比べ終わった結果から、AI の解析の工程だけを行う(REQ-264。比較・切り分け・安全網はやり直さない)。
+
+    run_compare(request, llm=llm) の最後の工程(llm)と同じ判断・同じ送る文にする。入力は outcome に残っている値
+    (kind・error・auto_platform・structured・raw・show と、選んだ区間の本文)と effective_rules(request)。
+    llm 以外の結果は変えない。AI の工程まで進んでいない結果(kind が無い・区間を選べていない)は、今の run_compare と
+    同じく AI の解析が付かないので、そのまま返す。
+    """
+    segmentation = outcome.segmentation
+    if outcome.kind is None or segmentation is None:
+        return outcome
+    before, after = segmentation["before"].selected, segmentation["after"].selected
+    if before is None or after is None:
+        return outcome
+    llm_result = _llm_step(
+        llm,
+        request=request,
+        kind=outcome.kind,
+        error=outcome.error,
+        auto_platform=outcome.auto_platform,
+        rules=effective_rules(request),
+        before=before.text,
+        after=after.text,
+        structured=outcome.structured,
+        raw=outcome.raw,
+        show=outcome.show,
+    )
+    return dataclasses.replace(outcome, llm=llm_result)
 
 
 def choose_platform(before: str, after: str) -> AutoPlatform:

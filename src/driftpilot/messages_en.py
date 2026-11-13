@@ -91,6 +91,15 @@ def gui_web_start_failed(error_type: str) -> str:
     return f"Cannot use the display component: {error_type}"
 
 
+def gui_web_files_missing(first: str, rest: int) -> str:
+    """Text for when bundled files are missing in a Windows exe (ADR-0192). first is the first missing file; rest is how many more (0 adds no "and N more")."""
+    more = f" and {rest} more" if rest else ""
+    return (
+        f"Some DriftPilot files are missing ({first}{more}). The zip was probably not fully extracted. "
+        "Delete the DriftPilot folder and extract the zip again with PowerShell (Expand-Archive) or 7-Zip."
+    )
+
+
 def gui_web_unknown_text() -> str:
     """Text for when the window asks for a text key that does not exist here (js_api messages)."""
     return "The text for this window could not be found."
@@ -2090,6 +2099,8 @@ COMPARE_BUTTON_SWAP = "Swap"  # pywebview compare window only (not in the wx win
 # pywebview compare window only (the wx window keeps a checkbox)
 COMPARE_BUTTON_SEND_LLM = "Send to AI"
 COMPARE_AUTO_SENDING = "Sending to AI"
+# Shown in the AI pane while the pre-send confirmation is being built (REQ-264. The comparison is not redone, so no comparison stage name is shown)
+COMPARE_AI_PREPARING = "Preparing what to send to AI"
 COMPARE_LLM_PANE = "AI analysis"
 # Titles of notices (wx MessageBox)
 COMPARE_READ_FAILED_TITLE = "Cannot read"
@@ -2107,6 +2118,12 @@ LLM_PREVIEW_TITLE = "Confirm what will be sent to AI"
 LLM_PREVIEW_PAYLOAD = "Content to send (after masking; only the fixed answer-format rules are added after this):"
 LLM_PREVIEW_SEND = "Send"
 LLM_PREVIEW_DONT_SEND = "Don't send"
+# The confirmation before sending lets the user edit the instructions (REQ-266 / ADR-0193 decision 4). pywebview compare window and AI window only
+LLM_PREVIEW_INSTRUCTIONS = "Instructions (editable)"
+LLM_PREVIEW_DIFF = "Differences (masked, read only)"
+LLM_PREVIEW_FULL = "Full text after the change (masked, read only)"
+LLM_PREVIEW_RESET = "Reset"
+LLM_PREVIEW_EDIT_NOTE = "You can edit the instructions for this send only. The differences cannot be edited."
 DIALOG_CANCEL = "Cancel"  # cancel button of the pywebview dialogs (wx uses the OS standard button)
 
 
@@ -2177,17 +2194,41 @@ COMPARE_MULTI_TITLE = "Command pairs"
 COMPARE_MULTI_COL_COMMAND = "Command"
 COMPARE_MULTI_COL_STATUS = "Status"
 COMPARE_MULTI_COL_DIFFS = "Differences"
+COMPARE_MULTI_COL_SEND = "Send to AI"
+COMPARE_MULTI_SEND_ALL = "Select or clear all"
 # Status of a list row for a command section present in only one log (ADR-0164 decision 3). Names the missing side
 MULTI_NO_AFTER = "No After"  # section only in Before
 MULTI_NO_BEFORE = "No Before"  # section only in After
 # Status of a row for a command section that appears only once when paired within one log (ADR-0152 decision 2), and the note shown on selection
 MULTI_SINGLE = "Once only"
 MULTI_SINGLE_NOTE = "This command appears only once in the log, so nothing was compared."
+# Status of a row for a section of error output from a mistyped command (ADR-0195 decision 1; left out of automatic pairing, not compared)
+MULTI_ERROR_OUTPUT = "Error output (not compared)"
 # The "All" tab (ADR-0152 decision 7). Shown first among the result tabs only when compared in batch in the compare window
-COMPARE_TAB_ALL = "All"
+COMPARE_TAB_ALL = "All command results"
 # Text added to the band of an opened .jsonl (unpaired sections are not saved; the file cannot tell whether any existed, so this is always shown)
 MULTI_UNPAIRED_NOT_IN_FILE = "Unpaired sections are not included in the save"
 COMPARE_MULTI_NOTHING_TO_SAVE = "There are no sections with a counterpart, so there are no pairs to save. Nothing was saved."
+# Choosing pairs by hand (REQ-269 / ADR-0195 decision 2). Buttons under the list, the mark on a hand-made pair, and the partner dialog
+COMPARE_MULTI_CHOOSE_PARTNER = "Choose partner…"
+COMPARE_MULTI_UNPAIR = "Unpair"
+MULTI_PAIRED_BY_HAND = "Paired by hand"
+COMPARE_PARTNER_TITLE = "Choose partner"
+
+
+def compare_partner_prompt(other_side: str, row_name: str) -> str:
+    """Prompt of the partner dialog. other_side is the side to choose from ("before"/"after"); row_name is the selected row's name."""
+    return f"Choose a partner for {row_name} from the {_SIDE_LABEL[other_side]} sections"
+
+
+def partner_state_paired(place: str, command: str) -> str:
+    """State text of a candidate that is in another pair now. Choosing it leaves the rest of that pair without a partner."""
+    return f"Paired (choosing it leaves {place}: {command} without a partner)"
+
+
+def partner_state_paired_error(place: str, command: str) -> str:
+    """Same, when the remaining section is error output: it returns to error output instead of being left without a partner."""
+    return f"Paired (choosing it returns {place}: {command} to error output)"
 
 
 def multi_overall(status: str, total: int, count: int) -> str:
@@ -2241,6 +2282,14 @@ def unpaired_segment_note(side: str, number: int, command: str, line_count: int)
     return (
         f"{_SIDE_LABEL[side]} section {number} ({command}, {line_count} {_plural(line_count, 'line', 'lines')}) "
         f"was not compared because {other} has no section with the same command."
+    )
+
+
+def error_output_note(command: str, line_count: int) -> str:
+    """Note shown when an error-output row is selected in the list (the table is empty; ADR-0195 decision 1)."""
+    return (
+        f"This section ({command}, {line_count} {_plural(line_count, 'line', 'lines')}) "
+        "is error output from a mistyped command, so it was not compared"
     )
 
 
@@ -2348,6 +2397,15 @@ COMPARE_AI_INPUT_HINT = "Enter to send, Shift+Enter for a new line"
 COMPARE_AI_PROFILE = "AI profile"
 COMPARE_AI_PROMPT = "Prompt"
 COMPARE_AI_ANALYZE = "Analyze with AI"
+# Choose which command pairs to send to AI in a multi-command compare (REQ-265, ADR-0193 decision 3)
+COMPARE_AI_NO_PAIRS = "Select at least one command pair to send to AI."
+
+
+def compare_send_pairs(on: int, total: int) -> str:
+    """Shown in the AI pane as "Pairs to send: 3 / 12". total is the number of pairs that can be sent."""
+    return f"Pairs to send: {on} / {total}"
+
+
 # Name and face title of the answer bubble when the character is on, plus the button and empty-area hint (ADR-0181 decisions 1, 2).
 # Shown in the window only. Not included in saves, HTML, CSV, copies or sent text (decision 3)
 CHARACTER_NAME = "Mirarin"
@@ -2391,6 +2449,11 @@ def COMPARE_FIRST_REQUEST_PROMPT(name: str) -> str:  # noqa: N802 (name as in RE
 def COMPARE_FIRST_REQUEST_AUTO(name: str) -> str:  # noqa: N802 (name as in REQ-242 section 2)
     """Text of the first request bubble for auto-send (decision 1). name is the prompt name used."""
     return f'Sent automatically (prompt "{name}")'
+
+
+def COMPARE_FIRST_REQUEST_EDITED(text: str) -> str:  # noqa: N802 (name as in REQ-266 section 4)
+    """Text of the first request bubble when sent with edited instructions (REQ-266 section 4). text is the unedited text, which this adds to."""
+    return f"{text} (instructions edited)"
 
 
 # Spoken name of the first request bubble (same "Question" as the follow-up bubble)
@@ -2516,6 +2579,11 @@ GUI_WEB_TEXTS.update(
         "compare.multi.col.command": COMPARE_MULTI_COL_COMMAND,
         "compare.multi.col.status": COMPARE_MULTI_COL_STATUS,
         "compare.multi.col.diffs": COMPARE_MULTI_COL_DIFFS,
+        "compare.multi.col.send": COMPARE_MULTI_COL_SEND,
+        "compare.multi.send_all": COMPARE_MULTI_SEND_ALL,
+        "compare.multi.choose_partner": COMPARE_MULTI_CHOOSE_PARTNER,
+        "compare.multi.unpair": COMPARE_MULTI_UNPAIR,
+        "compare.multi.paired_by_hand": MULTI_PAIRED_BY_HAND,
         "compare.paste.prompt": PASTE_PROMPT,
         "compare.dialog.ok": DIALOG_OK,
         "compare.dialog.cancel": DIALOG_CANCEL,
@@ -3783,6 +3851,11 @@ def sm_preview_summary(sent: int, total: int) -> str:
     return f"Sending {sent} of {total} {_plural(total, 'difference', 'differences')}"
 
 
+def compare_pair_progress(index: int, total: int, command: str | None) -> str:
+    """Progress text while comparing all commands (REQ-264 section 3), e.g. "Comparing (12 / 40): show ip route". An unknown command shows SM_UNKNOWN_COMMAND."""
+    return f"Comparing ({index} / {total}): {command if command else SM_UNKNOWN_COMMAND}"
+
+
 # --- Common prefixes of the commands (REQ-258) ---
 CLI_ERROR_PREFIX = "Error: "
 CLI_WARNING_PREFIX = "Warning: "
@@ -4036,6 +4109,7 @@ CLI_RENDER_NONE = "none"
 CLI_RENDER_NO_PROMPT = "none (not split)"
 CLI_RENDER_UNKNOWN_COMMAND = "(unknown command)"
 CLI_RENDER_UNPAIRED_HEAD = "=== Unpaired ==="
+CLI_RENDER_ERROR_OUTPUT_HEAD = "=== Error output (not compared) ==="
 
 
 def cli_render_unparsed(before: int, after: int) -> str:
@@ -4376,3 +4450,63 @@ SMODEL_TEXTS = {
     "no_plan_or_preview": "There is no plan and preview that can be sent",
     "export_kind": "Wrong export form: {kind!r}",
 }
+
+
+# --- Split a log that contains several devices into one file per device and open it in Batch compare (ADR-0194 / REQ-267) ---
+DEVICE_SPLIT_BUTTON = "Split by device and open in Batch compare…"
+DEVICE_NAMES_LIMIT = 5  # at most this many device names per side in the notice (the rest is "and N more")
+DEVICE_NONE = "none"
+DEVICE_SPLIT_NO_DEVICE = "Cannot split: no device (prompt hostname) was found in the Before log or the After log"
+DEVICE_SPLIT_SAME_LOG = "Cannot split: Before and After are the same text (pairing inside one log)"
+DEVICE_SPLIT_BUSY = "Cannot split while comparing, sending, or while a batch comparison is running"
+DEVICE_SPLIT_CONFIRM_TITLE = "Split by device and open in Batch compare"
+DEVICE_SPLIT_CONFIRM_YES = "Choose a folder…"
+
+
+def _device_names(names: Sequence[str]) -> str:
+    """Device names of one side in the notice. Shows up to DEVICE_NAMES_LIMIT names and "and N more" for the rest."""
+    if not names:
+        return DEVICE_NONE
+    shown = ", ".join(names[:DEVICE_NAMES_LIMIT])
+    rest = len(names) - DEVICE_NAMES_LIMIT
+    return f"{shown}, and {rest} more" if rest > 0 else shown
+
+
+def device_notice_text(before: Sequence[str], after: Sequence[str]) -> str:
+    """Notice of the compare window that the log has several devices. A side without devices shows "none"."""
+    return f"This log contains more than one device (Before: {_device_names(before)} / After: {_device_names(after)})."
+
+
+def device_split_confirm_body() -> str:
+    """Body of the dialog before writing (with the note to treat the files like the original config)."""
+    return (
+        f"The files split by device: {save_caution()} "
+        "Choose the folder to write to. A new folder is created under it (the original files are not changed)."
+    )
+
+
+def device_split_done(folder: Path, before_count: int, after_count: int) -> str:
+    """Text under the window when writing finished."""
+    return (
+        f"Split by device: {folder} (Before: {before_count} {_plural(before_count, 'device', 'devices')}"
+        f" / After: {after_count} {_plural(after_count, 'device', 'devices')})"
+    )
+
+
+def device_split_failed(reason: str, folder: Path | None) -> str:
+    """When the files could not be written. Says that what was written so far was left (not deleted)."""
+    base = f"Could not write the files for each device: {reason}"
+    if folder is None:
+        return base
+    return f"{base}. What was written so far is left in {folder} (nothing was deleted)"
+
+
+def device_split_not_opened(folder: Path) -> str:
+    """When the files were written but could not be put into the Batch compare window."""
+    return (
+        f"Wrote the files for each device to {folder}. "
+        "The folders were not put into Batch compare because its pairs are being edited or a comparison is running"
+    )
+
+
+GUI_WEB_TEXTS.update({"compare.split_devices": DEVICE_SPLIT_BUTTON})

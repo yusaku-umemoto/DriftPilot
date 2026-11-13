@@ -14,7 +14,9 @@ JavaScript(static/js/compare.js)は返した JSON を描くことと、操作を
 - 「AI に送る」(send_llm。ADR-0080 決定1): 比較の後に押す。チェックボックスは無く、form の llm は使わない
   (画面の入力 ScreenInput の llm はいつも偽なので、AI を送った後も比較したときの入力と同じで、保存できる)。
   押せるのは、最後の結果があり、入力が比較したときと同じで、送る差分があり(payload.source_of)、比較中でないとき(can_send_llm)。
-  押すと最後の結果の入力で比べ直し、1回目は送らない(dry_run)
+  押すと、持っている最後の結果から AI の解析の工程だけを行い(比較はやり直さない。REQ-264。model.analyze_screen)、
+  1回目は送らない(dry_run)。承認した2回目も同じ結果から行う。終わっても結果の表示(組の一覧・表・選んでいる組)は作り直さず、
+  AI の答えだけを出し直す(result の rows_revision は進めず、result_revision だけ進める)
 - 送信前のプレビュー(ADR-0018 決定6): 待っているプレビューがあり、入力が比較したときと同じで、
   「送信する」と答えたときだけ、承認した内容で2回目を始める(approve。送る直前の照合は core)。1つのプレビューで送れるのは1回だけ
 - 自動送信([gui] auto_send_llm。ADR-0080 決定2): 「比較実行」・自動の比較が終わって結果を出した後、オンで can_send_llm なら、
@@ -66,6 +68,11 @@ JavaScript(static/js/compare.js)は返した JSON を描くことと、操作を
   結果は _multi(入力・要求・まとめた結果)に持ち、表示は _mview(一覧の行・全体の文)と選んでいる行 _pair。
   view の multi に一覧の行・選んでいる行・全体の文を入れる(行は短い)。result() は選んでいる組の分だけを渡す(相手なしの行は空の表と説明)。
   窓の下の左に全体の文、右に選んだ組の REQ-113 の内訳を出す。区間の選択欄には区間の一覧を入れ、選択は「自動」のまま
+- 組の手での選び直し(REQ-269 / ADR-0195 決定2): まとめて比べた結果(開いた保存の結果と、1つのログの中で組にしたときを除く)で、
+  一覧の下の「相手を選ぶ…」(相手なし・エラーの出力の行で。partner_choices で候補を読み、choose_partner で選んだ2つを組にして
+  その1組だけを比べ直す)と「組を外す」(組の行で。unpair。比べない)。押せるのは「AI に送る」のチェックと同じ場面(_pairing_editable)。
+  手で作った組は PairResult.manual で印を付け(保存の job.paired_by_hand)、組の並び・番号・全体の状態は作り直す。選び直すと前の AI の答えは消す。
+  「AI に送る」のチェックは carry_send_checks で引き継ぎ、新しい組は送れる組ならチェックする
 - まとめて比べたときの「AI に送る」(ADR-0152 決定3): 全部の組を1つの文にして1回で送る(core.analyze_all。答えは MultiCompareOutcome.llm)。
   1回目は送らずに比べ直し(dry_run)、送る文ができれば1組と同じ送信前の確認(_preview。全文を見せる)を1回だけ出す。
   全体の上限を超えた・送る内容が無いときは確認を出さずに一括比較と同じ文で知らせる。「送信する」で承認した文だけを送る(approve)。
@@ -145,7 +152,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from driftpilot.batch_io import JSONL_SUFFIX, ResultsWriteError, write_new_bytes
+from driftpilot.batch_io import JSONL_SUFFIX, DeviceSplitError, ResultsWriteError, write_new_bytes
 from driftpilot.core import (
     DEFAULT_MAX_TOTAL_DIFFS,
     CompareCancelled,
@@ -157,12 +164,21 @@ from driftpilot.core import (
     attach_whole_answer,
     llm_inputs,
     run_compare,
+    whole_candidates,
     whole_sections,
 )
 from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.gui_web.drop_order import dropped_paths, order_pair
 from driftpilot.gui_web.session import WebSession
-from driftpilot.llm_analyzer import THINKING_CUT_NOTE, ApiErrorText, LLMClient, ThinkingBuffer, for_display
+from driftpilot.llm_analyzer import (
+    THINKING_CUT_NOTE,
+    ApiErrorText,
+    InstructionEdit,
+    LLMClient,
+    PromptParts,
+    ThinkingBuffer,
+    for_display,
+)
 from driftpilot.llm_analyzer.client import LLMConnectionError, LLMResponseError, StreamStopped, ask_with_deltas
 from driftpilot.llm_analyzer.follow_up import (
     ANSWER,
@@ -182,6 +198,7 @@ from driftpilot.llm_analyzer.follow_up import (
 from driftpilot.llm_analyzer.masking import normalize_words
 from driftpilot.llm_analyzer.payload import AfterText, source_of
 from driftpilot.llm_analyzer.prompt import with_after_text
+from driftpilot.llm_analyzer.prompt_parts import DIFF, FULL, INSTRUCTION
 from driftpilot.llm_analyzer.types import LlmAnalysis
 from driftpilot.llm_settings import (
     WORKDIR_CONFIG,
@@ -195,10 +212,18 @@ from driftpilot.llm_settings import (
     load_settings,
 )
 from driftpilot.messages import (
+    DEVICE_SPLIT_CONFIRM_TITLE,
+    DIALOG_CANCEL,
+    DEVICE_SPLIT_CONFIRM_YES,
+    device_split_confirm_body,
+    device_split_done,
+    device_split_not_opened,
     BATCH_NOT_SENT_TITLE,
     BATCH_SAVED_TITLE,
     COMPARE_AI_ANALYZE,
     COMPARE_AI_ANALYZE_CHARACTER,
+    COMPARE_AI_NO_PAIRS,
+    COMPARE_AI_PREPARING,
     COMPARE_AI_PROFILE_FAILED_TITLE,
     COMPARE_API_ERROR_NOTE,
     COMPARE_API_ERROR_TITLE,
@@ -209,6 +234,7 @@ from driftpilot.messages import (
     COMPARE_DROP_TOO_MANY,
     COMPARE_FAILED_TITLE,
     COMPARE_FIRST_REQUEST_AUTO,
+    COMPARE_FIRST_REQUEST_EDITED,
     COMPARE_FIRST_REQUEST_NO_PROMPT,
     COMPARE_FIRST_REQUEST_PROMPT,
     COMPARE_FOLLOW_UP_ASK,
@@ -246,8 +272,13 @@ from driftpilot.messages import (
     FOLLOW_UP_ANSWER_LABEL,
     FOLLOW_UP_QUESTION_LABEL,
     LIMITS_SCREEN_HINT,
+    LLM_PREVIEW_DIFF,
     LLM_PREVIEW_DONT_SEND,
+    LLM_PREVIEW_EDIT_NOTE,
+    LLM_PREVIEW_FULL,
+    LLM_PREVIEW_INSTRUCTIONS,
     LLM_PREVIEW_PAYLOAD,
+    LLM_PREVIEW_RESET,
     LLM_PREVIEW_SEND,
     LLM_PREVIEW_TITLE,
     all_tab_title,
@@ -261,6 +292,7 @@ from driftpilot.messages import (
     compare_raw_folded,
     compare_save_note,
     compare_saved_no_profile,
+    compare_send_pairs,
     compare_warning_line,
     export_saved,
     export_settings_unreadable,
@@ -312,9 +344,11 @@ from driftpilot.screen_model.model import (
     answer_copy_text,
     approve,
     with_current_premise,
+    analyze_screen,
     auto_send_all,
     build_request,
     build_save_record,
+    carry_send_checks,
     category_counts,
     compare_report,
     compare_screen,
@@ -327,12 +361,15 @@ from driftpilot.screen_model.model import (
     input_summary,
     is_current,
     multi_report,
+    multi_rest,
     multi_view,
     opened_multi,
     opened_view,
     opened_answer_index,
+    pair_by_hand_screen,
     pair_records,
     pair_tab,
+    partner_choices as model_partner_choices,
     pasted,
     plan_llm,
     preview_view,
@@ -341,6 +378,7 @@ from driftpilot.screen_model.model import (
     read_saved_lines_raw,
     read_saved_raw,
     resaved_lines,
+    row_target,
     save_multi,
     save_result,
     save_state,
@@ -352,6 +390,7 @@ from driftpilot.screen_model.model import (
     structured_marks,
     suggested_filename,
     suggested_multi_filename,
+    unpair_screen,
     view_outcome,
     wants_preview,
     web_kind_platform,
@@ -363,6 +402,10 @@ from driftpilot.screen_model.model import (
 )
 from driftpilot.screen_model.batch_model import CompareHandoff, HandedAnswer
 from driftpilot.screen_model.model import (
+    DeviceNotice,
+    device_notice,
+    device_split_reason,
+    write_device_files,
     RAW_FOLD_CONTEXT,
     RAW_MARK_LABEL,
     RawForm,
@@ -401,6 +444,7 @@ _clock = time.monotonic
 TARGET_ANALYSIS, TARGET_FOLLOW_UP = "analysis", "follow_up"
 # 窓のファイルのダイアログの種類(webview.FileDialog の OPEN・SAVE の値。webview は読まない)と、選べるファイルの種類(wx と同じ)
 DIALOG_OPEN = 10
+DIALOG_FOLDER = 20
 DIALOG_SAVE = 30
 INPUT_FILE_TYPES = CAPI_INPUT_FILE_TYPES
 SAVE_FILE_TYPES = ("JSON (*.json)",)
@@ -429,6 +473,11 @@ DEFAULT_FORM: dict[str, Any] = {
 RUN_COMPARE, RUN_PREVIEW, RUN_APPROVED, RUN_AUTO_SEND = "compare", "preview", "approved", "auto_send"
 # 一括比較の答えを持ってきた「比較画面で開く」の後の比較(ADR-0170 決定2)。表示は RUN_COMPARE と同じ。AI は呼ばず、自動送信もしない
 RUN_HANDOFF = "handoff"
+# まとめて比べた結果で、手で組にした1組だけを比べ直す回(REQ-269)。表示は結果の面。AI は呼ばず、自動送信もしない
+RUN_PAIRING = "pairing"
+# 「AI で解析」の2つの回(送信前の確認の1回目・承認した2回目)。比較はやり直さず、持っている結果から AI の工程だけを行い、
+# 終わっても結果の表示(組の一覧・表・選んでいる組)は作り直さない(REQ-264 §2)
+AI_ONLY_RUNS = (RUN_PREVIEW, RUN_APPROVED)
 # view を描く窓(ADR-0160 決定6)。比較の窓と AI の窓。AI の知らせには印 NOTICE_PANE: PANE_AI を付ける(画面には出さない)
 PANE_COMPARE, PANE_AI = "compare", "ai"
 NOTICE_PANE = "pane"
@@ -664,6 +713,27 @@ class _ApiErrorSink:
             api._set_api_error(error, self.target)
 
 
+_PART_TITLES = {INSTRUCTION: LLM_PREVIEW_INSTRUCTIONS, DIFF: LLM_PREVIEW_DIFF, FULL: LLM_PREVIEW_FULL}
+
+
+def _parts_view(parts: PromptParts) -> list[dict[str, Any]]:
+    """確認の窓に渡す、送る文の部分(元の並び)。直せるのは指示の部分だけ(差分と全文は読むだけ。REQ-266 §2)。"""
+    return [
+        {"kind": kind, "title": _PART_TITLES[kind], "text": text, "editable": kind == INSTRUCTION}
+        for kind, text in parts.pieces
+    ]
+
+
+class _PartsSink:
+    """送らない1回目の要求の on_prompt_parts(REQ-266)。組み立てた送る文の部分を受け取って持つだけ(ワーカーのスレッドから呼ばれる)。"""
+
+    def __init__(self) -> None:
+        self.parts: PromptParts | None = None
+
+    def __call__(self, parts: PromptParts) -> None:
+        self.parts = parts
+
+
 class CompareApi(Api):
     """比較画面から呼べるメソッド(window.pywebview.api.<名前>)。REQ-103 の app_info・messages も使える。
 
@@ -776,10 +846,21 @@ class CompareApi(Api):
         # _preview_first_request は送信前の確認と組で持つ文(承認した2回目に運ぶ)
         self._first_request: str | None = None
         self._preview_first_request: str | None = None
+        self._preview_result: tuple[ScreenInput, CompareRequest, Any] | None = None  # 確認を作ったときの結果(REQ-266 の前は REQ-264 §2)
+        # 送る前の確認で指示を直せるようにする(REQ-266): 1回目の要求に付けた部分の受け取り口と、確認と組で持つ送る文の部分
+        # (確認の番号, 部分)。部分が無い・送る文と合わないときは持たず、確認は今の読むだけの1つの欄になる
+        self._parts_sink: _PartsSink | None = None
+        self._preview_parts: tuple[int, PromptParts] | None = None
         # まとめての比較(REQ-122): 最後の結果(入力・要求・まとめた結果。比べたときだけ)・表示中の一覧(比べた結果か開いた .jsonl)・
         # 選んでいる行・組ごとの表示・相手なしの行を選んだときの説明
         self._multi: tuple[ScreenInput, CompareRequest, MultiCompareOutcome] | None = None
         self._mview: MultiView | None = None
+        # AI に送る組(REQ-265。ADR-0193 決定3): 送れる組の pairs の位置(比べ終わったときに1回だけ求める)と、チェックしている位置。
+        # 新しく比べるまで覚え、新しく比べたら送れる組をすべてチェックした既定に戻す
+        self._send_candidates: tuple[int, ...] = ()
+        self._send_pairs: frozenset[int] = frozenset()
+        # 手で組にした1組を比べ直している間の持ち物(REQ-269): (前の結果, 前のチェックの位置, 新しい組の (変更前の番号, 変更後の番号))
+        self._pairing_carry: tuple[MultiCompareOutcome, frozenset[int], tuple[int, int]] | None = None
         self._pair = 0
         self._pair_views: dict[int, OutcomeView] = {}
         self._unpaired_note: str | None = None
@@ -795,6 +876,9 @@ class CompareApi(Api):
         # 番号(画面は変わったときだけ描き直す・入れ直す)
         self._revision = 0
         self._result_revision = 0
+        # 表の中身の番号(REQ-264 §2)。表も変わるときは _result_changed で result_revision と一緒に進める。
+        # AI の答えだけが変わったとき(送る前の確認・答え)は result_revision だけ進め、画面は表・選んでいる行・位置を描き直さない
+        self._rows_revision = 0
         self._fill = 0  # 変わったら、画面は欄に form を入れ直す
         self._focus_revision = 0
         self._multi_revision = 0  # 変わったら、画面は一覧の行を作り直す
@@ -807,6 +891,8 @@ class CompareApi(Api):
         self._characters: dict[str, bool] = {}
         # この窓で一度でも比べたか(始めた・保存した結果を開いた・一括比較から受け取った)。空の窓の絵に使う(ADR-0174 決定2)
         self._compared_once = False
+        # 複数の機器の知らせ(REQ-267): 比べたときの入力ごとに 1 回だけ求める (入力, 知らせか None)。入力が変わったときだけ作り直す
+        self._devices_cache: tuple[ScreenInput, DeviceNotice | None] | None = None
         session.watch(self, self._changed)
 
     def _attach(self, window: Any) -> None:
@@ -850,13 +936,48 @@ class CompareApi(Api):
         """
         return self._call(self._send_llm, form, instruction)
 
-    def answer_preview(self, form: Any, yes: Any) -> dict[str, Any]:
-        """送信前のプレビューの答え。「送信する」(yes が真)のときだけ、待っているプレビューの内容を送る。"""
-        return self._call(self._answer_preview, form, yes)
+    def answer_preview(self, form: Any, yes: Any, instructions: Any = None) -> dict[str, Any]:
+        """送信前のプレビューの答え。「送信する」(yes が真)のときだけ、待っているプレビューの内容を送る。
+
+        instructions は指示の欄を直したときだけ渡す、指示の部分の文の並び(REQ-266。直さなければ None)。
+        形が違えば扱えない要求として断る。
+        """
+        return self._call(self._answer_preview, form, yes, instructions)
 
     def select_pair(self, form: Any, index: Any) -> dict[str, Any]:
         """まとめての比較の一覧で行を選んだとき(REQ-122 §2)。index は一覧の行の番号(0始まり)。"""
         return self._call(self._select_pair, form, index)
+
+    def set_send_pair(self, form: Any, index: Any, checked: Any) -> dict[str, Any]:
+        """まとめての比較の一覧で、1行の「AI に送る」のチェックを変えたとき(REQ-265 §2)。index は一覧の行の番号、checked は真偽値。
+
+        押せないとき(送れない組・開いた保存の結果・比較中・送信前の確認を待っている間など)は何も変えない。表に出している組は変えない。
+        """
+        return self._call(self._set_send_pair, form, index, checked)
+
+    def set_send_all(self, form: Any, checked: Any) -> dict[str, Any]:
+        """一覧の見出しのチェック(すべて選ぶ・すべて外す)。checked は真偽値。押せない組は変えない(REQ-265 §2)。"""
+        return self._call(self._set_send_all, form, checked)
+
+    def partner_choices(self, index: Any) -> dict[str, Any]:
+        """「相手を選ぶ…」を押したとき。読むだけ(REQ-269 §2)。index は一覧の行の番号(0始まり)。
+
+        押せるとき(まとめて比べた結果で、押せる状態で、index の行が相手なしかエラーの出力)は
+        partners={title, prompt, choices: [{number, label, state}]} を返す。ほかは partners を None にして返す。
+        """
+        return self._call(self._partner_choices, index)
+
+    def choose_partner(self, form: Any, index: Any, number: Any) -> dict[str, Any]:
+        """相手を選ぶ窓の「OK」(REQ-269 §2・§3)。index は一覧の行の番号、number はもう片方の側の区間の番号。
+
+        その2つの区間を組にして、その1組だけを比べ直す(ほかの組は比べ直さない)。押せないときは何も変えない。
+        形の違い・もう片方の側に無い番号は扱えない要求として断る。
+        """
+        return self._call(self._choose_partner, form, index, number)
+
+    def unpair(self, form: Any, index: Any) -> dict[str, Any]:
+        """「組を外す」(REQ-269 §2・§3)。index は一覧の行の番号。組の行のときだけ、2つの相手なし(エラーの出力は戻す)にする。比べない。"""
+        return self._call(self._unpair, form, index)
 
     def ask_follow_up(self, form: Any, question: Any, confirm: Any = None) -> dict[str, Any]:
         """「質問する」。AI の答えに追加で質問する(ADR-0081)。question は確かめて送るだけ(返す値・知らせ・属性に残さない)。
@@ -916,6 +1037,14 @@ class CompareApi(Api):
     def open_batch(self) -> dict[str, Any]:
         """「一括比較…」。一括比較の窓を開く(開いていれば前に出す。REQ-106)。"""
         return self._call(self._open_batch)
+
+    def split_devices(self, form: Any, confirmed: Any = False) -> dict[str, Any]:
+        """「機器ごとに分けて一括比較で開く…」(ADR-0194 / REQ-267)。
+
+        1 回目は、押せるかを確かめ、書き出す前の注意を split_confirm で返す(AI の窓が開いていると confirm は外されるため、別のキー)。
+        画面が「フォルダーを選ぶ…」を押したときだけ confirmed=True で呼び直し、フォルダーを選んで書き、一括比較の窓で開く。
+        """
+        return self._call(self._split_devices, form, confirmed)
 
     def open_settings(self, tab: Any = None) -> dict[str, Any]:
         """「設定…」。設定の窓を開く(開いていれば前に出す)。
@@ -1033,7 +1162,7 @@ class CompareApi(Api):
             context = read_context_lines(form["raw_options"]["context_lines"])
             if context is not None and context != self._raw_context:
                 self._raw_context = context
-                self._result_revision += 1
+                self._result_changed()
         if kind != "show" and self._kind_shown == "show":
             # show の手入力の値を系統として持ち越さない(既定の選択から選び直す)
             values["config_platform"] = DEFAULT_FORM["config_platform"]
@@ -1108,7 +1237,7 @@ class CompareApi(Api):
             return "ai"
         if self._worker is None:
             return None
-        if self._run_kind in (RUN_COMPARE, RUN_HANDOFF):
+        if self._run_kind in (RUN_COMPARE, RUN_HANDOFF, RUN_PAIRING):
             return "result"
         return "ai"
 
@@ -1117,6 +1246,34 @@ class CompareApi(Api):
         if self._last is not None:
             return self._last[0]
         return self._multi[0] if self._multi is not None else None
+
+    def _devices_notice(self) -> DeviceNotice | None:
+        """ロックの中で呼ぶ。比べたときの入力の文から求めた、複数の機器の知らせ。入力ごとに 1 回だけ作る(ファイルは読み直さない)。
+
+        保存した結果を開いているときは入力が無いので出さない。
+        """
+        if self._opened is not None or self._opened_saved is not None:
+            return None
+        inp = self._last_input()
+        if inp is None:
+            return None
+        cached = self._devices_cache
+        if cached is None or cached[0] is not inp:
+            cached = (inp, device_notice(inp))
+            self._devices_cache = cached
+        return cached[1]
+
+    def _devices_blocked(self) -> bool:
+        """ロックの中で呼ぶ。比較中・送信中・閉じている途中・一括比較が走っている(送信前の確認の待ちを含む)間は真。"""
+        return self._busy() or self._closing or not self._session.free_for(self)
+
+    def _devices_view(self) -> dict[str, Any] | None:
+        """ロックの中で呼ぶ。view の devices: {text, enabled, reason}。知らせが無ければ None。"""
+        notice = self._devices_notice()
+        if notice is None:
+            return None
+        reason = device_split_reason(notice, self._devices_blocked())
+        return {"text": notice.text, "enabled": reason is None, "reason": reason}
 
     def _result_key(self) -> object | None:
         """最後の結果(届いた答えを残すか決めるときに、同じ結果かを比べる)。開いた保存の結果ではその中身(REQ-242 §4)。"""
@@ -1316,6 +1473,8 @@ class CompareApi(Api):
             outcomes = [self._last[2]]
         else:
             assert self._multi is not None
+            if self._send_candidates and not self._send_pairs:
+                return False  # 送れる組があるのに、1つもチェックしていない(REQ-265 §3)
             outcomes = [pair.outcome for pair in self._multi[2].pairs]
         return any(source_of(o.structured, o.raw, o.show) is not None for o in outcomes)
 
@@ -1426,7 +1585,10 @@ class CompareApi(Api):
             shown = preview_view(llm)
             # 全文も送るときは、先頭に目立つ帯を出す(ADR-0158 決定6)。文字数は送る文の全体
             band = llm_full_text_preview(len(shown.payload)) if plan.first.include_after_text else None
-            preview = self._preview_dict(number, shown, shown.payload, band)
+            # 指示を直せる形(REQ-266 §2)。部分を持っている確認(最初の解析)だけ。追加の質問の全文の確認は読むだけのまま
+            held = self._preview_parts
+            parts = held[1] if held is not None and held[0] == number else None
+            preview = self._preview_dict(number, shown, shown.payload, band, parts)
         return {
             "revision": self._revision,
             # 半角の括弧を含む文と、画面の論理(model.py)の文。決まった文は data-text で messages から取る
@@ -1483,6 +1645,8 @@ class CompareApi(Api):
             "can_jump": self._outcome is not None and any(row.is_diff for row in self._outcome.raw_rows),
             # 単純比較の既定のファイルを読めないときの帯(RAW_DEFAULTS_UNREADABLE)は、結果の帯の後ろにつなぐ
             "banner": "\n".join(self._banner_lines()) or None,
+            # 複数の機器の知らせとボタン(REQ-267 §3)。比べた文から求める。1 台のときと、結果が無いときは null
+            "devices": self._devices_view(),
             # 自動送信がオンの間は常に出す帯(送り先の名前。ADR-0080 決定2)。オフなら null
             "auto_send": self._auto_send_band(),
             "focus": self._focus,
@@ -1547,7 +1711,7 @@ class CompareApi(Api):
         結果の番号を進め、画面に result() を読み直させる(結果の行は変わらない。変わるのは never_compared だけ)。
         """
         if tell and not self._compared_once:
-            self._result_revision += 1
+            self._result_changed()
         self._compared_once = True
 
     def _banner_lines(self) -> list[str]:
@@ -1578,8 +1742,14 @@ class CompareApi(Api):
         return {key: value for key, value in notice.items() if key != NOTICE_PANE}
 
     @staticmethod
-    def _preview_dict(number: int, shown: PreviewView, payload: str, full_text: str | None) -> dict[str, Any]:
-        """送信前の確認の状態。payload は確認に出す送る文の全部、full_text は全文を送るときの帯の文(送らないなら None)。"""
+    def _preview_dict(
+        number: int, shown: PreviewView, payload: str, full_text: str | None, parts: PromptParts | None = None
+    ) -> dict[str, Any]:
+        """送信前の確認の状態。payload は確認に出す送る文の全部、full_text は全文を送るときの帯の文(送らないなら None)。
+
+        parts は送る文を元の並びのまま区切った部分(REQ-266)。あれば、各部分を種類(instruction・diff・full)・見出し・文・
+        直せるかで渡す。無ければ null で、画面は今の読むだけの1つの欄(payload)を出す。
+        """
         return {
             "id": number,
             "title": LLM_PREVIEW_TITLE,
@@ -1593,6 +1763,9 @@ class CompareApi(Api):
             ],
             "payload_title": LLM_PREVIEW_PAYLOAD,
             "payload": payload,
+            "parts": None if parts is None else _parts_view(parts),
+            "edit_note": LLM_PREVIEW_EDIT_NOTE if parts is not None else None,
+            "reset": LLM_PREVIEW_RESET,
             "unsent_shapes": shown.unsent_shapes,
             "send": LLM_PREVIEW_SEND,
             "dont_send": LLM_PREVIEW_DONT_SEND,
@@ -1673,6 +1846,9 @@ class CompareApi(Api):
             "all_revision": self._all_revision,
             "tab": self._tab,
             "tab_revision": self._tab_revision,
+            "send": self._send_view(mv),
+            # 一覧の下の「相手を選ぶ…」「組を外す」(REQ-269)。開いた保存の結果と1つのログの中で組にしたときは null(出さない)
+            "pairing": self._pairing_view(),
         }
 
     def _current_all_rows(self) -> list[AllRow]:
@@ -1725,6 +1901,9 @@ class CompareApi(Api):
             "note": "\n".join(notes) if notes else None,
             "can_ask": self._can_ask(),
             "can_send_llm": self._can_send_llm(),
+            # まとめて比べた結果のときだけ。送る組の数と、1つもチェックしていないときの押せない理由(REQ-265 §3・§4)
+            "send_pairs": self._send_pairs_text(),
+            "send_reason": COMPARE_AI_NO_PAIRS if self._send_none_checked() else None,
             "ask_label": COMPARE_FOLLOW_UP_ASK,
             # pane の窓のキャラクターがオンなら「AI（Mirarin）で解析」(ADR-0181 決定2。設定はその窓を最初に描いたときのもの)
             "send_label": COMPARE_AI_ANALYZE_CHARACTER if self._character_for(pane) else COMPARE_AI_ANALYZE,
@@ -1734,6 +1913,16 @@ class CompareApi(Api):
             and (self._opened is None or self._first_answer() is not None),
             "clear": self._instruction_clear,
         }
+
+    def _send_none_checked(self) -> bool:
+        """ロックの中で呼ぶ。まとめて比べた結果で、送れる組があるのに 1 つもチェックしていないか。"""
+        return self._multi is not None and bool(self._send_candidates) and not self._send_pairs
+
+    def _send_pairs_text(self) -> str | None:
+        """ロックの中で呼ぶ。「送る組: 3 / 12」。まとめて比べた結果のときだけ(1つのコマンド・開いた保存の結果は None)。"""
+        if self._multi is None:
+            return None
+        return compare_send_pairs(len(self._send_pairs), len(self._send_candidates))
 
     def _profile_where(self) -> dict[str, Any]:
         where = self._where
@@ -1775,13 +1964,18 @@ class CompareApi(Api):
             return auto_send_band(None)  # プロファイルを読めない(load_settings も止まるので送らない)
         return None if name is None else auto_send_band(name)
 
+    def _result_changed(self) -> None:
+        """ロックの中で呼ぶ。結果の表も変わったとき(画面が表を描き直す)の番号を進める。"""
+        self._result_revision += 1
+        self._rows_revision += 1
+
     def _show(self, inp: ScreenInput, view: OutcomeView, llm: LlmAnalysis | None = None) -> None:
         """結果を表示する状態にする(wx の _show と同じ判断)。行は result() で渡す。
 
         llm は view の元の AI 解析(429 の待つ秒を AI の面の行に出すときだけ使う。ADR-0168 決定4)。
         """
         self._outcome = view
-        self._result_revision += 1
+        self._result_changed()
         # 窓の下の文は、差分ありの内訳を添えた pywebview の文(REQ-113 §3。wx は status_text のまま)
         self._result_status = view.status_text_web
         self._stale = False
@@ -1812,6 +2006,35 @@ class CompareApi(Api):
             self._focus_revision += 1
         self._set_llm(view, self._llm_notes, llm)
 
+    def _show_answer(self, view: OutcomeView, llm: LlmAnalysis | None) -> None:
+        """ロックの中で呼ぶ。1つのコマンドの結果に AI の答えだけを出し直す(REQ-264 §2。比較はやり直していない)。
+
+        _show と違い、区間の欄・帯・フォーカスには触らず、表の番号(_rows_revision)も進めない(結果の番号だけ進め、画面は AI の答えだけ描き直す)。
+        """
+        self._outcome = view
+        self._result_revision += 1
+        self._result_status = view.status_text_web
+        self._stale = False
+        self._status = [view.status_text_web, view.counts_text]
+        self._set_llm(view, self._llm_notes, llm)
+
+    def _same_rows(self, mv: MultiView) -> bool:
+        """ロックの中で呼ぶ。今出している一覧の行が、mv と同じ数か(AI の後に答えだけ出し直せるか)。"""
+        return self._mview is not None and len(self._mview.entries) == len(mv.entries)
+
+    def _show_whole_answer(self, mv: MultiView) -> None:
+        """ロックの中で呼ぶ。まとめての結果に全体の AI の答えだけを出し直す(REQ-264 §2。比較はやり直していない)。
+
+        _show_multi と違い、選んでいる組・組ごとの表示・一覧と「全部」のタブの番号・タブ・区間の欄には触らない
+        (組の結果は変わらないので、一覧の行と表はそのまま)。入れ替えるのは一覧の持ち物(全体の答えを持つ)と、状態の文・AI の欄だけ。
+        """
+        self._mview = mv
+        self._result_revision += 1  # 表の番号(_rows_revision)は進めない
+        self._result_status = mv.overall
+        self._stale = False
+        self._status[0] = mv.overall  # 件数の文(右)は残す
+        self._set_whole_llm(mv, self._llm_notes if self._opened is None else [])
+
     def _set_llm(self, view: OutcomeView, notes: list[str], llm: LlmAnalysis | None = None) -> None:
         """ロックの中で呼ぶ。AI の面の文とコピーの文。頭の行を除いた行(llm_screen_lines。ADR-0148 決定8)の前に注記を足す。
 
@@ -1830,7 +2053,7 @@ class CompareApi(Api):
         """
         self._opened = band
         self._outcome = view
-        self._result_revision += 1
+        self._result_changed()
         self._result_status = view.status_text_web
         self._status = [view.status_text_web, view.counts_text]
         banner = list(view.banner)
@@ -1881,7 +2104,7 @@ class CompareApi(Api):
         mv = self._mview
         assert mv is not None
         entry = mv.entries[self._pair]
-        self._result_revision += 1
+        self._result_changed()
         main = self._status[0] if self._busy() else mv.overall
         notes = self._llm_notes if self._opened is None else []
         if entry.outcome is None:
@@ -1922,6 +2145,8 @@ class CompareApi(Api):
             self._multi_revision += 1
         self._multi = None
         self._mview = None
+        self._send_candidates = ()
+        self._send_pairs = frozenset()
         self._pair = 0
         self._pair_views = {}
         self._unpaired_note = None
@@ -1982,7 +2207,7 @@ class CompareApi(Api):
             )
             if context != self._raw_context:
                 self._raw_context = context
-                self._result_revision += 1
+                self._result_changed()
             self._raw = RawForm(options, [], context)
             self._raw_values = raw_form_values(options, context)
             self._raw_fill += 1
@@ -2065,7 +2290,7 @@ class CompareApi(Api):
         self._banner = []
         self._segment_title = COMPARE_SEGMENTS
         self._focus = None
-        self._result_revision += 1
+        self._result_changed()
 
     # --- 入力 ---
 
@@ -2272,9 +2497,17 @@ class CompareApi(Api):
                 plan = with_full_text(plan)
             last = self._last if self._last is not None else self._multi
             assert last is not None
-            inp, request, _outcome = last
+            inp, request, outcome = last
+            if self._last is None:
+                # まとめて比べたときは、チェックした組だけを送る(REQ-265 §3)。送る組は結果に持たせて渡す(1つのコマンドでは使わない)
+                outcome = dataclasses.replace(outcome, llm_chosen=tuple(sorted(self._send_pairs)))
             # 1回目は送らない(dry_run)。送る内容があれば送信前のプレビューで止まる(ADR-0018 決定6。まとめて比べたときも
             # 全部の組をまとめた文の1件の確認。ADR-0152 決定3)。接続が使えない(send が無い)ときは1回で終わり、理由が AI 解析の枠に出る
+            # 比較はやり直さず、持っている結果から AI の解析の工程だけを行う(REQ-264 §2)
+            # 1回目の要求に、送る文の部分の受け取り口を付ける(確認で指示を直せるようにする。REQ-266)。2回目には付けない
+            sink = _PartsSink()
+            self._parts_sink = sink
+            plan = LlmPlan(first=dataclasses.replace(plan.first, on_prompt_parts=sink), send=plan.send)
             started = self._start(
                 inp,
                 request,
@@ -2282,9 +2515,12 @@ class CompareApi(Api):
                 plan,
                 RUN_PREVIEW,
                 settings=settings,
+                runner=partial(analyze_screen, outcome=outcome, max_total_diffs=settings.max_total_diffs),
                 destination=destination_of(settings),
                 first_request=first_request,
             )
+            if not started:
+                self._parts_sink = None
             result = self._ok()
         if started:
             self._session.gate_changed(self)
@@ -2318,6 +2554,7 @@ class CompareApi(Api):
         if max_total_diffs is None:
             max_total_diffs = settings.max_total_diffs if settings is not None else DEFAULT_MAX_TOTAL_DIFFS
         self._preview = None
+        self._preview_parts = None
         self._clear_follow_up()  # 比較し直すと、追加の質問のやり取りは消える(ADR-0081 決定5)
         self._late_notice = None
         self._run_kind = kind
@@ -2341,6 +2578,10 @@ class CompareApi(Api):
         if kind == RUN_AUTO_SEND:
             # 結果は出したまま。状態の文は「AI に送っています」に固定し、件数の文は残す(ADR-0080 決定2)
             self._status[0] = COMPARE_AUTO_SENDING
+        elif kind in AI_ONLY_RUNS:
+            # 「AI で解析」は比較をやり直さない(REQ-264 §2)。結果は出したまま、状態の文は確認の前が「AI に送る内容を作っています」、
+            # 承認の後が「AI に送っています」。比較の工程の名前は出さない。件数の文は残す(自動送信と同じ)
+            self._status[0] = COMPARE_AI_PREPARING if kind == RUN_PREVIEW else COMPARE_AUTO_SENDING
         else:
             self._status[1] = ""
         self._worker.start()
@@ -2438,8 +2679,9 @@ class CompareApi(Api):
         with self._lock:
             if self._closing:
                 return
-            if self._run_kind != RUN_AUTO_SEND:
-                self._status[0] = stage_label(stage)  # 自動送信の間は「AI に送っています」のまま
+            if self._run_kind != RUN_AUTO_SEND and self._run_kind not in AI_ONLY_RUNS:
+                # 自動送信の間は「AI に送っています」、「AI で解析」の間は _start で決めた文のまま(工程の名前を出さない)
+                self._status[0] = stage_label(stage)
         self._changed()
 
     def _finish(self) -> bool:
@@ -2535,7 +2777,11 @@ class CompareApi(Api):
                         self._sent_profiles = {0: attached.profile}
                         self._llm_notes = [compare_handed_answer_note(attached.profile[1], attached.prompt_name)]
                     self._keep_thinking(_done_thought(thought, outcome.llm), TARGET_ANALYSIS)
-                    self._show(inp, view_outcome(outcome), outcome.llm)
+                    if kind in AI_ONLY_RUNS:
+                        # 比較はやり直していないので、結果の表示は作り直さず、答えだけ出し直す(REQ-264 §2)
+                        self._show_answer(view_outcome(outcome), outcome.llm)
+                    else:
+                        self._show(inp, view_outcome(outcome), outcome.llm)
                     self._refresh_save()  # 区間の欄を結果で埋め直した後の入力で判定する
                     if wants_preview(plan, outcome):
                         assert plan is not None and outcome.llm is not None and destination is not None
@@ -2548,6 +2794,8 @@ class CompareApi(Api):
                                 self._next_serial(), plan, inp, request, outcome.llm, destination, max_total_diffs
                             )
                             self._preview_first_request = first_request  # 承認した2回目に運ぶ(ADR-0179 決定1)
+                            self._preview_result = self._last  # 確認を作ったときの結果(承認した2回目は同じ結果からだけ送る。REQ-264 §2)
+                            self._keep_preview_parts(outcome.llm)
                     elif check and attached is None:
                         # 差分が違うので使わなかった。★ 自動送信がオンでも、この比較の後には送らない(ADR-0170 決定3)
                         self._late_notice = self._ai_late_notice(COMPARE_HANDED_ANSWER_UNUSED, COMPARE_HANDED_ANSWER_TITLE)
@@ -2555,6 +2803,20 @@ class CompareApi(Api):
                         self._auto_send()  # 比較の結果を先に出してから、裏で送る(自動送信の結果からは始めない)
         self._session.gate_changed(self)
         self._changed()
+
+    def _keep_preview_parts(self, llm: LlmAnalysis) -> None:
+        """ロックの中で呼ぶ。今の確認(self._preview)と組で、送る文の部分を持つ(指示を直せる確認にする。REQ-266 §2)。
+
+        受け取った部分をつないだ文が、確認に出す送る文(llm.payload)と同じときだけ持つ。違う・受け取れていないときは持たず、
+        確認は今の読むだけの1つの欄になる(直せない)。
+        """
+        sink, self._parts_sink = self._parts_sink, None
+        parts = sink.parts if sink is not None else None
+        assert self._preview is not None
+        if parts is not None and parts.text == llm.payload:
+            self._preview_parts = (self._preview[0], parts)
+        else:
+            self._preview_parts = None
 
     def _remember_destination(
         self, kind: str, destination: tuple[str, str] | None, count: int, analyses: list[LlmAnalysis | None]
@@ -2630,17 +2892,40 @@ class CompareApi(Api):
             elif llm.reason in ("no_diff", "no_structured_diff", "nothing_to_send"):
                 message = batch_llm_nothing_to_send()
         self._multi = (inp, request, outcome)
+        carry = None
+        if kind == RUN_PAIRING:
+            carry, self._pairing_carry = self._pairing_carry, None
+        if carry is not None:
+            # 手で組にした回(REQ-269 §3): 結果を入れ替えるこの時点で、前の AI の答えにつながるものを消す(中止・失敗では残す)。
+            # 前にチェックしていた組はそのまま、新しく作った組は送れる組ならチェックする。外した組は消える
+            self._forget_answer()
+            self._send_candidates = tuple(whole_candidates(outcome))
+            old, checked, new_key = carry
+            self._send_pairs = carry_send_checks(old, checked, outcome, new_key)
+        elif kind not in AI_ONLY_RUNS or not self._send_candidates:
+            # 新しく比べた結果は、送れる組をすべてチェックした既定にする。確認を作る回・承認して送る回は比較をやり直さないので、
+            # 今のチェックを残す(REQ-265 §2)
+            self._send_candidates = tuple(whole_candidates(outcome))
+            self._send_pairs = frozenset(self._send_candidates)
         mv = multi_view(outcome)
         # 送り先は全体で1つ(番号 0。ADR-0152 決定3)
         self._remember_destination(kind, destination, 1, [llm])
         self._remember_first_request(kind, first_request, llm)  # 全体の答えに1つ(ADR-0179 決定1)
-        self._show_multi(inp, mv, keep=kind not in (RUN_COMPARE, RUN_HANDOFF))
+        if kind in AI_ONLY_RUNS and self._same_rows(mv):
+            # 比較はやり直していないので、組の一覧・表・選んでいる組は作り直さず、全体の答えだけ出し直す(REQ-264 §2)
+            self._show_whole_answer(mv)
+        else:
+            self._show_multi(inp, mv, keep=kind not in (RUN_COMPARE, RUN_HANDOFF))
+            if carry is not None:
+                self._select_new_pair(outcome, carry[2])  # 手で作った組の行を選び、今の決まりでタブを開く(自動送信はしない)
         self._refresh_save()
         if pending:
             assert plan is not None and destination is not None
             # 全部の組をまとめた文の確認は1回だけ。「送信する」まで送らない(ADR-0018 決定6)
             self._preview = (self._next_serial(), plan, inp, request, llm, destination, max_total_diffs)
             self._preview_first_request = first_request  # 承認した2回目に運ぶ(ADR-0179 決定1)
+            self._preview_result = self._multi  # 確認を作ったときの結果(承認した2回目は同じ結果からだけ送る。REQ-264 §2)
+            self._keep_preview_parts(llm)
         elif message:
             self._late_notice = self._ai_late_notice(message, BATCH_NOT_SENT_TITLE)
         elif kind == RUN_COMPARE and auto_send:
@@ -2648,6 +2933,7 @@ class CompareApi(Api):
 
     def _on_cancelled(self, _exc: CompareCancelled) -> None:
         with self._lock:
+            self._pairing_carry = None  # 手で組にした回を中止した。前の結果を残す(REQ-269)
             stream = self._stream
             if stream is not None:
                 self._keep_stopped_partial(stream)  # ためた文字があれば「中止しました」を付けて残す(保存しない)
@@ -2658,6 +2944,7 @@ class CompareApi(Api):
 
     def _on_failed(self, exc: BaseException) -> None:
         with self._lock:
+            self._pairing_carry = None
             self._clear_partial()
             self._clear_thinking()  # 失敗は途中の答えも考えも消す(ADR-0169 決定6)
             if not self._finish():
@@ -2669,29 +2956,58 @@ class CompareApi(Api):
 
     # --- 送信前のプレビュー(ADR-0018 決定6) ---
 
-    def _answer_preview(self, form: Any, yes: Any) -> dict[str, Any]:
+    def _answer_preview(self, form: Any, yes: Any, instructions: Any = None) -> dict[str, Any]:
         with self._lock:
             self._take(form)
             if not isinstance(yes, bool):
                 raise _BadRequest
+            if instructions is not None and (
+                not isinstance(instructions, (list, tuple)) or any(not isinstance(item, str) for item in instructions)
+            ):
+                raise _BadRequest
+            edited = None if instructions is None else tuple(instructions)
             if self._follow_up_preview is not None:
-                # 追加の質問で全文を送る前の確認(ADR-0158 決定6)を先に見る
+                # 追加の質問で全文を送る前の確認(ADR-0158 決定6)を先に見る。指示は直せない(読むだけの確認)ので渡された指示は使わない
                 result, started = self._answer_follow_up_preview(yes)
             else:
-                result, started = self._answer_analysis_preview(yes)
+                result, started = self._answer_analysis_preview(yes, edited)
         if started:
             self._session.gate_changed(self)  # 門を取った(ロックの外で知らせる)
         return result
 
-    def _answer_analysis_preview(self, yes: bool) -> tuple[dict[str, Any], bool]:
-        """ロックの中で呼ぶ。最初の解析の送信前の確認の答え。返すのは (返す値, 始めたか)。"""
+    def _answer_analysis_preview(
+        self, yes: bool, instructions: tuple[str, ...] | None = None
+    ) -> tuple[dict[str, Any], bool]:
+        """ロックの中で呼ぶ。最初の解析の送信前の確認の答え。返すのは (返す値, 始めたか)。
+
+        instructions は直した指示の部分の並び(REQ-266 §3。直していなければ None)。確認に出した指示と同じなら直していないのと同じ。
+        """
         pending, self._preview = self._preview, None  # 答えたら消す(1つのプレビューで送れるのは1回だけ)
         first_request, self._preview_first_request = self._preview_first_request, None  # 確認と組の最初の依頼の文
+        basis, self._preview_result = self._preview_result, None  # 確認を作ったときの結果
+        kept_parts, self._preview_parts = self._preview_parts, None  # 確認と組の送る文の部分
         if not yes or pending is None or self._busy() or self._closing:
             return self._ok(), False
-        _number, plan, inp, request, llm, destination, total = pending
+        number, plan, inp, request, llm, destination, total = pending
         if not is_current(inp, self._current_input()):
             return self._ok(), False  # 比較したときと入力が違う
+        # 送るのは、確認を作ったときと同じ結果(入力と要求が同じもの)から作る文だけ。違えば送らない(REQ-264 §2)
+        held = self._last if self._last is not None else self._multi
+        if held is None or held is not basis:
+            return self._ok(), False
+        edit: InstructionEdit | None = None
+        if instructions is not None:
+            parts = kept_parts[1] if kept_parts is not None and kept_parts[0] == number else None
+            if parts is None or llm.payload is None:
+                return self._ok(), False  # 直せない確認で指示を渡された。送らない
+            if instructions != parts.instructions:
+                # 直した指示(直していなければ今の道を 1 字も変えずに通る)
+                edited = self._check_edited_instructions(plan, parts, instructions)
+                if isinstance(edited, dict):
+                    return edited, False  # 断った(中身は出さない)。確認は答えた時点で消える
+                edit = InstructionEdit(shown=llm.payload, parts=instructions, text=edited)
+                if first_request is not None:
+                    first_request = COMPARE_FIRST_REQUEST_EDITED(first_request)
         # 承認した内容だけを送る2回目(送る直前に、プレビューと同じ内容かを確かめる)。届いたところから出す(ADR-0157 決定5)。
         # まとめて比べたときも同じ(全部の組をまとめた文を1回だけ送る。全体の上限は確認のときと同じ値。ADR-0152 決定3)
         stream = _AnswerStream(self, TARGET_ANALYSIS)
@@ -2699,7 +3015,7 @@ class CompareApi(Api):
         # 前提の文は送る直前に読み直す。確認の後に書き換えた・消したときは承認した文と違うので送らない(ADR-0172 決定5)
         where = {key: self._where[key] for key in ("env", "platform", "home")}
         approved = dataclasses.replace(
-            with_current_premise(approve(plan, llm), **where),
+            with_current_premise(approve(plan, llm) if edit is None else approve(plan, llm, edit), **where),
             on_delta=stream,
             on_thinking=stream.thinking,
             on_api_error=sink,
@@ -2711,12 +3027,37 @@ class CompareApi(Api):
             approved,
             None,
             RUN_APPROVED,
+            # 比較はやり直さず、持っている結果から承認した文を送る(REQ-264 §2)
+            # held[2] は確認を作ったときの結果で、そのとき使った組(llm_chosen)を持つ。確認と送信は同じ組から作る(REQ-265 §3)
+            runner=partial(analyze_screen, outcome=held[2], max_total_diffs=total),
             destination=destination,
             max_total_diffs=total,
             sink=sink,
             first_request=first_request,
         )
         return self._ok(), started
+
+    def _check_edited_instructions(
+        self, plan: LlmPlan, parts: PromptParts, instructions: tuple[str, ...]
+    ) -> str | dict[str, Any]:
+        """ロックの中で呼ぶ。直した指示を確かめる(REQ-266 §3)。送ってよければ直した後の送る文、送れないなら返す値(知らせ)。
+
+        数が合わない・文字列でないときは何も知らせず送らない。直した後の文が上限(MAX_PROMPT_CHARS)を超えれば、打った文が長すぎるときと
+        同じ知らせ。指示の欄の全体(直した部分だけでなく)を、追加の質問と同じ check_question で設定の秘密の語を使って確かめる。
+        ★ 長さの上限だけは追加の質問の 1 つの上限(4,000 字)ではなく、送る文全体の上限(MAX_PROMPT_CHARS)で見る(最初から入っている
+        指示文だけで 4,000 字に近く、前提と追加の指示を足すと必ず超えるため。判断の記録 1)。断ったときは理由の種類だけを出す(中身は出さない)。
+        """
+        try:
+            text = parts.compose(instructions)
+        except ValueError:
+            return self._ok()
+        if prompt_too_long(text):
+            return self._follow_up_notice(instruction_too_long(MAX_PROMPT_CHARS))
+        words = normalize_words(plan.first.extra_secret_words)
+        refused = check_question("\n".join(instructions), words, max_chars=MAX_PROMPT_CHARS)
+        if refused is not None:
+            return self._follow_up_notice(follow_up_refused(refused, MAX_PROMPT_CHARS))
+        return text
 
     def _answer_follow_up_preview(self, yes: bool) -> tuple[dict[str, Any], bool]:
         """ロックの中で呼ぶ。追加の質問で全文を送る前の確認の答え(ADR-0158 決定6)。答えたら確認(と質問の文)を消す。
@@ -2759,6 +3100,209 @@ class CompareApi(Api):
                     self._tab = tab
                     self._tab_revision += 1
             return self._ok()
+
+    def _send_editable(self) -> bool:
+        """ロックの中で呼ぶ。「AI に送る」のチェックを変えられるか(REQ-265 §2)。
+
+        まとめて比べた結果(開いた保存の結果ではない)があり、比較中・送信中・質問中でなく、閉じている途中でなく、
+        送る前の確認を待っておらず、一括比較が門を持っておらず、入力が比較したときと同じ。
+        """
+        return (
+            self._multi is not None
+            and self._opened is None
+            and not self._busy()
+            and not self._closing
+            and self._preview is None
+            and self._session.free_for(self)
+            and self._input_unchanged()
+        )
+
+    def _set_send_pair(self, form: Any, index: Any, checked: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            mv = self._mview
+            if not isinstance(checked, bool) or not isinstance(index, int) or isinstance(index, bool):
+                raise _BadRequest
+            if mv is None:
+                return self._ok()
+            if not _is_index(index, len(mv.entries)):
+                raise _BadRequest
+            if self._send_editable() and index in self._send_candidates:
+                self._send_pairs = self._send_pairs | {index} if checked else self._send_pairs - {index}
+            return self._ok()
+
+    def _set_send_all(self, form: Any, checked: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            if not isinstance(checked, bool):
+                raise _BadRequest
+            if self._send_editable():
+                self._send_pairs = frozenset(self._send_candidates) if checked else frozenset()
+            return self._ok()
+
+    # --- 組の手での選び直し(REQ-269) ---
+
+    def _pairing_editable(self) -> bool:
+        """ロックの中で呼ぶ。「相手を選ぶ…」「組を外す」を押せるか。
+
+        「AI に送る」のチェックを変えられる場面(_send_editable)で、1つのログの中で組にした結果でないとき。
+        """
+        return self._send_editable() and self._multi is not None and not self._multi[2].single_log
+
+    def _pairing_view(self) -> dict[str, Any] | None:
+        """ロックの中で呼ぶ。view の multi.pairing。まとめて比べた結果でないとき(開いた保存の結果)と、1つのログの中で組にした
+        ときは None(ボタンを出さない)。ほかは {choose, unpair}(選んでいる行が相手なし・エラーの出力なら choose、組なら unpair を押せるか)。
+        """
+        if self._multi is None or self._opened is not None or self._multi[2].single_log:
+            return None
+        editable = self._pairing_editable()
+        target = row_target(self._multi[2], self._pair)
+        kind = target[0] if target is not None else None
+        return {"choose": editable and kind == "segment", "unpair": editable and kind == "pair"}
+
+    def _forget_answer(self) -> None:
+        """ロックの中で呼ぶ。組を選び直したとき、前の AI の答えにつながるものを消す(REQ-269 §3)。
+
+        追加の質問のやり取り・途中の答え・考え・API のエラーの文・最初の依頼の文・送り先の記録・「差分＋全文を送る」。
+        答えが指している組の位置(llm_pairs)が、選び直した後の組とずれるため。新しく比較を始めたときと同じ消し方にそろえる。
+        """
+        self._clear_follow_up()
+        self._sent_profiles = {}
+        self._sent_name_only = False
+        self._destination_confirm = None
+        self._first_full_text = {}
+        self._full_text = False
+        self._llm_notes = []
+        self._llm_text = None
+        self._llm_copy = None
+
+    def _partner_choices(self, index: Any) -> dict[str, Any]:
+        with self._lock:
+            mv = self._mview
+            if mv is None:
+                return self._ok(partners=None)
+            if not _is_index(index, len(mv.entries)):
+                raise _BadRequest
+            if not self._pairing_editable():
+                return self._ok(partners=None)
+            assert self._multi is not None
+            _inp, request, outcome = self._multi
+            listed = model_partner_choices(request, outcome, index)
+            if listed is None:
+                return self._ok(partners=None)
+            return self._ok(
+                partners={
+                    "title": listed.title,
+                    "prompt": listed.prompt,
+                    "choices": [{"number": c.number, "label": c.label, "state": c.state} for c in listed.choices],
+                }
+            )
+
+    def _choose_partner(self, form: Any, index: Any, number: Any) -> dict[str, Any]:
+        started = False
+        with self._lock:
+            self._take(form)
+            for value in (index, number):
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise _BadRequest
+            mv = self._mview
+            if mv is None:
+                return self._ok()
+            if not _is_index(index, len(mv.entries)):
+                raise _BadRequest
+            if not self._pairing_editable():
+                return self._ok()
+            assert self._multi is not None
+            inp, request, outcome = self._multi
+            target = row_target(outcome, index)
+            if target is None or target[0] != "segment":
+                return self._ok()
+            listed = model_partner_choices(request, outcome, index)
+            assert listed is not None
+            if number not in {c.number for c in listed.choices}:
+                raise _BadRequest
+            _kind, side, own, _is_error = target
+            before_number, after_number = (own, number) if side == "before" else (number, own)
+            # 前の AI の答えにつながるものは、ここでは消さない(中止・失敗では前の結果と答えを残すため)。
+            # 結果を入れ替えるとき(_done_multi)に消す。追加の質問のやり取りと最初の依頼の文は _start が今までどおり消す
+            self._pairing_carry = (outcome, self._send_pairs, (before_number, after_number))
+            started = self._start(
+                inp,
+                request,
+                None,
+                None,
+                RUN_PAIRING,
+                runner=partial(
+                    pair_by_hand_screen, outcome=outcome, before_number=before_number, after_number=after_number
+                ),
+            )
+            if not started:
+                self._pairing_carry = None
+            result = self._ok()
+        if started:
+            self._session.gate_changed(self)
+        return result
+
+    def _unpair(self, form: Any, index: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise _BadRequest
+            mv = self._mview
+            if mv is None:
+                return self._ok()
+            if not _is_index(index, len(mv.entries)):
+                raise _BadRequest
+            if not self._pairing_editable():
+                return self._ok()
+            assert self._multi is not None
+            inp, request, outcome = self._multi
+            target = row_target(outcome, index)
+            if target is None or target[0] != "pair":
+                return self._ok()
+            removed = outcome.pairs[target[1]]
+            new = unpair_screen(request, outcome, target[1])  # 比べない
+            self._forget_answer()
+            self._multi = (inp, request, new)
+            self._send_candidates = tuple(whole_candidates(new))
+            self._send_pairs = carry_send_checks(outcome, self._send_pairs, new, None)
+            self._show_multi(inp, multi_view(new), keep=True)
+            # 外した組の変更前の側の区間の行を選ぶ(タブは変えない)
+            rest = multi_rest(new)
+            slot = next(
+                k for k, (u, _error) in enumerate(rest) if u.side == "before" and u.segment.number == removed.before_number
+            )
+            self._pair = len(new.pairs) + slot
+            self._show_pair()
+            self._refresh_save()
+            return self._ok()
+
+    def _select_new_pair(self, outcome: MultiCompareOutcome, key: tuple[int, int]) -> None:
+        """ロックの中で呼ぶ。手で作った組の行を選び、今の決まり(pair_tab)でタブを開く。"""
+        mv = self._mview
+        assert mv is not None
+        position = next(
+            (k for k, p in enumerate(outcome.pairs) if (p.before_number, p.after_number) == key), None
+        )
+        if position is None:
+            return
+        self._pair = position
+        self._show_pair()
+        tab = pair_tab(mv.entries[position].outcome)
+        if tab is not None:
+            self._tab = tab
+            self._tab_revision += 1
+
+    def _send_view(self, mv: MultiView) -> dict[str, Any] | None:
+        """ロックの中で呼ぶ。一覧の「AI に送る」のチェックの状態(REQ-265)。まとめて比べた結果だけ。開いた保存の結果では None(列を出さない)。
+
+        rows は行ごとに True(チェック)・False(外している)・None(送れない組・相手なしの行。押せない)。
+        """
+        if self._multi is None:
+            return None
+        candidates = set(self._send_candidates)
+        rows = [(index in self._send_pairs) if index in candidates else None for index in range(len(mv.entries))]
+        return {"rows": rows, "enabled": self._send_editable()}
 
     # --- 追加の質問(REQ-118 / ADR-0081) ---
 
@@ -2868,7 +3412,8 @@ class CompareApi(Api):
             _inp, request, outcome = self._last
         else:
             assert self._multi is not None
-            positions, sections, unchanged = whole_sections(self._multi[2])
+            # 送ったときと同じ組(チェックした組。REQ-265 §3)で作り直す
+            positions, sections, unchanged = whole_sections(self._multi[2], self._multi[2].llm_chosen)
             if self._pair not in positions:
                 return REBUILD_MISMATCH
             return rebuild_whole_after_text(
@@ -3087,6 +3632,7 @@ class CompareApi(Api):
                 # AI の欄は全体の答え(行を選び直しても変わらない。ADR-0152 決定3)。結果が無い窓では _llm_text も None
                 result: dict[str, Any] = {
                     "revision": self._result_revision,
+                    "rows_revision": self._rows_revision,
                     "titles": dict(EMPTY_TITLES),
                     "warnings": None,
                     "structured_note": self._unpaired_note,
@@ -3115,6 +3661,7 @@ class CompareApi(Api):
                 structured_ranges, raw_ranges = self._current_view_marks(view)
                 result = {
                     "revision": self._result_revision,
+                    "rows_revision": self._rows_revision,
                     "titles": {key: view.titles[key] for key in TAB_ORDER},
                     # 機種違いで失敗したときは短い文だけを出し、全文と警告は「詳しい内容」に入れる(ADR-0151 決定8)
                     "warnings": "\n".join(compare_warning_line(w) for w in (view.warnings if view.warnings_web is None else view.warnings_web)) or None,
@@ -3458,6 +4005,51 @@ class CompareApi(Api):
         with self._lock:
             return self._ok()
 
+    def _split_ready(self) -> ScreenInput | None:
+        """ロックの中で呼ぶ。機器ごとに分けて書き出せるなら、比べたときの入力。押せないときは None。"""
+        notice = self._devices_notice()
+        if notice is None or device_split_reason(notice, self._devices_blocked()) is not None:
+            return None
+        return self._last_input()
+
+    def _split_devices(self, form: Any, confirmed: Any) -> dict[str, Any]:
+        if not isinstance(confirmed, bool):
+            raise _BadRequest
+        with self._lock:
+            self._take(form)
+            inp = self._split_ready()
+            if inp is None:
+                return self._ok()
+            if not confirmed:
+                # 元の config と同じ扱い(社外秘)の注意。「フォルダーを選ぶ…」のときだけ呼び直す
+                confirm = {
+                    "title": DEVICE_SPLIT_CONFIRM_TITLE,
+                    "body": device_split_confirm_body(),
+                    "yes": DEVICE_SPLIT_CONFIRM_YES,
+                    "no": DIALOG_CANCEL,
+                }
+                return self._ok(split_confirm=confirm)
+        # 書くのは比べたときの 2 つの文だけ(元のファイルは開かない)。ダイアログを開いている間はロックを持たない
+        parent = self._choose_file(DIALOG_FOLDER, "", ())
+        with self._lock:
+            if parent is None:
+                return self._ok()  # 選ばなかった(何も書かない)
+            if self._last_input() is not inp or self._split_ready() is not inp:
+                return self._ok()  # 選んでいる間に結果が変わった・比較が始まった
+        try:
+            written = write_device_files(inp.before.text, inp.after.text, parent)
+        except DeviceSplitError as exc:
+            # 書いた途中のものは残す(消さない)
+            with self._lock:
+                return self._ok(notice=self._notice(str(exc), DEVICE_SPLIT_CONFIRM_TITLE))
+        with self._lock:
+            self._status[0] = device_split_done(written.folder, written.before_count, written.after_count)
+        opened = self._session._open_batch_folders(written.before_dir, written.after_dir)  # 窓を作る間はロックを持たない
+        with self._lock:
+            if not opened:
+                return self._ok(notice=self._notice(device_split_not_opened(written.folder), DEVICE_SPLIT_CONFIRM_TITLE))
+            return self._ok()
+
     def _open_settings(self, tab: Any) -> dict[str, Any]:
         if tab not in SETTINGS_TABS:
             raise _BadRequest
@@ -3627,5 +4219,13 @@ class CompareApi(Api):
 
 # 読むだけの処理(状態を変えない)。呼んだ後に、もう一方の窓へ知らせない(2つの窓が読み直しを送り合わないように。ADR-0160)
 _READ_ONLY = frozenset(
-    {CompareApi._state, CompareApi._state_for, CompareApi._result, CompareApi._ai_result, CompareApi._jump, CompareApi._all}
+    {
+        CompareApi._state,
+        CompareApi._state_for,
+        CompareApi._result,
+        CompareApi._ai_result,
+        CompareApi._jump,
+        CompareApi._all,
+        CompareApi._partner_choices,
+    }
 )

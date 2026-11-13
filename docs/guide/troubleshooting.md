@@ -11,6 +11,23 @@ DriftPilot is not code-signed by Apple or Microsoft, so the OS warns you once.
 
 Windows 10 may also need the Microsoft Edge WebView2 Runtime.
 
+## "Cannot use the display component" appears on Windows
+
+The folder was probably not fully extracted. The Windows built-in **Extract All** sometimes stops partway without an error and leaves out files that the window needs, such as `_internal\pythonnet\runtime\Python.Runtime.dll`. The zip file itself is fine.
+
+1. Close DriftPilot and delete the extracted folder.
+2. Extract the zip again with PowerShell, in the folder that has the zip (or use another tool such as 7-Zip):
+
+   ```powershell
+   Expand-Archive -Path .\DriftPilot-<version>-windows-x64.zip -DestinationPath C:\Tools
+   ```
+
+3. Open `C:\Tools\DriftPilot\DriftPilot.exe`.
+
+To check that the download is complete, compare the result of `Get-FileHash .\DriftPilot-<version>-windows-x64.zip` with `SHA256SUMS.txt` on the [Releases page](https://github.com/yusaku-umemoto/DriftPilot/releases).
+
+If the message still appears after extracting with PowerShell or 7-Zip, open an issue on [GitHub](https://github.com/yusaku-umemoto/DriftPilot/issues).
+
 ## The screen is in English and I want Japanese
 
 **Settings… → Display → Language → 日本語 → Save**, then restart DriftPilot.

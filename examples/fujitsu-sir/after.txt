@@ -1,0 +1,9 @@
+lan 0 ip address 192.0.2.1/24 3
+lan 1 ip address 203.0.113.18/30 3
+lan 1 ip route 0 default 203.0.113.17 1 0
+lan 2 ip address 198.51.100.6/30 3
+remote 0 name to-hq
+remote 0 ap 0 ike shared key text Example-Ike-New
+snmp agent address 192.0.2.1
+snmp manager 0 198.51.100.50 example-ro-new off disable
+sysname sir-branch-01

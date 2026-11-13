@@ -18,6 +18,7 @@ from driftpilot.llm_analyzer import LlmAnalysis
 from driftpilot.llm_analyzer.answer_format import plain_answer
 from driftpilot.messages import (
     CLI_ERROR_PREFIX,
+    CLI_RENDER_ERROR_OUTPUT_HEAD,
     CLI_RENDER_NO_DIFF,
     CLI_RENDER_NO_PROMPT,
     CLI_RENDER_SIDE_AFTER,
@@ -245,6 +246,9 @@ def to_json_all(outcome: MultiCompareOutcome) -> str:
         "results": [_payload(p.outcome) for p in outcome.pairs],
         "unpaired": [{"side": u.side, **_segment_json(u.segment)} for u in outcome.unpaired],
     }
+    if outcome.error_outputs:
+        # 組から外したエラーの出力の区間があるときだけ足す(ADR-0195 決定1。unpaired と同じ項目だけで、本文は入れない)
+        payload["error_output"] = [{"side": u.side, **_segment_json(u.segment)} for u in outcome.error_outputs]
     if outcome.single_log:
         # 1つのログの中で組にしたとき(ADR-0152 決定2)だけ足す。unpaired は1回だけのコマンドとコマンド不明の区間
         payload["single_log"] = True
@@ -266,6 +270,11 @@ def to_text_all(outcome: MultiCompareOutcome) -> str:
     if outcome.unpaired:
         out.append(CLI_RENDER_UNPAIRED_HEAD)
         for u in outcome.unpaired:
+            command = u.segment.command if u.segment.command is not None else CLI_RENDER_UNKNOWN_COMMAND
+            out.append(cli_render_unpaired_line(u.side == "before", u.segment.number, command, u.segment.line_count))
+    if outcome.error_outputs:
+        out.append(CLI_RENDER_ERROR_OUTPUT_HEAD)
+        for u in outcome.error_outputs:
             command = u.segment.command if u.segment.command is not None else CLI_RENDER_UNKNOWN_COMMAND
             out.append(cli_render_unpaired_line(u.side == "before", u.segment.number, command, u.segment.line_count))
     return "\n".join(out)

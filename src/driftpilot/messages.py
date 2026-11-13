@@ -89,6 +89,15 @@ def gui_web_start_failed(error_type: str) -> str:
     return f"画面の表示部品を使えません: {error_type}"
 
 
+def gui_web_files_missing(first: str, rest: int) -> str:
+    """Windows の exe で同梱のファイルが欠けているとき(ADR-0192)。first は最初に欠けたファイル、rest は残りの数(0 なら「ほか」を付けない)。"""
+    more = f" ほか {rest} 個" if rest else ""
+    return (
+        f"DriftPilot のファイルが足りません（{first}{more}）。zip の展開が途中で止まった見込みが高いです。"
+        "DriftPilot のフォルダーを消して、PowerShell の Expand-Archive か 7-Zip で zip を展開し直してください。"
+    )
+
+
 def gui_web_unknown_text() -> str:
     """画面が、ここに無い文の鍵を求めたとき(js_api の messages)。"""
     return "画面に出す文が見つかりません。"
@@ -2074,6 +2083,8 @@ COMPARE_BUTTON_SWAP = "入れ替え"  # pywebview の比較の画面だけ(ADR-0
 # pywebview の比較の画面だけ(ADR-0080 決定1・2。wx の画面はチェックボックスのまま)
 COMPARE_BUTTON_SEND_LLM = "AI に送る"
 COMPARE_AUTO_SENDING = "AI に送っています"
+# 「AI で解析」の送る前の確認を作っている間の AI の面の文(REQ-264。比較はやり直さないので比較の工程の名前は出さない)
+COMPARE_AI_PREPARING = "AI に送る内容を作っています"
 COMPARE_LLM_PANE = "AI 解析"
 # 知らせ(wx の MessageBox)の題
 COMPARE_READ_FAILED_TITLE = "読み込めません"
@@ -2091,6 +2102,12 @@ LLM_PREVIEW_TITLE = "AI に送る内容の確認"
 LLM_PREVIEW_PAYLOAD = "送信内容(マスク後。このあとに答えの書き方の決まり(固定の文)だけを足して送ります):"
 LLM_PREVIEW_SEND = "送信する"
 LLM_PREVIEW_DONT_SEND = "送信しない"
+# 送る前の確認で指示を直せる形(REQ-266 / ADR-0193 決定4。pywebview の比較の窓と AI の窓だけ)
+LLM_PREVIEW_INSTRUCTIONS = "指示（直せます）"
+LLM_PREVIEW_DIFF = "差分（伏せた後。直せません）"
+LLM_PREVIEW_FULL = "変更後の全文（伏せた後。直せません）"
+LLM_PREVIEW_RESET = "元に戻す"
+LLM_PREVIEW_EDIT_NOTE = "指示の欄は、この1回だけ直して送れます。差分の欄は直せません。"
 DIALOG_CANCEL = "キャンセル"  # pywebview のダイアログの取り消しのボタン(wx は OS の標準のボタン)
 
 
@@ -2161,17 +2178,41 @@ COMPARE_MULTI_TITLE = "コマンドの組"
 COMPARE_MULTI_COL_COMMAND = "コマンド"
 COMPARE_MULTI_COL_STATUS = "状態"
 COMPARE_MULTI_COL_DIFFS = "差分"
+COMPARE_MULTI_COL_SEND = "AI に送る"
+COMPARE_MULTI_SEND_ALL = "すべて選ぶ・すべて外す"
 # 一覧の、片方のログにしかないコマンドの区間の行の状態(ADR-0164 決定3)。無い側を言う
 MULTI_NO_AFTER = "変更後なし"  # 変更前にだけある区間
 MULTI_NO_BEFORE = "変更前なし"  # 変更後にだけある区間
 # 1つのログの中で組にしたとき(ADR-0152 決定2)の、1回だけのコマンドの区間の行の状態と、選んだときの説明
 MULTI_SINGLE = "1 回だけ"
 MULTI_SINGLE_NOTE = "このコマンドはログに 1 回だけなので、比べていません"
+# 打ち間違いなどのエラーの出力の区間の行の状態(ADR-0195 決定1。自動の組から外し、比べていない)
+MULTI_ERROR_OUTPUT = "エラーの出力（比べていません）"
 # 「全部」のタブ(ADR-0152 決定7)。比較の窓でまとめて比べたときだけ、結果のタブの先頭に出す
-COMPARE_TAB_ALL = "全部"
+COMPARE_TAB_ALL = "全コマンド比較結果"
 # 開いた .jsonl の帯に足す文(相手なしの区間は保存しない。あったかどうかはファイルから分からないので、いつも出す)
 MULTI_UNPAIRED_NOT_IN_FILE = "相手なしの区間は保存に入っていません"
 COMPARE_MULTI_NOTHING_TO_SAVE = "相手のある区間が無いため、保存できる組がありません。保存していません"
+# 組の手での選び直し(REQ-269 / ADR-0195 決定2)。一覧の下のボタンと、手で作った組の印、相手を選ぶ窓の文
+COMPARE_MULTI_CHOOSE_PARTNER = "相手を選ぶ…"
+COMPARE_MULTI_UNPAIR = "組を外す"
+MULTI_PAIRED_BY_HAND = "手で組にした"
+COMPARE_PARTNER_TITLE = "相手を選ぶ"
+
+
+def compare_partner_prompt(other_side: str, row_name: str) -> str:
+    """相手を選ぶ窓の案内。other_side は相手を選ぶ側("before"・"after")、row_name は選んだ行の名前(「変更後 区間 4: show ip route」)。"""
+    return f"{_SIDE_LABEL[other_side]}の区間から、{row_name} の相手を選んでください"
+
+
+def partner_state_paired(place: str, command: str) -> str:
+    """相手の候補が、今は別の組に入っているときの状態の文。選ぶと、その組の残りの区間は相手なしになる。"""
+    return f"組になっています（選ぶと {place}: {command} は相手なしになります）"
+
+
+def partner_state_paired_error(place: str, command: str) -> str:
+    """同じ。残りの区間の本文がエラーの出力のときは、相手なしでなくエラーの出力に戻る。"""
+    return f"組になっています（選ぶと {place}: {command} はエラーの出力に戻ります）"
 
 
 def multi_overall(status: str, total: int, count: int) -> str:
@@ -2223,6 +2264,11 @@ def unpaired_segment_note(side: str, number: int, command: str, line_count: int)
     """一覧で相手なしの行を選んだときの説明(表は空)。"""
     other = _SIDE_LABEL["after" if side == "before" else "before"]
     return f"{_SIDE_LABEL[side]}の区間 {number}（{command}・{line_count} 行）は、{other}に同じコマンドの区間が無いため比べていません"
+
+
+def error_output_note(command: str, line_count: int) -> str:
+    """一覧でエラーの出力の行を選んだときの説明(表は空。ADR-0195 決定1)。"""
+    return f"この区間（{command}・{line_count} 行）は打ち間違いなどのエラーの出力なので、比べていません"
 
 
 def compare_llm_confirm_hint() -> str:
@@ -2329,6 +2375,15 @@ COMPARE_AI_INPUT_HINT = "Enter で送信、Shift+Enter で改行"
 COMPARE_AI_PROFILE = "AI プロファイル"
 COMPARE_AI_PROMPT = "プロンプト"
 COMPARE_AI_ANALYZE = "AI で解析"
+# まとめて比べたとき、AI に送る組を選ぶ(REQ-265。ADR-0193 決定3)
+COMPARE_AI_NO_PAIRS = "AI に送る組を 1 つ以上選んでください"
+
+
+def compare_send_pairs(on: int, total: int) -> str:
+    """AI の面の「送る組: 3 / 12」。total は送れる組の数。"""
+    return f"送る組: {on} / {total}"
+
+
 # キャラクターがオンのときの答えの吹き出しの名前と顔の title、ボタンと空の面の案内(ADR-0181 決定1・2)。
 # 窓に出すだけ。保存・HTML・CSV・コピー・送る文には入れない(決定3)
 CHARACTER_NAME = "Mirarin"
@@ -2372,6 +2427,11 @@ def COMPARE_FIRST_REQUEST_PROMPT(name: str) -> str:  # noqa: N802 (名前は REQ
 def COMPARE_FIRST_REQUEST_AUTO(name: str) -> str:  # noqa: N802 (名前は REQ-242 §2 のとおり)
     """自動送信のときの最初の依頼の吹き出しの文(決定1)。name は送ったときのプロンプトの名前。"""
     return f"自動で送りました（プロンプト『{name}』）"
+
+
+def COMPARE_FIRST_REQUEST_EDITED(text: str) -> str:  # noqa: N802 (名前は REQ-266 §4 のとおり)
+    """指示を直して送ったときの最初の依頼の吹き出しの文(REQ-266 §4)。text は直さなかったときの文に添える。"""
+    return f"{text}（指示を直して送りました）"
 
 
 # 最初の依頼の吹き出しの読み上げの名前(追加の質問の吹き出しと同じ「質問」)
@@ -2498,6 +2558,11 @@ GUI_WEB_TEXTS.update(
         "compare.multi.col.command": COMPARE_MULTI_COL_COMMAND,
         "compare.multi.col.status": COMPARE_MULTI_COL_STATUS,
         "compare.multi.col.diffs": COMPARE_MULTI_COL_DIFFS,
+        "compare.multi.col.send": COMPARE_MULTI_COL_SEND,
+        "compare.multi.send_all": COMPARE_MULTI_SEND_ALL,
+        "compare.multi.choose_partner": COMPARE_MULTI_CHOOSE_PARTNER,
+        "compare.multi.unpair": COMPARE_MULTI_UNPAIR,
+        "compare.multi.paired_by_hand": MULTI_PAIRED_BY_HAND,
         "compare.paste.prompt": PASTE_PROMPT,
         "compare.dialog.ok": DIALOG_OK,
         "compare.dialog.cancel": DIALOG_CANCEL,
@@ -3745,6 +3810,11 @@ def sm_preview_summary(sent: int, total: int) -> str:
     return f"送る差分 {sent} 件(差分は全部で {total} 件)"
 
 
+def compare_pair_progress(index: int, total: int, command: str | None) -> str:
+    """まとめて比べているときの進み具合の文(REQ-264 §3)。例: 「比較しています（12 / 40）: show ip route」。コマンドが分からない組は SM_UNKNOWN_COMMAND。"""
+    return f"比較しています（{index} / {total}）: {command if command else SM_UNKNOWN_COMMAND}"
+
+
 # --- コマンドの共通の頭(REQ-258) ---
 CLI_ERROR_PREFIX = "エラー: "
 CLI_WARNING_PREFIX = "警告: "
@@ -3998,6 +4068,7 @@ CLI_RENDER_NONE = "なし"
 CLI_RENDER_NO_PROMPT = "なし(切り分けなし)"
 CLI_RENDER_UNKNOWN_COMMAND = "(コマンド不明)"
 CLI_RENDER_UNPAIRED_HEAD = "=== 相手なし ==="
+CLI_RENDER_ERROR_OUTPUT_HEAD = "=== エラーの出力（比べていません） ==="
 
 
 def cli_render_unparsed(before: int, after: int) -> str:
@@ -4338,6 +4409,63 @@ SMODEL_TEXTS = {
     "no_plan_or_preview": "送信できる計画とプレビューがありません",
     "export_kind": "出力の形が違います: {kind!r}",
 }
+
+
+# --- 複数の機器が入ったログを、機器ごとのファイルに分けて一括比較で開く(ADR-0194 / REQ-267) ---
+DEVICE_SPLIT_BUTTON = "機器ごとに分けて一括比較で開く…"
+DEVICE_NAMES_LIMIT = 5  # 知らせに出す機器の名前は、各側この数まで(残りは「ほか N 台」)
+DEVICE_NONE = "なし"
+DEVICE_SPLIT_NO_DEVICE = "変更前か変更後に、機器（プロンプトの hostname）が見つからないため、分けられません"
+DEVICE_SPLIT_SAME_LOG = "変更前と変更後が同じ文のため、分けられません（1 つのログの中で組にしているとき）"
+DEVICE_SPLIT_BUSY = "比較中・送信中、または一括比較が動いている間は、分けられません"
+DEVICE_SPLIT_CONFIRM_TITLE = "機器ごとに分けて一括比較で開く"
+DEVICE_SPLIT_CONFIRM_YES = "フォルダーを選ぶ…"
+
+
+def _device_names(names: Sequence[str]) -> str:
+    """知らせの片側の機器の名前。多いときは DEVICE_NAMES_LIMIT 個まで出し、残りは「ほか N 台」。"""
+    if not names:
+        return DEVICE_NONE
+    shown = "・".join(names[:DEVICE_NAMES_LIMIT])
+    rest = len(names) - DEVICE_NAMES_LIMIT
+    return f"{shown}・ほか {rest} 台" if rest > 0 else shown
+
+
+def device_notice_text(before: Sequence[str], after: Sequence[str]) -> str:
+    """比較の窓の、複数の機器の知らせ。機器の無い側は「なし」。"""
+    return f"このログには複数の機器があります（変更前: {_device_names(before)}／変更後: {_device_names(after)}）。"
+
+
+def device_split_confirm_body() -> str:
+    """書き出す前の注意のダイアログの本文(元の config と同じ扱いにする注意を付ける)。"""
+    return (
+        f"機器ごとに分けたファイルは、{save_caution()}。"
+        "書き出す先のフォルダーを選んでください。その下に新しいフォルダーを作って書きます（元のファイルは変えません）。"
+    )
+
+
+def device_split_done(folder: Path, before_count: int, after_count: int) -> str:
+    """書き終えたときの、窓の下の知らせ。"""
+    return f"機器ごとに分けました: {folder}（変更前 {before_count} 台・変更後 {after_count} 台）"
+
+
+def device_split_failed(reason: str, folder: Path | None) -> str:
+    """書けなかったとき。途中まで書いたフォルダーがあれば、消さずに残したことを添える。"""
+    base = f"機器ごとのファイルを書けませんでした: {reason}"
+    if folder is None:
+        return base
+    return f"{base}。途中まで書いたものは {folder} に残しています（消していません）"
+
+
+def device_split_not_opened(folder: Path) -> str:
+    """ファイルは書いたが、一括比較の窓には入れられなかったとき。"""
+    return (
+        f"機器ごとのファイルは {folder} に書きました。"
+        "一括比較の窓では組を直している途中か比較が動いているため、フォルダーを入れていません"
+    )
+
+
+GUI_WEB_TEXTS.update({"compare.split_devices": DEVICE_SPLIT_BUTTON})
 
 
 # --- 英語の版(ADR-0190 決定2)。言語が "en" のとき、messages_en.py の同じ名前の値でこのモジュールの名前を置き換える ---

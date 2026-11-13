@@ -590,6 +590,8 @@ _ID = re.compile(r"MSK-\d{2,}")
 # UNS-10〜14 は ADR-0141(HSRP・VRRP の認証とセルラーのモデム)。key-string の行は表の MSK-24 で伏せるため除く
 # UNS-15 は ADR-0161(FortiGate の SNMP コミュニティ名。v1・v2c では実質のパスワード)。語 name を秘密語にすると
 # ほとんどの名前の行が送れなくなるため、場所を `config system snmp community` に限る(場所が分からない入力では当たらない)
+# UNS-16 は ADR-0191(富士通 Si-R の BGP の認証の鍵。`bgp neighbor <n> authentication <値> [encrypted]`)。語が authentication で
+# 秘密語に当たらず、語を秘密語にすると無害な行まで当たるため、形で送らない。Si-R の config は字下げが無いので場所の条件は付けない
 UNSENT_FORMS: tuple[tuple[str, str], ...] = (
     ("UNS-01", r"ip nhrp authentication .+"),
     ("UNS-02", r"glbp \d+ authentication .+"),
@@ -606,6 +608,7 @@ UNSENT_FORMS: tuple[tuple[str, str], ...] = (
     ("UNS-13", r"(?:no )?(?:lte|gsm|cdma) .+"),
     ("UNS-14", r"profile id \d+ apn .+"),
     ("UNS-15", r"set name .+"),
+    ("UNS-16", r"bgp neighbor \d+ authentication .+"),
 )
 # 形の一覧の場所の条件(書き方は表の scope と同じ)。ここに無い形はどこでも当てる
 UNSENT_FORM_SCOPES: dict[str, str] = {
@@ -632,6 +635,7 @@ UNSENT_FORM_HEADS: tuple[tuple[str, str], ...] = (
     ("UNS-13", r"(?:no )?(?:lte|gsm|cdma)"),
     ("UNS-14", r"profile id \d+(?: apn)?"),
     ("UNS-15", r"set name"),
+    ("UNS-16", r"bgp neighbor \d+ authentication"),
 )
 
 _FORM_ID = re.compile(r"UNS-\d{2,}")

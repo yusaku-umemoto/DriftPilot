@@ -16,7 +16,7 @@ from driftpilot.core.batch import STATUSES
 from driftpilot.core.types import SIDES
 from driftpilot.messages import BATCHIO_TEXTS as _T
 from driftpilot.messages import multi_pair_name
-from driftpilot.storage import JOB_KEY, build_record, default_filename
+from driftpilot.storage import JOB_KEY, PAIRED_BY_HAND_KEY, build_record, default_filename
 
 # まとめての比較の保存の拡張子(JSON Lines)
 JSONL_SUFFIX = ".jsonl"
@@ -93,6 +93,9 @@ def pair_record(
         "index": job.index,
         "selection_source": dict.fromkeys(SIDES),
     }
+    if pair.manual:
+        # 比較の窓で手で組にした行だけ印を足す(自動の組の行は今と1字も変えない。REQ-269 §4)
+        record[JOB_KEY][PAIRED_BY_HAND_KEY] = True
     return record
 
 

@@ -276,7 +276,7 @@ def prompt_too_long(text: str) -> bool:
     return len(text) > MAX_PROMPT_CHARS
 
 
-def check_question(question: str, secret_words: Sequence[str]) -> str | None:
+def check_question(question: str, secret_words: Sequence[str], *, max_chars: int = MAX_QUESTION_CHARS) -> str | None:
     """質問の文を確かめる。送ってよければ None、断るなら理由の種類(REFUSE_*。質問の中身は返さない)。
 
     1行ずつ、比較のときと同じ秘密の語の Masker で、祖先の行なしと、比較と同じく字下げから求めた祖先の行付き
@@ -284,10 +284,11 @@ def check_question(question: str, secret_words: Sequence[str]) -> str | None:
     PEM の開始行(`-----BEGIN `)は行の判定ではそのまま送る側になるため、別に断る(比較では PEM のかたまりを送らない。ADR-0019)。
     割れた秘密の行のかたまり(ADR-0137 決定2)に当たる行があれば、送らない行として断る。
     見えない文字(ADR-0142)は、行に分ける前の全文で見て、送らない行として断る(垂直タブや NEL などで行が分かれて消えるため)。
+    max_chars は長さの上限(既定は追加の質問の MAX_QUESTION_CHARS。送信前の確認で直した指示は、送る文全体の上限で見る。REQ-266)。
     """
     if not question.strip():
         return REFUSE_BLANK
-    if len(question) > MAX_QUESTION_CHARS:
+    if len(question) > max_chars:
         return REFUSE_TOO_LONG
     if has_unseen_char(question):
         return REFUSE_UNSENT
