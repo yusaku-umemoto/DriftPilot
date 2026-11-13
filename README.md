@@ -7,7 +7,7 @@
 
 **Diff Cisco, FortiGate and Fujitsu Si-R configs by meaning — and let AI explain the change without ever seeing your passwords.**
 
-[日本語](README.ja.md) · [User guide](docs/guide/README.md) · [Download](https://github.com/yusaku-umemoto/DriftPilot/releases/latest)
+[日本語](README.ja.md) · [User guide](docs/guide/README.md) · [Download](#download)
 
 ![Your diff on the left with plain-text BGP passwords and SNMP communities; what the AI receives on the right, with each secret replaced by <secret:N>](docs/images/masking-demo.svg)
 
@@ -23,7 +23,7 @@ DriftPilot compares two network device configs (or two `show` outputs), shows on
 
 ### With the app (no Python needed)
 
-1. Download the file for your OS from [Releases](https://github.com/yusaku-umemoto/DriftPilot/releases/latest) and open it (see [Install](#install) for the first-launch warning).
+1. Download the file for your OS from [Releases](https://github.com/yusaku-umemoto/DriftPilot/releases/latest) and open it. On Windows, unblock the zip before extracting it (see [Download](#download)); see [Install](#install) for the first-launch warning.
 2. Download the sample configs: [`examples/cisco/before.cfg`](examples/cisco/before.cfg) and [`examples/cisco/after.cfg`](examples/cisco/after.cfg).
 3. Drop both files onto the DriftPilot window. The comparison starts automatically.
 
@@ -78,23 +78,49 @@ FortiGate and Si-R samples are in [`examples/`](examples/README.md), with a shor
 
 The masking code lives in `src/driftpilot/llm_analyzer/`, so anyone can review it. Run `driftpilot mask-patterns` to print the full rule table.
 
-## Install
-
-### Prebuilt apps (no Python needed)
+## Download
 
 Download the file for your OS from [Releases](https://github.com/yusaku-umemoto/DriftPilot/releases/latest).
 
 | OS | File | Notes |
 |---|---|---|
-| Windows 10 / 11 (x64) | `DriftPilot-<version>-windows-x64.zip` | Extract and open `DriftPilot.exe`. Windows 10 may need the WebView2 Runtime. |
+| Windows 10 / 11 (x64) | `DriftPilot-<version>-windows-x64.zip` | **Unblock the zip first (below)**, then extract it and open `DriftPilot.exe`. Windows 10 may need the WebView2 Runtime. |
 | macOS (Apple silicon) | `DriftPilot-<version>-macos-arm64.dmg` | Move `DriftPilot.app` to Applications and open it. |
+
+### Windows: unblock the zip before extracting
+
+A browser marks downloaded files as "from the internet". If you extract the zip with Windows "Extract All" while it has this mark, every file inside gets the mark too, and DriftPilot cannot open its window ("Cannot use the display component: RuntimeError"). Before extracting:
+
+1. Right-click the zip and choose **Properties**.
+
+   <img src="docs/images/unblock-zip-menu.png" alt="The right-click menu of the zip, with Properties near the bottom" width="240">
+
+2. On the **General** tab, check **Unblock** next to "Security: This file came from another computer…", then click **OK**.
+
+   <img src="docs/images/unblock-zip-properties.png" alt="The Properties window of the zip, with Unblock checked next to Security" width="360">
+
+3. Extract the zip (Extract All) and open `DriftPilot.exe`.
+
+The screenshots are from Japanese Windows: 「プロパティ」 is Properties and 「許可する」 is Unblock. If there is no Unblock check box, the zip has no mark and you can extract it as it is.
+
+Already extracted it? Open PowerShell in the DriftPilot folder, run the command below, and open `DriftPilot.exe` again. Extracting with 7-Zip or PowerShell `Expand-Archive` does not carry the mark over.
+
+```powershell
+Get-ChildItem -Recurse -File | Unblock-File
+```
+
+## Install
+
+### Prebuilt apps (no Python needed)
+
+Download the file for your OS as described in [Download](#download).
 
 The apps are not code-signed, so your OS will warn you the first time:
 
 - **Windows:** "Windows protected your PC" → "More info" → "Run anyway"
 - **macOS:** "cannot verify the developer" → System Settings → Privacy & Security → "Open Anyway"
 
-If Windows shows "Cannot use the display component", the zip was not fully extracted. Extract it again with PowerShell `Expand-Archive` or 7-Zip ([details](docs/guide/troubleshooting.md#cannot-use-the-display-component-appears-on-windows)).
+If Windows shows "Cannot use the display component", Windows is usually blocking the extracted files: unblock them as described in [Download](#download). If some files are missing, delete the folder and extract the zip again with PowerShell `Expand-Archive` or 7-Zip ([details](docs/guide/troubleshooting.md#cannot-use-the-display-component-appears-on-windows)).
 
 ### From source
 

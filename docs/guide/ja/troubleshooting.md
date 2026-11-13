@@ -13,7 +13,24 @@ Windows 10 では、Microsoft Edge WebView2 Runtime が要ることがありま�
 
 ## Windows で「画面の表示部品を使えません」と出る
 
-英語の画面では "Cannot use the display component" と出ます。展開が途中で止まっている見込みが高いです。Windows 標準の **すべて展開** は、誤りを出さずに途中で止まり、`_internal\pythonnet\runtime\Python.Runtime.dll` など、画面に要るファイルが出ないことがあります。zip そのものは壊れていません。
+英語の画面では "Cannot use the display component" と出ます。
+
+### Windows がファイルを止めている（ほとんどはこちら）
+
+ブラウザで取った zip には、「インターネットから取った」印が付きます。Windows 標準の **すべて展開** は、この印を展開した全部のファイルに引き継ぎます。印の付いた DriftPilot の .NET のファイル（`_internal\pythonnet\runtime\Python.Runtime.dll` など）を Windows が読まないため、画面が開きません。
+
+- **展開する前なら:** zip を右クリック →「**プロパティ**」→「**全般**」タブの「**許可する**」に✔ →「**OK**」を押してから展開します。写真は README の「[ダウンロード方法](../../../README.ja.md#ダウンロード方法)」にあります。
+- **もう展開したなら:** DriftPilot のフォルダーで PowerShell を開き、次を実行してから `DriftPilot.exe` を開き直します。
+
+  ```powershell
+  Get-ChildItem -Recurse -File | Unblock-File
+  ```
+
+7-Zip や PowerShell の `Expand-Archive` で展開すると、印は引き継がれません。
+
+### ファイルが足りない
+
+DriftPilot が「ファイルが足りません」と知らせたときは、展開が途中で止まっています。
 
 1. DriftPilot を閉じて、展開したフォルダーを消します。
 2. zip のあるフォルダーで、PowerShell で展開し直します（7-Zip などほかのソフトでもかまいません）。
@@ -26,7 +43,7 @@ Windows 10 では、Microsoft Edge WebView2 Runtime が要ることがありま�
 
 取った zip が欠けていないかは、`Get-FileHash .\DriftPilot-<版>-windows-x64.zip` の結果と、[Releases のページ](https://github.com/yusaku-umemoto/DriftPilot/releases) の `SHA256SUMS.txt` を比べて確かめられます。
 
-PowerShell や 7-Zip で展開しても出るときは、[GitHub の Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) で知らせてください。
+印を外しても、PowerShell や 7-Zip で展開しても出るときは、[GitHub の Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) で知らせてください。
 
 ## 画面が英語で、日本語にしたい
 

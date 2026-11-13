@@ -7,7 +7,7 @@
 
 **Cisco・FortiGate・Si-R の config を意味で比べ、パスワードを見せずに AI に変更を説明させるツールです。**
 
-[English](README.md) · [手引き](docs/guide/ja/README.md) · [ダウンロード](https://github.com/yusaku-umemoto/DriftPilot/releases/latest)
+[English](README.md) · [手引き](docs/guide/ja/README.md) · [ダウンロード](#ダウンロード方法)
 
 ![左は手元の差分で、BGP のパスワードと SNMP のコミュニティ名がそのまま見える。右は AI が受け取る文で、秘密がそれぞれ <secret:N> に置き換わっている](docs/images/masking-demo.svg)
 
@@ -23,7 +23,7 @@
 
 ### 配布版で（Python は要りません）
 
-1. [Releases](https://github.com/yusaku-umemoto/DriftPilot/releases/latest) から使う OS の分を取って開きます（初めて開くときの警告は「[入れる](#入れる)」を見てください）
+1. [Releases](https://github.com/yusaku-umemoto/DriftPilot/releases/latest) から使う OS の分を取って開きます。Windows では、展開する前に zip の「許可する」に✔を入れてください（「[ダウンロード方法](#ダウンロード方法)」）。初めて開くときの警告は「[入れる](#入れる)」を見てください
 2. 例の config を取ります: [`examples/cisco/before.cfg`](examples/cisco/before.cfg) と [`examples/cisco/after.cfg`](examples/cisco/after.cfg)
 3. 2 つのファイルを DriftPilot の窓に落とします。比較が自動で始まります
 
@@ -78,23 +78,49 @@ FortiGate と Si-R の例と、短い試し方は [`examples/`](examples/README.
 
 伏せる処理のコードは `src/driftpilot/llm_analyzer/` にあります。誰でも確かめられます。`driftpilot mask-patterns` で伏せる表の全体を出せます。
 
-## 入れる
-
-### 配布版（Python は要りません）
+## ダウンロード方法
 
 [Releases](https://github.com/yusaku-umemoto/DriftPilot/releases/latest) から、使う OS の分を取ってください。
 
 | OS | ファイル | メモ |
 |---|---|---|
-| Windows 10 / 11（x64） | `DriftPilot-<版>-windows-x64.zip` | 展開して `DriftPilot.exe` を開きます。Windows 10 では WebView2 Runtime が要ることがあります |
+| Windows 10 / 11（x64） | `DriftPilot-<版>-windows-x64.zip` | **先に zip の「許可する」に✔を入れ（下を見てください）**、それから展開して `DriftPilot.exe` を開きます。Windows 10 では WebView2 Runtime が要ることがあります |
 | macOS（Apple シリコン） | `DriftPilot-<版>-macos-arm64.dmg` | `DriftPilot.app` を「アプリケーション」に入れて開きます |
+
+### Windows では、展開する前に zip の「許可する」に✔を入れる
+
+ブラウザで取ったファイルには、「インターネットから取った」印が付きます。印が付いたまま Windows の「すべて展開」で展開すると、中の全部のファイルにも印が付き、DriftPilot の画面が開きません（「画面の表示部品を使えません」、英語の画面では「Cannot use the display component: RuntimeError」）。展開する前に、次のようにしてください。
+
+1. zip を右クリックして「**プロパティ**」を選びます。
+
+   <img src="docs/images/unblock-zip-menu.png" alt="zip の右クリックのメニュー。下のほうにプロパティがある" width="240">
+
+2. 「**全般**」タブの下の「セキュリティ: このファイルは他のコンピューターから取得したものです…」の「**許可する**」に✔を入れて、「**OK**」を押します。
+
+   <img src="docs/images/unblock-zip-properties.png" alt="zip のプロパティの窓。セキュリティの許可するに✔が入っている" width="360">
+
+3. zip を展開して（すべて展開）、`DriftPilot.exe` を開きます。
+
+「許可する」が無いときは、印が付いていないので、そのまま展開して構いません。
+
+もう展開してしまったときは、DriftPilot のフォルダーで PowerShell を開き、次を実行してから `DriftPilot.exe` を開き直してください。7-Zip や PowerShell の `Expand-Archive` で展開すると、印は引き継がれません。
+
+```powershell
+Get-ChildItem -Recurse -File | Unblock-File
+```
+
+## 入れる
+
+### 配布版（Python は要りません）
+
+「[ダウンロード方法](#ダウンロード方法)」のとおりに、使う OS の分を取ってください。
 
 署名をしていないので、初めて開くときに OS の警告が出ます。
 
 - **Windows:** 「Windows によって PC が保護されました」→「詳細情報」→「実行」
 - **Mac:** 「開発元を確認できない」→ システム設定の「プライバシーとセキュリティ」→「このまま開く」
 
-Windows で「画面の表示部品を使えません」と出たら、zip の展開が途中で止まっています。PowerShell の `Expand-Archive` か 7-Zip で展開し直してください（[くわしく](docs/guide/ja/troubleshooting.md)）。
+Windows で「画面の表示部品を使えません」と出たら、ほとんどは Windows が展開したファイルを止めています。「[ダウンロード方法](#ダウンロード方法)」のとおりに印を外してください。ファイルが足りないときは、フォルダーを消して、PowerShell の `Expand-Archive` か 7-Zip で展開し直してください（[くわしく](docs/guide/ja/troubleshooting.md)）。
 
 ### ソースから
 

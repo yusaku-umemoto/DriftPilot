@@ -4,7 +4,7 @@
 
 ## Start the app
 
-- **Windows (zip):** unzip the folder and open `DriftPilot.exe`.
+- **Windows (zip):** first unblock the zip (right-click → **Properties** → **Unblock**, see [Download](../../README.md#download)), then unzip the folder and open `DriftPilot.exe`.
 - **Mac:** open `DriftPilot.app` from Applications.
 - **From source:** `driftpilot gui`.
 

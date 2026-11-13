@@ -4,7 +4,7 @@
 
 ## 起動
 
-- **Windows（zip）:** 展開したフォルダーの `DriftPilot.exe` を開きます。
+- **Windows（zip）:** 先に zip の「許可する」に✔を入れ（右クリック →「**プロパティ**」→「**許可する**」。「[ダウンロード方法](../../../README.ja.md#ダウンロード方法)」）、展開したフォルダーの `DriftPilot.exe` を開きます。
 - **Mac:** 「アプリケーション」の `DriftPilot.app` を開きます。
 - **ソースから入れた場合:** `driftpilot gui`。
 

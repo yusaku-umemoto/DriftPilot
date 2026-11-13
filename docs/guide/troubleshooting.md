@@ -13,7 +13,22 @@ Windows 10 may also need the Microsoft Edge WebView2 Runtime.
 
 ## "Cannot use the display component" appears on Windows
 
-The folder was probably not fully extracted. The Windows built-in **Extract All** sometimes stops partway without an error and leaves out files that the window needs, such as `_internal\pythonnet\runtime\Python.Runtime.dll`. The zip file itself is fine.
+### Windows is blocking the files (most common)
+
+A browser marks a downloaded zip as "from the internet". Windows **Extract All** copies this mark onto every extracted file, and Windows then refuses to load DriftPilot's .NET files (such as `_internal\pythonnet\runtime\Python.Runtime.dll`), so the window cannot open.
+
+- **Before extracting:** right-click the zip → **Properties** → on the **General** tab, check **Unblock** → **OK**, then extract it. See [Download](../../README.md#download) in the README for screenshots.
+- **Already extracted:** open PowerShell in the DriftPilot folder and run the command below, then open `DriftPilot.exe` again.
+
+  ```powershell
+  Get-ChildItem -Recurse -File | Unblock-File
+  ```
+
+Extracting with 7-Zip or PowerShell `Expand-Archive` does not carry the mark over.
+
+### Some files are missing
+
+If DriftPilot says that some files are missing, the folder was not fully extracted.
 
 1. Close DriftPilot and delete the extracted folder.
 2. Extract the zip again with PowerShell, in the folder that has the zip (or use another tool such as 7-Zip):
@@ -26,7 +41,7 @@ The folder was probably not fully extracted. The Windows built-in **Extract All*
 
 To check that the download is complete, compare the result of `Get-FileHash .\DriftPilot-<version>-windows-x64.zip` with `SHA256SUMS.txt` on the [Releases page](https://github.com/yusaku-umemoto/DriftPilot/releases).
 
-If the message still appears after extracting with PowerShell or 7-Zip, open an issue on [GitHub](https://github.com/yusaku-umemoto/DriftPilot/issues).
+If the message still appears after unblocking the files or extracting with PowerShell or 7-Zip, open an issue on [GitHub](https://github.com/yusaku-umemoto/DriftPilot/issues).
 
 ## The screen is in English and I want Japanese
 
