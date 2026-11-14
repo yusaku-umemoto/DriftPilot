@@ -100,6 +100,15 @@ def gui_web_files_missing(first: str, rest: int) -> str:
     )
 
 
+def gui_web_files_blocked(first: str) -> str:
+    """Text for when bundled files in a Windows exe still carry the "downloaded from the internet" mark (ADR-0196). first is the first marked file."""
+    return (
+        f"Windows is blocking DriftPilot files downloaded from the internet ({first}). "
+        "Delete the DriftPilot folder, right-click the zip → Properties → check Unblock → OK, and extract it again. "
+        "Or run Get-ChildItem -Recurse -File | Unblock-File in PowerShell in the DriftPilot folder."
+    )
+
+
 def gui_web_unknown_text() -> str:
     """Text for when the window asks for a text key that does not exist here (js_api messages)."""
     return "The text for this window could not be found."
@@ -2080,6 +2089,7 @@ COMPARE_COL_OP = "Operation"
 COMPARE_COL_CATEGORY = "Category"
 COMPARE_COL_TARGET = "Target"
 COMPARE_COL_ITEM = "Item"
+COMPARE_COL_TARGET_ITEM = "Target / item"
 COMPARE_COL_BEFORE = "Before"
 COMPARE_COL_AFTER = "After"
 COMPARE_COL_BEFORE_NO = "Bef."
@@ -2558,6 +2568,7 @@ GUI_WEB_TEXTS.update(
         "compare.col.category": COMPARE_COL_CATEGORY,
         "compare.col.target": COMPARE_COL_TARGET,
         "compare.col.item": COMPARE_COL_ITEM,
+        "compare.col.target_item": COMPARE_COL_TARGET_ITEM,
         "compare.col.before": COMPARE_COL_BEFORE,
         "compare.col.after": COMPARE_COL_AFTER,
         "compare.col.before_no": COMPARE_COL_BEFORE_NO,
@@ -4009,7 +4020,7 @@ CLI_BATCH_HELP = {
     "quiet": "Do not print the summary to standard error",
     "dry_run": "Only list the planned comparisons without running them (exit code 0)",
     "save": "Save each job's result as one file per job in this directory (default: do not save)",
-    "pair_by_name": "Pair the files directly under the two folders whose names match exactly, and list them (does not compare)",
+    "pair_by_name": "Pair the files directly under the two folders whose names match exactly, and list them (does not compare). The device type of each pair is detected from its content (to use a fixed type, edit platform in the manifest written by --write-manifest).",
     "confirm": "Run the comparison for the pairs of --pair-by-name. With --llm, send to the AI after you have checked the summary",
     "write_manifest": "Write the pairs of --pair-by-name as a manifest file and finish",
     "llm": "Send the differences of each pair to the AI and add notes. Without --confirm, only the summary of what would be sent is shown and nothing is sent",
@@ -4105,6 +4116,8 @@ def cli_batch_manifest_written(path: str) -> str:
 CLI_RENDER_SIDE_BEFORE = "Before"
 CLI_RENDER_SIDE_AFTER = "After"
 CLI_RENDER_NO_DIFF = "No differences"
+# The structured value is absent (e.g. the "before" of an added row. REQ-276)
+STRUCTURED_VALUE_NOT_SET = "(not set)"
 CLI_RENDER_NONE = "none"
 CLI_RENDER_NO_PROMPT = "none (not split)"
 CLI_RENDER_UNKNOWN_COMMAND = "(unknown command)"

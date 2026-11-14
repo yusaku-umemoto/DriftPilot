@@ -1048,6 +1048,13 @@ body {
   text-overflow: ellipsis;
 }
 
+/* 構造化比較・全コマンド比較結果の対象・値のセルは「…」で切らず、折り返して全部出す（REQ-276。行の高さは中身に合わせる） */
+.pilot-table--fixed td.pilot-cell-wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+
 .pilot-table--fixed tbody tr {
   cursor: default;
 }
@@ -1478,6 +1485,19 @@ body[data-pair-dragging="true"] [data-drop-blocked="true"] * {
 
 .pilot-col-value {
   width: 25.5%;
+}
+
+/* 構造化比較（REQ-276）: 操作の印 4・分類 11（.pilot-col-category）・対象と項目 25・変更前 30・変更後 30 */
+.pilot-col-op-mark {
+  width: 4%;
+}
+
+.pilot-col-where {
+  width: 25%;
+}
+
+.pilot-col-value-wide {
+  width: 30%;
 }
 
 /* 単純比較: 印 77・前 48・変更前 394・後 48・変更後 394（印の列は「移動元 12」が入る幅。REQ-228 §8.2。REQ-227 では 5%） */

@@ -6,6 +6,7 @@ LLM 解析(REQ-16)は JSON では常に最後の llm に入り、text では指�
 全部の比較(--all-segments。REQ-121)は to_json_all・to_text_all。組ごとの中身は1組の整形と同じものを使う。
 外したページ送りの印の数(ADR-0134 決定2)は、JSON では segmentation の各側の pager_marks に出す。text では警告の行を、
 構造化の欄があればその中、無ければ(show・raw だけ)「== segmentation ==」の前に出す。
+構造化比較の値の文字は value_text(REQ-276。空の項目を省いた「キー: 値」)。一番外が None なら「（未設定）」。JSON は変えない。
 機種を自動(--platform auto)にして config と決まったとき(ADR-0151 決定7)は、text では先頭に「機種: 自動（FortiGate）」の1行、
 JSON では exclusions の後ろに platform_used(使った系統の名前。指定なしは null)を出す。自動でないときは今のまま。
 """
@@ -28,6 +29,7 @@ from driftpilot.messages import (
     CLI_WARNING_PREFIX,
     RAW_MOVES_SKIPPED_CLI,
     SM_WHOLE_ROW,
+    STRUCTURED_VALUE_NOT_SET,
     auto_platform_line,
     cli_render_applied,
     cli_render_enabled_rules,
@@ -52,6 +54,7 @@ from driftpilot.messages import (
 from driftpilot.core import SCHEMA_VERSION, CompareOutcome, MultiCompareOutcome, PairResult, SideSegmentation
 from driftpilot.diff_engine import CompareResult, RawCompareResult, SafetyWarning, ShowCompareResult
 from driftpilot.segmentation import Segment
+from driftpilot.value_text import value_text
 
 SIDES = (("before", CLI_RENDER_SIDE_BEFORE), ("after", CLI_RENDER_SIDE_AFTER))
 
@@ -73,10 +76,12 @@ def _plain(value: Any) -> Any:
 def _diff_value(d: Any, side: str) -> str:
     """差分の値の表示。足した・消した経路に添えた機種固有値は、辞書から外して短い注記にする(ADR-0072)。"""
     value = d[side]
+    if value is None:
+        return STRUCTURED_VALUE_NOT_SET
     if d["category"] == "static_routes" and isinstance(value, dict) and "vendor_specific" in value:
         rest = {k: v for k, v in value.items() if k != "vendor_specific"}
-        return f"{rest!r}{route_detail_note(value['vendor_specific'])}"
-    return repr(value)
+        return f"{value_text(rest)}{route_detail_note(value['vendor_specific'])}"
+    return value_text(value)
 
 
 def _structured_text(result: CompareResult | None, error: str | None, warnings: list[SafetyWarning]) -> list[str]:

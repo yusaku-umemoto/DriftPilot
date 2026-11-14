@@ -189,7 +189,7 @@ driftpilot batch --pair-by-name before_dir after_dir --confirm
 
 ## 状態
 
-0.2.3（試用版）です。画面と出力の形は、これから変わることがあります。不具合や、うまく読めない config の例は [Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) へどうぞ。実在のアドレス・ホスト名・秘密は、例の値に置き換えてから貼ってください。
+0.2.4（試用版）です。画面と出力の形は、これから変わることがあります。不具合や、うまく読めない config の例は [Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) へどうぞ。実在のアドレス・ホスト名・秘密は、例の値に置き換えてから貼ってください。
 
 ## ライセンス
 

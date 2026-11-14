@@ -17,6 +17,10 @@ PEM ブロック(`-----BEGIN ` から `-----END ` まで)は行単位の表で�
 (ADR-0137 決定3)。形の一覧の行と形の頭(mask_patterns.UNSENT_FORM_HEADS)も、かたまりの判定では秘密の行として扱う
 (REQ-198)。どちらも「送らない」にしかできない(送る側に戻す道は無い)。
 
+秘密語が無くても、行の頭の形(mask_patterns.GATE_HEADS。ADR-0198 決定2)に頭から当たる行は、秘密語に当たったときと同じく
+表を引く。当たれば伏せて送るか送り、どれにも当たらなければ送らない。判定の順は、見えない文字 → 形の一覧 → (秘密語か行の頭の形に
+当たらなければそのまま送る)→ 表 → 送らない。
+
 見えない文字(Unicode の種類が Cc・Cf の文字。タブ・LF・CR を除く)のある行は、形の一覧とゲートより前に送らないと決める
 (ADR-0142 決定1)。BOM の無い UTF-16 の NUL や語の中のゼロ幅の文字で、秘密語の判定を外れるため。文字の種類だけを見ていて、
 値の形は見ない(ADR-0019 決定1)。形には行の中身を残さない(ADR-0142 決定2)。
@@ -31,6 +35,8 @@ from typing import Literal
 
 from driftpilot.coverage_report.fold import fold_word
 from driftpilot.llm_analyzer.mask_patterns import (
+    GATE_HEAD_SCOPES,
+    GATE_HEADS,
     MASK_PATTERNS,
     SECRET_WORDS,
     UNSENT_FORM_HEADS,
@@ -217,6 +223,25 @@ _FORMS = tuple((form_id, re.compile(regex), UNSENT_FORM_SCOPES.get(form_id, "*")
 
 _HEADS = tuple((form_id, re.compile(regex)) for form_id, regex in UNSENT_FORM_HEADS)
 
+# 行の頭の形(秘密語が無くても表を引く入口。ADR-0198 決定2)。読み込み時にコンパイルしておく
+_GATE_HEADS = tuple(
+    (head_id, re.compile(regex), GATE_HEAD_SCOPES.get(head_id, "*")) for head_id, regex in GATE_HEADS
+)
+# 列の名前を分ける区切り(`_`・`-`・空白)
+_COLUMN_SPLIT = re.compile(r"[_\-\s]+")
+
+
+def gate_head(line: str, ancestors: Sequence[str] | None = None) -> str | None:
+    """行が行の頭の形(GATE_HEADS)に頭から当たれば、その ID。行は語を1つの空白で区切った形にして match する。
+
+    ancestors が None のときは場所の条件を見ない(かたまりの判定。形の一覧の行と同じ扱い)。
+    """
+    body = " ".join(line.split())
+    for head_id, regex, scope in _GATE_HEADS:
+        if (ancestors is None or scope_matches(scope, ancestors)) and regex.match(body):
+            return head_id
+    return None
+
 
 def _form_line_ids(text: str) -> set[str]:
     """行が当たる形の一覧の ID(場所の条件は見ない)と、形の頭の ID。かたまりの判定だけで使う(REQ-198)。"""
@@ -261,6 +286,11 @@ class Masker:
         """
         return has_unseen_char(text) or first_secret_word(text, self._words) is not None
 
+    def is_secret_column(self, name: object) -> bool:
+        """show の表の列の名前が秘密か。`_`・`-`・空白で区切った部分のどれかが秘密語に(大文字・小文字を問わず)当たる(REQ-277)。"""
+        folded = _folded_words(self._words)
+        return any(piece.lower() in folded for piece in _COLUMN_SPLIT.split(str(name)) if piece)
+
     def judge(self, line: str, ancestors: Sequence[str] = ()) -> LineJudgement:
         """1行を判定する。ancestors は祖先の行(外側から順、字下げを除く)。
 
@@ -283,15 +313,21 @@ class Masker:
                 form_id = unsent_form(part, ancestors)
                 if form_id is not None:
                     return LineJudgement("unsent", None, form_id, f"[{scope_label(ancestors)}] {form_id} …")
+            # 行の頭の形(ADR-0198)に当たる部分があれば、値ごと送らない。記録は頭の形の ID だけにする(秘密語より前に値があり得るため)
+            for part in line.splitlines():
+                head_id = gate_head(part, ancestors)
+                if head_id is not None:
+                    return LineJudgement("unsent", None, None, f"[{scope_label(ancestors)}] {head_id} …")
             gated = next((part for part in line.splitlines() if self.gated(part)), None)
-            if gated is None:
-                return LineJudgement("plain", line)
-            body = " ".join(gated.split())
-            return LineJudgement("unsent", None, None, f"[{scope_label(ancestors)}] {unsent_shape(body, self._words)}")
+            if gated is not None:
+                body = " ".join(gated.split())
+                return LineJudgement("unsent", None, None, f"[{scope_label(ancestors)}] {unsent_shape(body, self._words)}")
+            return LineJudgement("plain", line)
         form_id = unsent_form(line, ancestors)
         if form_id is not None:
             return LineJudgement("unsent", None, form_id, f"[{scope_label(ancestors)}] {form_id} …")
-        if not self.gated(line):
+        head_id = gate_head(line, ancestors)
+        if head_id is None and not self.gated(line):
             return LineJudgement("plain", line)
         # 表は語を1つの空白で区切った形に当てる(`password 5 <値>  role …` のような空白の重なりで外さない)。
         # 伏せた行はこの形で送る。pass の行は元のまま送る
@@ -313,6 +349,8 @@ class Masker:
                 last = end
             out.append(body[last:])
             return LineJudgement("mask", indent + "".join(out), pattern.id)
+        if head_id is not None:  # 頭の形に当たった行は、秘密語があっても頭の形の ID だけを残す(語より前に値があり得るため)
+            return LineJudgement("unsent", None, None, f"[{scope_label(ancestors)}] {head_id} …")
         shape = f"[{scope_label(ancestors)}] {unsent_shape(body, self._words)}"
         return LineJudgement("unsent", None, None, shape)
 
@@ -403,7 +441,9 @@ def wrapped_secret_groups(
         return wide and len(row) >= width - _WRAP_SLACK
 
     def has_secret(text: str) -> bool:
-        return first_secret_word(text, secret) is not None or bool(_form_line_ids(text))
+        return (
+            first_secret_word(text, secret) is not None or bool(_form_line_ids(text)) or gate_head(text) is not None
+        )
 
     def unscoped_form(text: str) -> bool:
         return any(form_id not in UNSENT_FORM_SCOPES for form_id in _form_line_ids(text))

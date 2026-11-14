@@ -520,7 +520,8 @@ async function loadAllRows() {
           "all-table",
           answer.all.rows,
           (row) => [row.command, row.op, row.category, row.target, row.before, row.after],
-          withTitles,
+          // 操作の列（1 列目）は鍵から印にし、対象・変更前・変更後（3・4・5 列目）は折り返す（REQ-276）
+          opMarkDecorator(1, [3, 4, 5], answer.all.op_keys),
         );
         // 変更の行の違う文字に印を付ける（変更前は 5 列目、変更後は 6 列目。行を作ったときに 1 回だけ。REQ-226 §4.2）
         paintTableMarks("all-table", answer.all.rows, answer.all.marks, 4, 5);
@@ -536,15 +537,17 @@ async function loadAllRows() {
 // 行をまとめて足す（数千〜数万行。DocumentFragment で1回だけ表に入れる）。cells は1行の文字の並びを返す。
 function fillTable(id, rows, cells, decorate) {
   const fragment = document.createDocumentFragment();
+  let index = 0;
   for (const row of rows) {
     const tr = document.createElement("tr");
     for (const value of cells(row)) {
       tr.append(make("td", "", value));
     }
     if (decorate) {
-      decorate(tr, row);
+      decorate(tr, row, index);
     }
     fragment.append(tr);
+    index += 1;
   }
   $(id).tBodies[0].replaceChildren(fragment);
 }
@@ -554,6 +557,37 @@ function withTitles(tr) {
   for (const td of tr.cells) {
     td.title = td.textContent;
   }
+}
+
+// 操作の列の印（REQ-276）。鍵（行の op_key。言語によらない）から決め、言葉では見分けない。印は言語によらない
+const OP_MARKS = { added: "+", removed: "−", changed: "~" };
+
+// 構造化比較・全コマンド比較結果の行の飾り（REQ-276）。opCol は操作の列の番号、wrapCols は折り返す列の番号、opKeys は行と同じ順の鍵の並び。
+// まず withTitles を呼ぶ（この時点の操作のセルは言葉なので、title に言葉が入る）。鍵が OP_MARKS にあれば、セルを印に替え、
+// 言葉を title と aria-label に入れる。鍵が空・並びが無い・短いときは言葉のまま。折り返す列には pilot-cell-wrap を付ける
+function opMarkDecorator(opCol, wrapCols, opKeys) {
+  return (tr, _row, index) => {
+    withTitles(tr);
+    const key = Array.isArray(opKeys) ? opKeys[index] : undefined;
+    const cell = tr.cells[opCol];
+    if (typeof key === "string" && Object.hasOwn(OP_MARKS, key) && cell !== undefined) {
+      const label = cell.textContent;
+      cell.textContent = OP_MARKS[key];
+      cell.title = label;
+      cell.setAttribute("aria-label", label);
+    }
+    for (const col of wrapCols) {
+      tr.cells[col]?.classList.add("pilot-cell-wrap");
+    }
+  };
+}
+
+// 対象と項目を 1 つの列にまとめた文字（両方あれば「対象 › 項目」。片方だけならその片方。両方空なら空）
+function targetItemText(target, item) {
+  if (target && item) {
+    return `${target} › ${item}`;
+  }
+  return target || item || "";
 }
 
 // 表の変更の行で、違う文字に印を付ける（REQ-226 / ADR-0165）。marks は Python が返した [{index, before, after}, …]。
@@ -729,11 +763,12 @@ function drawResult(result) {
   fillTable(
     "structured-table",
     result.structured_rows,
-    (row) => [row.op, row.category, row.target, row.item, row.before, row.after],
-    withTitles,
+    (row) => [row.op, row.category, targetItemText(row.target, row.item), row.before, row.after],
+    // 操作の列（1 列目）は鍵から印にし、対象・項目、変更前、変更後（3・4・5 列目）は折り返す（REQ-276）
+    opMarkDecorator(0, [2, 3, 4], result.structured_op_keys),
   );
-  // 変更の行の違う文字に印を付ける（変更前は 5 列目、変更後は 6 列目。行を作ったときに 1 回だけ。REQ-226 §4.2）
-  paintTableMarks("structured-table", result.structured_rows, result.structured_marks, 4, 5);
+  // 変更の行の違う文字に印を付ける（変更前は 4 列目、変更後は 5 列目。行を作ったときに 1 回だけ。REQ-226 §4.2・REQ-276）
+  paintTableMarks("structured-table", result.structured_rows, result.structured_marks, 3, 4);
   // 行を作り直したら、同じカテゴリがあれば同じ絞り込みをかける（無ければ「すべて」に戻す。ADR-0155 決定1）
   structuredRows = result.structured_rows;
   drawChips(result.categories, result.categories_all);

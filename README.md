@@ -189,7 +189,7 @@ Run `driftpilot --help` to see all commands, or read the [command-line guide](do
 
 ## Status
 
-Version 0.2.3 (preview). The UI and output formats may still change. Bug reports and sample configs that DriftPilot reads badly are welcome in [Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) — please replace real addresses, hostnames and secrets with example values first.
+Version 0.2.4 (preview). The UI and output formats may still change. Bug reports and sample configs that DriftPilot reads badly are welcome in [Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) — please replace real addresses, hostnames and secrets with example values first.
 
 ## License
 

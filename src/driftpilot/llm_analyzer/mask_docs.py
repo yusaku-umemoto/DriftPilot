@@ -8,6 +8,8 @@ from typing import Any
 
 from driftpilot import i18n
 from driftpilot.llm_analyzer.mask_patterns import (
+    GATE_HEAD_SCOPES,
+    GATE_HEADS,
     MASK_PATTERNS,
     SECRET_WORDS,
     UNSENT_FORM_SCOPES,
@@ -36,6 +38,7 @@ _HEADER_JA = f"""<!-- 自動生成。手で編集しない。 -->
 `<` か `>` のある語は XML のタグの判定だけを見る。行がそのタグ(`<phash>…</phash>` など)で始まるか同じ行に閉じるタグがあれば、
 タグの名前を語として見る(ADR-0140 決定2、ADR-0143 決定2)。見えない文字のある行は、ゲートより前に送らない(ADR-0142)。
 秘密語を含む行は、表の上から試して最初に書式が当たった行が結果を決める。
+秘密語が無くても、下の「行の頭の形」の表に頭から当たる行は、表を引く(ADR-0198 決定2)。
 
 - `mask`: 伏せる位置(名前付きグループ)を `<secret:N>` にして送る。同じ値は同じ番号、違う値は違う番号
 - `pass`: 秘密語を含むが、伏せる対象が無い。そのまま送る
@@ -63,6 +66,7 @@ A word with neither `<` nor `>` is also split into runs of letters, digits, `_` 
 For a word with `<` or `>`, only the XML tag check is made. If the line starts with that tag (`<phash>…</phash>` and so on) or has the closing tag on the same line,
 the tag name is looked at as a word (ADR-0140 decision 2, ADR-0143 decision 2). A line with an invisible character is not sent, before the gate (ADR-0142).
 For a line that contains a secret word, the first row of the table that matches its form decides the result.
+Even without a secret word, a line that matches the "Heads of lines" table below from its start consults the table (ADR-0198 decision 2).
 
 - `mask`: the masked positions (named groups) are sent as `<secret:N>`. The same value gets the same number, and different values get different numbers
 - `pass`: the line contains a secret word but has nothing to mask. It is sent as it is
@@ -88,6 +92,10 @@ _DOC_JA = {
     "unsent_note": "行(語を1つの空白で区切ったもの)全体に当たれば、表を引かずに送らない。送らなかった記録には ID だけを残す"
     "(例: `[interface] UNS-01 …`)。\n",
     "unsent_head": "| ID | scope | 書式 |",
+    "gate_title": "## 行の頭の形(秘密語が無くても表を引く)\n",
+    "gate_note": "行(語を1つの空白で区切ったもの)の頭からこの形に当たれば、秘密語が無くても表を引く。mask なら伏せて送り、"
+    "pass なら送り、どれにも当たらなければ送らない。送らなかった記録には ID だけを残す(例: `[top] GH-01 …`)。\n",
+    "gate_head": "| ID | scope | 頭の形 |",
 }
 _DOC_EN = {
     "fingerprint": "Table fingerprint: `{digest}` ({count} rows. mask {mask} / pass {pass_}). "
@@ -100,6 +108,11 @@ _DOC_EN = {
     "unsent_note": "A line (words separated by a single space) that matches as a whole is not sent, without consulting the table. "
     "Only the ID is left in the record of what was not sent (example: `[interface] UNS-01 …`).\n",
     "unsent_head": "| ID | scope | Form |",
+    "gate_title": "## Heads of lines (consult the table even without a secret word)\n",
+    "gate_note": "A line (words separated by a single space) that matches one of these forms from its start consults the table, "
+    "even if it has no secret word. A `mask` row is sent masked, a `pass` row is sent, and a line that matches no row is not sent. "
+    "Only the ID is left in the record of what was not sent (example: `[top] GH-01 …`).\n",
+    "gate_head": "| ID | scope | Head |",
 }
 _DOC = i18n.choose(_DOC_JA, _DOC_EN)
 
@@ -126,6 +139,9 @@ def render_json(patterns: tuple[MaskPattern, ...] = MASK_PATTERNS) -> str:
         "patterns": [_record(p) for p in patterns],
         "unsent_forms": [
             {"id": form_id, "match": regex, "scope": UNSENT_FORM_SCOPES.get(form_id, "*")} for form_id, regex in UNSENT_FORMS
+        ],
+        "gate_heads": [
+            {"id": head_id, "match": regex, "scope": GATE_HEAD_SCOPES.get(head_id, "*")} for head_id, regex in GATE_HEADS
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -167,4 +183,13 @@ def render_markdown(patterns: tuple[MaskPattern, ...] = MASK_PATTERNS) -> str:
     ]
     for form_id, regex in UNSENT_FORMS:
         out.append(f"| `{form_id}` | {_cell(UNSENT_FORM_SCOPES.get(form_id, '*'))} | {_code(regex)} |")
+    out += [
+        "",
+        _DOC["gate_title"],
+        _DOC["gate_note"],
+        _DOC["gate_head"],
+        "|---|---|---|",
+    ]
+    for head_id, regex in GATE_HEADS:
+        out.append(f"| `{head_id}` | {_cell(GATE_HEAD_SCOPES.get(head_id, '*'))} | {_code(regex)} |")
     return "\n".join(out).rstrip("\n") + "\n"

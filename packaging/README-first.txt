@@ -12,6 +12,8 @@ DriftPilot — はじめにお読みください
            コマンドで使うときは DriftPilot.app/Contents/MacOS/driftpilot-cli
   Windows 10 などで「WebView2 Runtime が入っていません」と出たら、Microsoft のサイトから
   WebView2 Runtime を入れてください（Windows 11 には入っています）。
+  Windows では、展開する前に zip を右クリック →「プロパティ」→「許可する」に✔を入れて「OK」を押してください。
+  （ブラウザで取った zip をそのまま「すべて展開」すると、Windows が中のファイルを止めることがあります）
   Windows で「画面の表示部品を使えません」（英語の画面では Cannot use the display component）と出たら、zip の
   展開が途中で止まっています。フォルダーを消して、PowerShell の Expand-Archive か 7-Zip で展開し直してください。
 

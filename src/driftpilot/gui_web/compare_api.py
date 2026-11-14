@@ -3638,6 +3638,7 @@ class CompareApi(Api):
                     "structured_note": self._unpaired_note,
                     "structured_detail": None,
                     "structured_rows": [],
+                    "structured_op_keys": [],
                     "raw_note": None,
                     "raw_rows": [],
                     "unparsed_note": None,
@@ -3678,6 +3679,8 @@ class CompareApi(Api):
                         }
                         for row in view.structured_rows
                     ],
+                    # 操作の列の印の鍵(REQ-276)。structured_rows と同じ数・同じ順。行の形は変えず、別のキーで渡す
+                    "structured_op_keys": [row.op_key for row in view.structured_rows],
                     "raw_note": view.raw_note,
                     "raw_rows": [
                         {
@@ -3739,10 +3742,15 @@ class CompareApi(Api):
     def _all(self) -> dict[str, Any]:
         """「全部」のタブの行(ADR-0152 決定7)。読むだけ。文字は画面が textContent だけで描く。"""
         with self._lock:
-            # op_key(言語によらない操作の鍵。印の判定に使う)は画面へは渡さない(rows の形は変えない。ADR-0190)
-            rows = [{k: v for k, v in asdict(row).items() if k != "op_key"} for row in self._current_all_rows()]
+            # op_key(言語によらない操作の鍵。操作の列の印の判定に使う)は、rows の形は変えず、行と同じ順の別の並び op_keys で渡す
+            # (REQ-276。ADR-0190)。行の並びは1回だけ取り出し、rows と op_keys の数と順をそろえる
+            all_rows = self._current_all_rows()
+            rows = [{k: v for k, v in asdict(row).items() if k != "op_key"} for row in all_rows]
+            op_keys = [row.op_key for row in all_rows]
             # marks は変更の行で違う文字の範囲(REQ-226)。rows の形は変えず、別のキーで渡す
-            return self._ok(all={"revision": self._all_revision, "rows": rows, "marks": self._current_all_marks()})
+            return self._ok(
+                all={"revision": self._all_revision, "rows": rows, "op_keys": op_keys, "marks": self._current_all_marks()}
+            )
 
     def _jump(self, current: Any, step: Any) -> dict[str, Any]:
         with self._lock:

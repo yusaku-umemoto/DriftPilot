@@ -2,7 +2,8 @@
 
 表を引くのは、秘密語ゲート(masking.py)を通った行、つまり秘密語をトークン完全一致で含む行
 (と、名前が秘密語の XML のタグで始まるか閉じるタグを含む行。ADR-0140 決定2)だけである。
-秘密語を含まない行は表を引かずにそのまま送る(決定4)。
+秘密語を含まない行は表を引かずにそのまま送る(決定4)。ただし、秘密語が無くても決まった頭の形の行
+(下の `GATE_HEADS`。ADR-0198 決定2)は表を引く。
 
 - 行(字下げを除いたもの)に fullmatch した最初の1件が結果を決める。表の並びが優先順位
 - mask: 名前付きグループの位置を伏せる(複数可)。pass: 秘密語を含むが伏せる対象が無い
@@ -32,6 +33,9 @@ MaskKind = Literal["mask", "pass"]
 # phash 以降は ADR-0140 決定3 で追加した(PAN-OS は公開スキーマの秘密の印から、ASA は語の中の password などが
 # 語の完全一致に当たらないため)。
 # client-secret 以降は ADR-0145 で追加した(FortiGate で ENC の無い形が送る側に判定されていたため)。
+# hello-password 以降は ADR-0198 決定1(IOS-XR の IS-IS の認証。REQ-277)。
+# privacy-key 以降は ADR-0198 決定1(ヤマハ・NEC・Huawei・Gaia・F5・Junos・Aruba など。REQ-278)。
+# authentication-password 以降の 8 語は ADR-0198 の追記(Junos・PAN-OS の set の形。書式が未確認なので表の行は無く、送らない側に落ちる)。
 # 設定で追加はできるが、削除はできない
 SECRET_WORDS: tuple[str, ...] = (
     "secret",
@@ -78,6 +82,49 @@ SECRET_WORDS: tuple[str, ...] = (
     "client-secret",
     "psk",
     "access-key",
+    "hello-password",
+    "lsp-password",
+    "privacy-key",
+    "hello-authentication-key",
+    "preauthentication-secret",
+    "plain-text-password-value",
+    "simple-password",
+    "local-password",
+    "SECRET-DATA",
+    "community-name",
+    "snmp-community",
+    "password-hash",
+    "expert-password-hash",
+    "grub2-password-hash",
+    "bind-pw",
+    "auth-password-encrypted",
+    "privacy-password-encrypted",
+    "cookie-encryption-passphrase",
+    "encrypt-cookie-secret",
+    "secret-password",
+    "manualkey",
+    "pin-code",
+    "puk",
+    "smtp-auth",
+    "wpa-psk",
+    "encrypted-key",
+    "encrypted-secret",
+    "shared-secret",
+    "auth-code",
+    "license-key",
+    "preshared-key",
+    "string-key",
+    "cipher",
+    "authtype",
+    "blob",
+    "authentication-password",
+    "privacy-password",
+    "plain-text-password",
+    "default-chap-secret",
+    "default-password",
+    "auth-password",
+    "priv-password",
+    "service-passphrase",
 )
 
 
@@ -107,6 +154,29 @@ class MaskPattern:
 _T = r"(?: (?:\d+|8a|sha512))?"
 _V = r"(?P<secret>\S+)"
 _LEVEL = r"(?: level-[12])?"
+# 値の後ろに許す形。列挙した語だけで、列挙に無い語(大文字・小文字や秘密語の有無によらない)が続く行は表に当たらず送らない
+# (書式を確かめていない形は足さない。未知の後続の値を送らないため)。
+# MSK-101(Cisco 系): `[udp-port <番号>]` と、`snmp-server host` の後ろの通知の種類。
+# 通知の種類は `snmp-server enable traps` と `snmp-server host` で綴りが違うものがある(例: `mpls traffic-eng` と `mpls-traffic-eng`)ため、
+# 公開のコーパスの実例で確かめた 3 語だけにする(docs/notes/masking-holes-2026-11.md の H-01: `udp-port 162 bgp config`・
+# `udp-port 162 config`・`… <値> snmp`)。公式の綴りを確かめていない種類は足さない(表に当たらず送らない側に落ちる)。
+# 足すときは、Cisco の snmp-server host のコマンドリファレンスの綴りで確かめてから足す
+_TRAP_TYPES = "bgp|config|snmp"
+_TAIL = rf"(?: udp-port \d+)?(?: (?:{_TRAP_TYPES}))*"
+# MSK-103(NEC の `snmp-agent ip trap <値>`): 後ろは `link-status` だけ(穴の一覧は「link-status 等」。等は未確認なので足さない)
+_TAIL_NEC = r"(?: link-status)?"
+# snmp-server host の値の位置に来ても値ではない語(値として伏せて、後ろの本当の値を送ってしまうのを防ぐ。MSK-100・101)
+_KW = r"(?!(?:vrf|traps|informs|version|clear|encrypted|use-vrf|filter-vrf|source-interface)(?: |$))"
+# MSK-117・120・150・156〜163(暗号のアルゴリズム名の一覧の pass)の 1 語。秘密語を語として含む語は通さない(REQ-278 のレビュー)。
+# 一覧の後ろに `password <値>` のような秘密の続きが付いた行を、pass として値ごと送らないため。判定は秘密語のゲートと同じく、
+# 語を英数字・`_`・`-` のかたまりに分けて大文字・小文字を区別せずに見る。md5・sha256・sha512 は暗号の名前の一部(`SHA256:ECDHE-…` など)
+# としてかたまりでは通すが、それだけの語(`… md5 <値>` の形)は通さない。語の一覧は読み込み時の SECRET_WORDS で、設定で足した語は含まない
+_ALGO_WORDS = frozenset({"md5", "sha256", "sha512"})
+_SECRET_PIECES = "|".join(re.escape(w) for w in sorted(set(SECRET_WORDS) - _ALGO_WORDS, key=lambda w: (-len(w), w)))
+_ALGO = (
+    rf"(?!\S*(?<![A-Za-z0-9_-])(?i:{_SECRET_PIECES})(?![A-Za-z0-9_-]))"
+    r"(?!(?i:md5|sha256|sha512)(?: |$))\S+"
+)
 
 MASK_PATTERNS: tuple[MaskPattern, ...] = (
     # --- 利用者・特権(Cisco / Arista / NX-OS) ---
@@ -171,6 +241,39 @@ MASK_PATTERNS: tuple[MaskPattern, ...] = (
         "snmp-server host 192.0.2.30 vrf MGMT version 3 auth USER-WRITE", "Arista",
         note="version 3 の auth / priv はセキュリティの水準で、後ろは利用者名",
     ),
+    # --- 秘密語の無い SNMP の通知先(ADR-0198 決定2・4。GATE_HEADS の GH-01〜03 の頭に当たって表を引く) ---
+    MaskPattern(
+        "MSK-99", "top",
+        r'snmp-server host \S+ (?:traps|informs) "(?P<secret>[^"]+)"(?: version (?:1|2c))?', "mask",
+        'snmp-server host 192.0.2.1 traps "<値>" version 2c', "Alaxala AX", note='`"` の中だけを伏せる',
+    ),
+    MaskPattern(
+        "MSK-100", "top",
+        r"snmp-server host \S+(?: (?:clear|encrypted)(?: (?:traps|informs))?(?: version 2c)?"
+        rf"| (?:traps|informs) version 2c (?:clear|encrypted)) {_KW}(?P<secret>[^\"\s]\S*)",
+        "mask", "snmp-server host 192.0.2.1 traps version 2c encrypted <値>", "Cisco IOS-XR",
+        note="`clear`・`encrypted` は値の型の語",
+    ),
+    MaskPattern(
+        "MSK-101", "top",
+        r"snmp-server host (?!.* community(?: |$))\S+(?: vrf \S+)?(?: (?:traps|informs))?(?: version (?:1|2c))?"
+        rf" {_KW}(?P<secret>[^\"\s]\S*){_TAIL}",
+        "mask", "snmp-server host 192.0.2.1 traps version 1 <値> udp-port 162 bgp config",
+        "Cisco IOS / IOS-XE / NX-OS / Arista / Allied Telesis AW+",
+        note="コミュニティ名の後ろ(udp-port・通知の種類)は送る。`community` の語のある行(ASA の形)には当てない",
+    ),
+    MaskPattern(
+        "MSK-102", "top", r"snmp-agent (?:ip|ipv6) host \S+ (?P<secret>\S+)(?: version (?:1|2))?", "mask",
+        "snmp-agent ip host 192.0.2.1 <値> version 2", "NEC",
+    ),
+    MaskPattern(
+        "MSK-103", "top", rf"snmp-agent (?:ip|ipv6) trap (?P<secret>\S+){_TAIL_NEC}", "mask",
+        "snmp-agent ip trap <値> link-status", "NEC",
+    ),
+    MaskPattern(
+        "MSK-104", "*", r"rmon event \d+(?: log)? trap (?P<secret>\S+)(?: description \S+)?(?: owner \S+)?", "mask",
+        "rmon event 1 log trap <値> description link-down owner admin", "Alaxala AX",
+    ),
     MaskPattern(
         "MSK-18", "top", r"snmp-server group \S+ v3 (?:auth|noauth|priv)(?: \S+)*", "pass",
         "snmp-server group GRP-READ-ONLY v3 priv read v3read", "Arista",
@@ -233,6 +336,26 @@ MASK_PATTERNS: tuple[MaskPattern, ...] = (
         r"authentication mode (?:md5|text|sha(?: key-id \d+)?|shared-secret profile \S+ algorithm \S+)(?: rx-disabled)?"
         + _LEVEL,
         "pass", "authentication mode shared-secret profile test1 algorithm md5 level-1", "Arista",
+    ),
+    # --- 秘密語の無い認証の行(ADR-0198 決定2・4。GATE_HEADS の GH-04〜06 と、秘密語 hello-password・lsp-password) ---
+    MaskPattern(
+        "MSK-105", "*", r"vrrp \d+ authentication (?P<secret>\S+)", "mask", "vrrp 1 authentication <値>", "Alaxala AX / NEC",
+    ),
+    MaskPattern(
+        "MSK-106", "vrrp", r"authentication text (?:plaintext|ciphertext) (?P<secret>\S+)", "mask",
+        "authentication text plaintext <値>", "Aruba AOS-CX", note="VRRP のアドレスファミリーの下",
+    ),
+    MaskPattern(
+        "MSK-107", "*", r"ip rip authentication (?:text|string) (?P<secret>\S+)", "mask",
+        "ip rip authentication text <値>", "NEC / Allied Telesis AW+",
+    ),
+    MaskPattern(
+        "MSK-108", "router isis", r"hello-password (?:hmac-md5|text) (?:clear|encrypted) (?P<secret>\S+)", "mask",
+        "hello-password hmac-md5 encrypted <値>", "Cisco IOS-XR",
+    ),
+    MaskPattern(
+        "MSK-109", "router isis", r"lsp-password (?:hmac-md5|text) (?:clear|encrypted) (?P<secret>\S+)", "mask",
+        "lsp-password hmac-md5 encrypted <値>", "Cisco IOS-XR",
     ),
     # --- AAA サーバー・NTP ---
     MaskPattern(
@@ -497,12 +620,238 @@ MASK_PATTERNS: tuple[MaskPattern, ...] = (
         r" (?:from community \S+|then community (?:add|delete|set) \S+))",
         "pass", "set policy-options policy-statement EXPORT term 1 from community CL-1", "Junos", note="BGP のコミュニティ",
     ),
+    # --- MSK-110〜163 は ADR-0198 決定1・3(REQ-278)。書式を確かめた形(docs/notes/masking-holes-2026-11.md の「確」)だけを足す。
+    # 値の位置の書き方: `"` の形は `"` の中だけを伏せる。Junos の形は MSK-77 と同じ(`"…"` か裸の語、後ろに `;` と `## SECRET-DATA`)。
+    # それ以外は `\S+`。書式が未確認の形(「未」)は足さず、判定に回って送らない側に落ちる ---
+    # Check Point Gaia(H-06・H-23)
+    MaskPattern(
+        "MSK-110", "*",
+        r"add mcvr vrid \d+(?: priority \d+)?(?: priority-delta \d+)? authtype simple (?P<secret>\S+)(?: hello-interval \d+)?",
+        "mask", "add mcvr vrid 10 priority 100 priority-delta 10 authtype simple <値> hello-interval 1", "Check Point Gaia",
+    ),
+    MaskPattern(
+        "MSK-111", "*", r"set mcvr vrid \d+ authtype simple (?P<secret>\S+)", "mask",
+        "set mcvr vrid 10 authtype simple <値>", "Check Point Gaia",
+    ),
+    MaskPattern(
+        "MSK-112", "*", r'set ospf interface \S+ authtype simple "(?P<secret>[^"]+)"', "mask",
+        'set ospf interface eth0 authtype simple "<値>"', "Check Point Gaia", note='`"` の中だけを伏せる',
+    ),
+    MaskPattern(
+        "MSK-113", "*",
+        r"(?:add mcvr vrid \d+(?: priority \d+)?(?: priority-delta \d+)? authtype none(?: hello-interval \d+)?"
+        r"|set mcvr vrid \d+ authtype none|set ospf interface \S+ authtype none)",
+        "pass", "set mcvr vrid 10 authtype none", "Check Point Gaia", note="認証なしの指定(値なし)",
+    ),
+    MaskPattern(
+        "MSK-114", "*", r"set user \S+ password-hash (?P<secret>\S+)", "mask",
+        "set user admin password-hash <値>", "Check Point Gaia",
+    ),
+    MaskPattern(
+        "MSK-115", "*", r"set expert-password-hash (?P<secret>\S+)", "mask", "set expert-password-hash <値>", "Check Point Gaia",
+    ),
+    MaskPattern(
+        "MSK-116", "*", r"set grub2-password-hash (?P<secret>\S+)", "mask", "set grub2-password-hash <値>", "Check Point Gaia",
+    ),
+    MaskPattern(
+        "MSK-117", "*", rf"set ssh server cipher {_ALGO} (?:on|off)", "pass", "set ssh server cipher aes256-ctr on", "Check Point Gaia",
+        note="暗号のアルゴリズム名の指定(公開のコーパスの実例)",
+    ),
+    # Huawei VRP(H-07)。算法の名前は確かめた語だけ(aes256 などは送らない側に落ちる)
+    MaskPattern(
+        "MSK-118", "*", r"snmp-agent usm-user v3 \S+ authentication-mode (?:sha|sha2-256) cipher (?P<secret>\S+)", "mask",
+        "snmp-agent usm-user v3 U1 authentication-mode sha cipher <値>", "Huawei VRP",
+    ),
+    MaskPattern(
+        "MSK-119", "*", r"snmp-agent usm-user v3 \S+ privacy-mode aes128 cipher (?P<secret>\S+)", "mask",
+        "snmp-agent usm-user v3 U1 privacy-mode aes128 cipher <値>", "Huawei VRP",
+    ),
+    MaskPattern(
+        "MSK-120", "*", rf"ssh (?:server|client) cipher {_ALGO}(?: {_ALGO})*", "pass", "ssh server cipher aes256_gcm aes128_gcm", "Huawei VRP",
+        note="暗号のアルゴリズム名の一覧(秘密ではない)",
+    ),
+    # NEC UNIVERGE IX(H-11・H-13・H-15)
+    MaskPattern(
+        "MSK-121", "*", r"authentication secret-password [01] \S+ (?P<secret>\S+)", "mask",
+        "authentication secret-password 0 user1 <値>", "NEC UNIVERGE IX",
+    ),
+    MaskPattern(
+        "MSK-122", "*", r"web-auth username \S+ secret-password (?P<secret>\S+)", "mask",
+        "web-auth username user1 secret-password <値>", "NEC UNIVERGE IX",
+    ),
+    MaskPattern(
+        "MSK-123", "*", r"http-server cross-site secret-password (?P<secret>\S+)", "mask",
+        "http-server cross-site secret-password <値>", "NEC UNIVERGE IX",
+    ),
+    MaskPattern(
+        "MSK-124", "*", r"tunnel v6pv user \S+ secret-password (?P<secret>\S+)", "mask",
+        "tunnel v6pv user user1 secret-password <値>", "NEC UNIVERGE IX",
+    ),
+    MaskPattern(
+        "MSK-125", "*",
+        r"ipsec manualkey \S+(?: key-type \S+)? (?:esp-(?:des|3des) (?P<secret>\S+)(?: (?:esp-md5|ah-md5) (?P<secret2>\S+))?"
+        r"|(?:esp-md5|ah-md5) (?P<secret3>\S+))",
+        "mask", "ipsec manualkey TUN1 key-type char esp-des <値> esp-md5 <値>", "NEC UNIVERGE IX",
+        note="鍵は 2 か所ある。確かめた語(esp-des・esp-3des・esp-md5・ah-md5)だけで、esp-aes などは表に当たらず送らない",
+    ),
+    MaskPattern(
+        "MSK-126", "*", r"mobile pin-code plain (?P<secret>\S+)", "mask", "mobile pin-code plain <値>", "NEC UNIVERGE IX",
+    ),
+    MaskPattern(
+        "MSK-127", "*", r"mobile puk (?P<secret>\S+) (?P<secret2>\S+)", "mask", "mobile puk <値> <値>", "NEC UNIVERGE IX",
+        note="PIN と PUK の 2 語とも伏せる",
+    ),
+    MaskPattern(
+        "MSK-128", "*", r"mobile pin-auth enable (?P<secret>\S+)", "mask", "mobile pin-auth enable <値>", "NEC UNIVERGE IX",
+    ),
+    # ヤマハ RTX / NVR(H-16〜H-19)
+    MaskPattern(
+        "MSK-129", "*", r"login user \S+ encrypted (?P<secret>\S+)", "mask", "login user user1 encrypted <値>", "ヤマハ RTX / NVR",
+    ),
+    MaskPattern(
+        "MSK-130", "*", r"login user \S+ (?!encrypted(?: |$))(?P<secret>\S+)", "mask", "login user user1 <値>", "ヤマハ RTX / NVR",
+        note="実機の show config では値が `*` になる。`*` も伏せる(値の形は見ない)",
+    ),
+    MaskPattern(
+        "MSK-131", "*",
+        r"snmpv3 usm user \d+ \S+(?: group \S+)? (?:sha|md5) (?P<secret>\S+)(?: (?:aes128-cfb|des-cbc) (?P<secret2>\S+))?",
+        "mask", "snmpv3 usm user 1 user1 group grp1 sha <値> aes128-cfb <値>", "ヤマハ RTX / NVR",
+    ),
+    MaskPattern(
+        "MSK-132", "*", r"snmpv3 usm user \d+ \S+(?: group \S+)?", "pass", "snmpv3 usm user 1 user1 group grp1", "ヤマハ RTX / NVR",
+        note="認証の無い利用者(公式の書式で、認証は省ける)",
+    ),
+    MaskPattern(
+        "MSK-133", "*",
+        r"mail server smtp \d+ \S+(?: port=\d+)? smtp-auth \S+ (?P<secret>\S+)(?: (?:cram-md5|digest-md5|plain))?"
+        r"(?: pop-before-smtp)?(?: smtps)?",
+        "mask", "mail server smtp 1 mail.example.com port=587 smtp-auth user1 <値> cram-md5 smtps", "ヤマハ RTX / NVR",
+    ),
+    MaskPattern(
+        "MSK-134", "*", r"mail server pop \d+ \S+(?: port=\d+)? (?:pop3|apop) \S+ (?P<secret>\S+)", "mask",
+        "mail server pop 1 mail.example.com apop user1 <値>", "ヤマハ RTX / NVR",
+    ),
+    MaskPattern(
+        "MSK-135", "*", r"ipsec ike xauth myname \S+ \S+ (?P<secret>\S+)", "mask",
+        "ipsec ike xauth myname 192.0.2.1 user1 <値>", "ヤマハ RTX / NVR",
+    ),
+    MaskPattern(
+        "MSK-136", "*", r"ipsec ike eap myname \S+ \S+ (?P<secret>\S+)", "mask",
+        "ipsec ike eap myname 192.0.2.1 user1 <値>", "ヤマハ RTX / NVR",
+    ),
+    # Aruba AOS-Switch(H-21)
+    MaskPattern(
+        "MSK-137", "*", r'radius-server(?: host \S+)? encrypted-key "(?P<secret>[^"]+)"', "mask",
+        'radius-server host 192.0.2.1 encrypted-key "<値>"', "Aruba AOS-Switch", note='`"` の中だけを伏せる',
+    ),
+    MaskPattern(
+        "MSK-138", "*", r'tacacs-server(?: host \S+)? encrypted-key "(?P<secret>[^"]+)"', "mask",
+        'tacacs-server host 192.0.2.2 encrypted-key "<値>"', "Aruba AOS-Switch", note='`"` の中だけを伏せる',
+    ),
+    MaskPattern(
+        "MSK-139", "*", r'aaa port-access supplicant \S+ identity "[^"]*" encrypted-secret "(?P<secret>[^"]+)"', "mask",
+        'aaa port-access supplicant 1 identity "user1" encrypted-secret "<値>"', "Aruba AOS-Switch", note='`"` の中だけを伏せる',
+    ),
+    MaskPattern(
+        "MSK-140", "*", r'encrypted-key "(?P<secret>[^"]+)"', "mask", 'encrypted-key "<値>"', "Aruba AOS-Switch",
+        note='macsec の鍵。`"` の中だけを伏せる',
+    ),
+    # F5 BIG-IP・Junos(H-24〜H-29)
+    MaskPattern(
+        "MSK-141", "*", r"auth-password-encrypted (?P<secret>\S+)", "mask", "auth-password-encrypted <値>", "F5 BIG-IP",
+    ),
+    MaskPattern(
+        "MSK-142", "*", r"privacy-password-encrypted (?P<secret>\S+)", "mask", "privacy-password-encrypted <値>", "F5 BIG-IP",
+    ),
+    MaskPattern("MSK-143", "*", r"bind-pw (?P<secret>\S+)", "mask", "bind-pw <値>", "F5 BIG-IP"),
+    MaskPattern(
+        "MSK-144", "*", r"cookie-encryption-passphrase (?P<secret>\S+)", "mask", "cookie-encryption-passphrase <値>", "F5 BIG-IP",
+    ),
+    MaskPattern(
+        "MSK-145", "*", r"encrypt-cookie-secret (?P<secret>\S+)", "mask", "encrypt-cookie-secret <値>", "F5 BIG-IP",
+    ),
+    MaskPattern(
+        "MSK-146", "*", r'community-name (?P<secret>"[^"]*"|[^";\s]+);(?: ## SECRET-DATA)?', "mask",
+        'community-name "<値>"; ## SECRET-DATA', "Junos", note="SNMPv3 の snmp-community の下。行の終わりが `;`",
+    ),
+    MaskPattern("MSK-147", "*", r"community-name (?P<secret>\S+)", "mask", "community-name <値>", "F5 BIG-IP"),
+    MaskPattern(
+        "MSK-148", "ltm monitor", r"snmp-community (?P<secret>\S+)", "mask", "snmp-community <値>", "F5 BIG-IP",
+        note="`ltm monitor` の下だけ。Junos の `snmp-community <名> {` には当てない",
+    ),
+    MaskPattern("MSK-149", "sys dynad key", r"blob (?P<secret>\S+)", "mask", "blob <値>", "F5 BIG-IP"),
+    MaskPattern(
+        "MSK-150", "ltm cipher", rf"cipher {_ALGO}(?: {_ALGO})*", "pass", "cipher DEFAULT:!SSLV3", "F5 BIG-IP",
+        note="`ltm cipher` の下の暗号の指定(秘密ではない)",
+    ),
+    # Junos(H-34〜H-38・H-40)
+    MaskPattern(
+        "MSK-151", "*", r'privacy-key (?P<secret>"[^"]*"|[^";\s]+);?(?: ## SECRET-DATA)?', "mask",
+        'privacy-key "<値>"; ## SECRET-DATA', "Junos",
+    ),
+    MaskPattern(
+        "MSK-152", "*", r'hello-authentication-key (?P<secret>"[^"]*"|[^";\s]+);?(?: ## SECRET-DATA)?', "mask",
+        'hello-authentication-key "<値>"; ## SECRET-DATA', "Junos",
+    ),
+    MaskPattern(
+        "MSK-153", "*", r'plain-text-password-value (?P<secret>"[^"]*"|[^";\s]+);?(?: ## SECRET-DATA)?', "mask",
+        'plain-text-password-value "<値>"; ## SECRET-DATA', "Junos",
+    ),
+    MaskPattern(
+        "MSK-154", "*", r'simple-password (?P<secret>"[^"]*"|[^";\s]+);?(?: ## SECRET-DATA)?', "mask",
+        'simple-password "<値>"; ## SECRET-DATA', "Junos",
+    ),
+    MaskPattern(
+        "MSK-155", "*",
+        r'(?:ssh-dsa|ssh-ecdsa|ecdsa-sha2-nistp256-key|public-key) (?P<secret>"[^"]*"|[^";\s]+);?(?: ## SECRET-DATA)?',
+        "mask", 'ssh-dsa "<値>"; ## SECRET-DATA', "Junos",
+        note="公開鍵は秘密ではないが、MSK-03 と同じく鍵の本文を伏せる。Junos は種類と注釈も `\"` の中にあるため、`\"` の中を全部伏せる",
+    ),
+    # 語を足したことで判定に回る、今の対応機種などの無害な行(今までどおり送る)
+    MaskPattern(
+        "MSK-156", "management ssh", rf"cipher {_ALGO}(?: {_ALGO})*", "pass", "cipher aes256-ctr aes128-ctr", "Arista",
+        note="SSH の暗号のアルゴリズム名の一覧(秘密ではない)",
+    ),
+    MaskPattern(
+        "MSK-157", "mac security", rf"cipher {_ALGO}", "pass", "cipher aes256-gcm-xpn", "Arista",
+        note="MACsec の暗号のアルゴリズム名(秘密ではない)",
+    ),
+    MaskPattern(
+        "MSK-158", "management security", r"session shared-secret profile \S+", "pass",
+        "session shared-secret profile Secret1", "Arista", note="プロファイルの見出し(鍵は子の secret の行にある。MSK-45)",
+    ),
+    MaskPattern(
+        "MSK-159", "config system lte-modem", r"set authtype(?: (?:none|pap|chap))+", "pass", "set authtype pap", "FortiGate",
+        note="LTE モデムの認証の方式(値なし)",
+    ),
+    MaskPattern(
+        "MSK-160", "top", r"config (?:vpn ipsec manualkey|switch-controller snmp-community)", "pass",
+        "config vpn ipsec manualkey", "FortiGate", note="ブロックの見出し。行の終わりが秘密語で、値は無い",
+    ),
+    MaskPattern(
+        "MSK-161", "*", rf"ssh (?:(?:server|client) algorithms|server enable) cipher(?: {_ALGO})+", "pass",
+        "ssh server algorithms cipher aes256-ctr aes128-ctr", "Cisco IOS-XR", note="SSH の暗号のアルゴリズム名の一覧(秘密ではない)",
+    ),
+    MaskPattern(
+        "MSK-162", "*", rf"(?:ssl cipher(?: {_ALGO})+|ssh cipher (?:encryption|integrity)(?: {_ALGO})+)", "pass",
+        "ssh cipher encryption high", "Cisco ASA", note="SSL・SSH の暗号の指定(秘密ではない)",
+    ),
+    MaskPattern(
+        "MSK-163", "management security", rf"cipher v1\.[0-3](?: {_ALGO})+", "pass", "cipher v1.3 TLS_AES_256_GCM_SHA384", "Arista",
+        note="SSL プロファイルの暗号の指定(秘密ではない)",
+    ),
+    # H-11。REQ-278 の設計側回答で承認された ADR-0198 の範囲外の追加。
+    MaskPattern(
+        "MSK-164", "*", r"usbmem authentication password-file \S+ plain (?P<secret>\S+)", "mask",
+        "usbmem authentication password-file pw.txt plain <値>", "NEC UNIVERGE IX",
+        note="設計側の承認で追加。plain の値だけを伏せ、未知の前後の語や plain 以外は送らない",
+    ),
 )
 
 # --- 利用者に見える説明の英語の版(REQ-259 / ADR-0190 決定3) ---
 # 送る前の確かめ・`driftpilot mask-patterns` の出力に出る備考・出どころ・例を、言語に合わせて出す。
 # 伏せる・送らないの判定(match・scope・kind・秘密語・送らない形・指紋の計算)には使わない。MaskPattern の値は日本語のまま変えない
-# (例は表の自己照合とテストの入力に使う)。備考のある 44 件すべてに英語がある(ID → 英語。テストが鍵を照らす)
+# (例は表の自己照合とテストの入力に使う)。備考のある 73 件すべてに英語がある(ID → 英語。テストが鍵を照らす)
 MASK_NOTES_EN: dict[str, str] = {
     "MSK-03": "A public key is not a secret, but the value has no meaning and uses up tokens, so it is masked (ADR-0018 decision 2b). The trailing comment is sent",
     "MSK-04": "Password expiry settings",
@@ -513,6 +862,10 @@ MASK_NOTES_EN: dict[str, str] = {
     "MSK-15": "Masks the auth and priv keys and the localized / engineID values",
     "MSK-17": "For version 3, auth / priv is the security level, and what follows is the user name",
     "MSK-92": "Enabling traps on an interface",
+    "MSK-99": "Only what is inside the double quotes is masked",
+    "MSK-100": "`clear` and `encrypted` are words for the type of the value",
+    "MSK-101": "What follows the community name (udp-port, notification types) is sent. Not applied to a line that has the word `community` (the ASA form)",
+    "MSK-106": "Under the address family of VRRP",
     "MSK-93": "Words are listed so that `snmp mib community-map <community>` is not included",
     "MSK-94": "Trap types. If what follows were any word, unknown forms containing a secret word and a value would be sent, so the words are listed",
     "MSK-23": "Authentication method (algorithm)",
@@ -548,6 +901,31 @@ MASK_NOTES_EN: dict[str, str] = {
     "MSK-84": "Curly brace form",
     "MSK-97": "Block heading",
     "MSK-80": "BGP community",
+    "MSK-112": "Only what is inside the double quotes is masked",
+    "MSK-113": "Authentication set to none (no value)",
+    "MSK-117": "Specification of a cipher algorithm name (an example from the public corpus)",
+    "MSK-120": "List of cipher algorithm names (not a secret)",
+    "MSK-125": "There are two keys on the line. Only the confirmed words (esp-des, esp-3des, esp-md5, ah-md5) are listed, so a form such as esp-aes does not match the table and is not sent",
+    "MSK-127": "Both the PIN and the PUK are masked",
+    "MSK-130": "In the `show config` of a real device the value is `*`. `*` is masked too (the shape of the value is not looked at)",
+    "MSK-132": "A user without authentication (the official syntax allows authentication to be omitted)",
+    "MSK-137": "Only what is inside the double quotes is masked",
+    "MSK-138": "Only what is inside the double quotes is masked",
+    "MSK-139": "Only what is inside the double quotes is masked",
+    "MSK-140": "MACsec key. Only what is inside the double quotes is masked",
+    "MSK-146": "Under snmp-community of SNMPv3. The line ends with `;`",
+    "MSK-148": "Only under `ltm monitor`. Not applied to the Junos form `snmp-community <name> {`",
+    "MSK-150": "Cipher specification under `ltm cipher` (not a secret)",
+    "MSK-155": "A public key is not a secret, but the body of the key is masked, as in MSK-03. In Junos the key type and the comment are also inside the double quotes, so everything inside the quotes is masked",
+    "MSK-156": "List of SSH cipher algorithm names (not a secret)",
+    "MSK-157": "Name of the MACsec cipher algorithm (not a secret)",
+    "MSK-158": "Heading of the profile (the key is on the child secret line. MSK-45)",
+    "MSK-159": "Authentication method of the LTE modem (no value)",
+    "MSK-160": "Block heading. The line ends with a secret word and has no value",
+    "MSK-161": "List of SSH cipher algorithm names (not a secret)",
+    "MSK-162": "Specification of the SSL and SSH ciphers (not a secret)",
+    "MSK-163": "Cipher specification of the SSL profile (not a secret)",
+    "MSK-164": "Approved addition by the designer. Only the plain value is masked; unknown preceding or following words and forms other than plain are not sent",
 }
 # 出どころの英語の版(日本語の出どころだけ。ほかはもともと英語)
 _SOURCES_EN: dict[str, str] = {
@@ -555,6 +933,7 @@ _SOURCES_EN: dict[str, str] = {
     "富士通 Si-R": "Fujitsu Si-R",
     "富士通 SR-S": "Fujitsu SR-S",
     "富士通 SR-S / Si-R": "Fujitsu SR-S / Si-R",
+    "ヤマハ RTX / NVR": "Yamaha RTX / NVR",
 }
 # 例の中の「伏せる位置」の印(日本語の版は `<値>`)。英語の版の表示だけ `<value>` にする
 _EXAMPLE_MARK_JA = "<値>"
@@ -638,7 +1017,39 @@ UNSENT_FORM_HEADS: tuple[tuple[str, str], ...] = (
     ("UNS-16", r"bgp neighbor \d+ authentication"),
 )
 
+# 行の頭の形の入口(ADR-0198 決定2。REQ-277)。秘密語が無くても、行(字下げを除き、語を1つの空白で区切ったもの)の頭から
+# match するなら、秘密語に当たったときと同じく表を引く(mask なら伏せて送り、pass なら送り、どれにも当たらなければ送らない)。
+# 形の一覧(UNSENT_FORMS)は「当たれば送らない」までで、表を引く入口はここだけ。値の形は見ない(ADR-0019 決定1)。
+# GH-01 は version 3 の行(利用者名だけで秘密が無い。MSK-17 の pass)を外す。外すのは本当の v3 の構文
+# (`<アドレス> [vrf <名>] [traps|informs] version 3 auth|noauth|priv `)だけ。行のどこかに `version 3` があるだけでは外さない
+# (`traps "<値> version 3" version 2c` のように、コミュニティ名の中に現れうるため)。先読みを `\S+` より前に置くのは、
+# `\S+` が後ろへ戻って照合し直し、v3 の行に当たるのを防ぐため。穴の番号は docs/notes/masking-holes-2026-11.md
+GATE_HEADS: tuple[tuple[str, str], ...] = (
+    (
+        "GH-01",
+        r"snmp-server host (?!\S+(?: vrf \S+)?(?: (?:traps|informs))? version 3 (?:auth|noauth|priv) )\S+",
+    ),  # H-01・H-02(Cisco 系・AW+・AX・IOS-XR)
+    ("GH-02", r"snmp-agent (?:ip|ipv6) (?:host|trap) "),  # H-12(NEC)
+    ("GH-03", r"rmon event \d+ .*\btrap "),  # H-03(AX)
+    ("GH-04", r"vrrp \d+ authentication "),  # H-04(AX・NEC)
+    ("GH-05", r"authentication text (?:plaintext|ciphertext) "),  # H-05(AOS-CX)
+    ("GH-06", r"ip rip authentication (?:text|string) "),  # H-14(NEC・AW+)
+    # GH-07〜12 は REQ-278(ADR-0198 決定2)。ヤマハ・NEC・Si-R
+    ("GH-07", r"login user \S+ "),  # H-16(ヤマハ。名前だけの行 `login user <名>` は頭に当たらない)
+    ("GH-08", r"snmpv3 usm user "),  # H-17(ヤマハ)
+    ("GH-09", r"mail server pop \d+ "),  # H-18(ヤマハ)
+    ("GH-10", r"ipsec ike (?:xauth|eap) myname "),  # H-19(ヤマハ)
+    ("GH-11", r"mobile pin-auth enable "),  # H-15(NEC)
+    ("GH-12", r"ike preshared-key add "),  # H-43(Si-R。書式が未確認なので表の行は足さず、送らない側に落とす)
+    ("GH-13", r"usbmem authentication "),  # H-11。設計側の承認による ADR-0198 範囲外の追加
+)
+# 行の頭の形の場所の条件(書き方は UNSENT_FORM_SCOPES と同じ)。ここに無い形はどこでも当てる
+GATE_HEAD_SCOPES: dict[str, str] = {
+    "GH-05": "vrrp",
+}
+
 _FORM_ID = re.compile(r"UNS-\d{2,}")
+_GATE_HEAD_ID = re.compile(r"GH-\d{2,}")
 
 
 @lru_cache(maxsize=None)
@@ -646,10 +1057,18 @@ def compiled(regex: str) -> re.Pattern[str]:
     return re.compile(regex)
 
 
-def validate(patterns: tuple[MaskPattern, ...] = MASK_PATTERNS, secret_words: tuple[str, ...] = SECRET_WORDS) -> None:
-    """表の形を検査する。ID の重複・形、mask と pass の名前付きグループ、例の自己照合とゲートの通過。"""
+def validate(
+    patterns: tuple[MaskPattern, ...] = MASK_PATTERNS,
+    secret_words: tuple[str, ...] = SECRET_WORDS,
+    gate_heads: tuple[tuple[str, str], ...] = GATE_HEADS,
+) -> None:
+    """表の形を検査する。ID の重複・形、mask と pass の名前付きグループ、例の自己照合とゲートの通過。
+
+    ゲートの通過は、例が秘密語を含むか、行の頭の形(gate_heads)のどれかに頭から当たること(ADR-0198 決定2)。
+    """
     seen: set[str] = set()
     words = set(secret_words)
+    heads = [compiled(regex) for _, regex in gate_heads]
     for p in patterns:
         if not _ID.fullmatch(p.id):
             raise ValueError(f"伏せる表の ID の形が不正です: {p.id}")
@@ -667,8 +1086,33 @@ def validate(patterns: tuple[MaskPattern, ...] = MASK_PATTERNS, secret_words: tu
             raise ValueError(f"{p.id}: pass に名前付きグループがあります(伏せる対象なしの行です)")
         if regex.fullmatch(p.example) is None:
             raise ValueError(f"{p.id}: 例が自分の書式に当たりません: {p.example!r}")
-        if not words.intersection(p.example.split()):
-            raise ValueError(f"{p.id}: 例が秘密語を含みません(ゲートを通らない行は表を引きません)")
+        example = " ".join(p.example.split())
+        if not words.intersection(p.example.split()) and not any(head.match(example) for head in heads):
+            raise ValueError(f"{p.id}: 例が秘密語も行の頭の形も含みません(ゲートを通らない行は表を引きません)")
+
+
+def validate_gate_heads(
+    heads: tuple[tuple[str, str], ...] = GATE_HEADS, scopes: dict[str, str] | None = None
+) -> None:
+    """行の頭の形を検査する。ID の形・重複、正規表現が読めること、場所の条件が一覧の ID を指し、空でないこと。"""
+    scopes = GATE_HEAD_SCOPES if scopes is None else scopes
+    seen: set[str] = set()
+    for head_id, regex in heads:
+        if not _GATE_HEAD_ID.fullmatch(head_id):
+            raise ValueError(f"行の頭の形の ID の形が不正です: {head_id}")
+        if head_id in seen:
+            raise ValueError(f"行の頭の形の ID が重複しています: {head_id}")
+        seen.add(head_id)
+        try:
+            compiled(regex)
+        except re.error as exc:
+            raise ValueError(f"{head_id}: 正規表現が読めません: {exc}") from exc
+    unknown = sorted(set(scopes) - seen)
+    if unknown:
+        raise ValueError(f"場所の条件が行の頭の形に無い ID を指しています: {unknown}")
+    for head_id, scope in scopes.items():
+        if not scope or scope != scope.strip():
+            raise ValueError(f"{head_id}: 場所の条件が空か、前後に空白があります")
 
 
 def validate_forms(
@@ -715,17 +1159,19 @@ def masking_fingerprint(patterns: tuple[MaskPattern, ...] | None = None) -> Mask
     """id / scope / match / kind を表の順序のまま並べてハッシュする(ADR-0011 の指紋と同じ考え方)。
 
     形の一覧(id / 正規表現 / 場所の条件)もいつも含める(ADR-0137 決定3)。形の頭(id / 正規表現)も、かたまりの判定が
-    変わるため含める(REQ-198)。count は表の件数。example / source / note は含めない(例や備考の修正で指紋を動かさない)。
+    変わるため含める(REQ-198)。行の頭の形(id / 正規表現 / 場所の条件。ADR-0198)も含める。count は表の件数。example / source / note は含めない(例や備考の修正で指紋を動かさない)。
     """
     table = MASK_PATTERNS if patterns is None else patterns
     items = [[p.id, p.scope, p.match, p.kind] for p in table]
     forms = [[form_id, regex, UNSENT_FORM_SCOPES.get(form_id, "*")] for form_id, regex in UNSENT_FORMS]
     heads = [[form_id, regex] for form_id, regex in UNSENT_FORM_HEADS]
-    text = json.dumps(
-        {"patterns": items, "unsent_forms": forms, "unsent_form_heads": heads}, ensure_ascii=False, separators=(",", ":")
-    )
+    gate_heads = [[head_id, regex, GATE_HEAD_SCOPES.get(head_id, "*")] for head_id, regex in GATE_HEADS]
+    document: dict[str, object] = {"patterns": items, "unsent_forms": forms, "unsent_form_heads": heads}
+    document["gate_heads"] = gate_heads  # 行の頭の形は判定を変えるため含める(ADR-0198 決定2。REQ-277)
+    text = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
     return MaskingFingerprint(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], len(table))
 
 
+validate_gate_heads()
 validate()
 validate_forms()

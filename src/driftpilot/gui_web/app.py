@@ -28,6 +28,8 @@
 
 - Windows の exe で画面を開けなかったときは、今の知らせの前に同梱のファイルの抜けを確かめ、欠けていれば展開し直すよう
   知らせる(ADR-0192 / REQ-263。gui_web/bundled_files.py。run の 3 か所の知らせ)
+- Windows の exe では、run の最初(import webview の前)に同梱のフォルダーの「インターネットから取った」印を外す。
+  欠けが無いのに印が残っていて開けなかったときは、「許可する」で展開し直すよう知らせる(ADR-0196 / REQ-274)
 
 webview は run() の中で読む(このモジュールは pywebview 無しでも読める。テストは偽物に差し替える)。
 """
@@ -53,6 +55,7 @@ from driftpilot.llm_settings import portable_settings_dir
 from driftpilot.messages import (
     COMPARE_TITLE,
     SETTINGS_TITLE,
+    gui_web_files_blocked,
     gui_web_files_missing,
     gui_web_start_failed,
     webview2_missing,
@@ -186,15 +189,21 @@ def _finish(code: int) -> None:
 
 
 def _bundle_notice() -> str | None:
-    """Windows の exe で同梱のファイルが欠けているときの知らせ(ADR-0192)。欠けていない・確かめない・確かめで例外が出たら None。
+    """Windows の exe で同梱のファイルが欠けているとき、または印が残っているときの知らせ(ADR-0192・ADR-0196)。
+
+    欠けの確かめが先。欠けが無く、固定の一覧のどれかに「インターネットから取った」印が残っていれば、その知らせ。
+    どちらも無い・確かめない・確かめで例外が出たら None。
 
     例外は握りつぶす(確かめのせいで今の知らせが出ないことが無いように)。
     """
     try:
         missing = bundled_files.missing_bundled_files()
-        if not missing:
-            return None
-        return gui_web_files_missing(bundled_files.windows_name(missing[0]), len(missing) - 1)
+        if missing:
+            return gui_web_files_missing(bundled_files.windows_name(missing[0]), len(missing) - 1)
+        marked = bundled_files.marked_bundled_files()
+        if marked:
+            return gui_web_files_blocked(bundled_files.windows_name(marked[0]))
+        return None
     except Exception:  # noqa: BLE001
         return None
 
@@ -218,6 +227,13 @@ def run(
     launch は更新の後の起動(REQ-253 §7): {"notice": 知らせの文, "started_marker": started-ok のパスか None}。
     比較の画面と一括比較の画面の WebSession に渡す(gui_web.main が --update-started・--update-failed のときだけ渡す)。
     """
+    # Windows の exe では、pywebview を読む前に同梱のフォルダーの印を外す(ADR-0196)。外せたかは利用者に関係ない。
+    # 例外は握りつぶす(外す処理のせいで起動を止めない)
+    try:
+        bundled_files.unblock_bundled_files()
+    except Exception:  # noqa: BLE001
+        pass
+
     import webview
 
     from driftpilot.gui_web import print_error

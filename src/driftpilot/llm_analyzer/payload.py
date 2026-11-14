@@ -361,24 +361,24 @@ def _structured_body(diffs: list[Diff], masker: Masker, sides: _Sides, rec: _Rec
 
 
 def _show_gate(diff: dict[str, Any], masker: Masker) -> Any:
-    """show の差分の行で、秘密語を含む値(masker.gated)のある最初の列。無ければ None。
+    """show の差分の行で、秘密の列の最初の列の名前。無ければ None。
 
+    秘密の列は、秘密語を含む値(masker.gated)のある列か、名前が秘密語を含み(masker.is_secret_column。`COMMUNITY` など)
+    空でない値のある列(REQ-277)。行ごと(before と after の両方)に見るので、別の列だけが変わった差分も、同じ行に
+    秘密の列の値があれば送らない。
     AI に送る道(_show_body)と、人に渡す出力(redact。ADR-0156 決定2)の両方で使う。
     """
     rows = [r for r in (diff.get("before"), diff.get("after")) if r]
-    found = None
     for row in rows:
         for column, value in row.items():
             values = value if isinstance(value, list) else [value]
-            for v in values:
-                if isinstance(v, str) and masker.gated(v):
-                    found = column
-                    break
-            if found:
-                break
-        if found:
-            break
-    return found
+            if any(isinstance(v, str) and masker.gated(v) for v in values):
+                return column
+            if masker.is_secret_column(column) and any(
+                v is not None and str(v).strip() for v in values
+            ):
+                return column
+    return None
 
 
 def _show_body(diffs: list[dict[str, Any]], masker: Masker, rec: _Recorder) -> tuple[list[str], int]:

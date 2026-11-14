@@ -98,6 +98,15 @@ def gui_web_files_missing(first: str, rest: int) -> str:
     )
 
 
+def gui_web_files_blocked(first: str) -> str:
+    """Windows の exe で同梱のファイルに「インターネットから取った」印が残っているとき(ADR-0196)。first は最初に印が残っているファイル。"""
+    return (
+        f"Windows が、インターネットから取ったファイルとして DriftPilot のファイル（{first}）を止めています。"
+        "DriftPilot のフォルダーを消し、zip を右クリック →「プロパティ」→「許可する」に✔を入れて「OK」を押してから、展開し直してください。"
+        "または、DriftPilot のフォルダーで PowerShell の Get-ChildItem -Recurse -File | Unblock-File を実行してください。"
+    )
+
+
 def gui_web_unknown_text() -> str:
     """画面が、ここに無い文の鍵を求めたとき(js_api の messages)。"""
     return "画面に出す文が見つかりません。"
@@ -2064,6 +2073,7 @@ COMPARE_COL_OP = "操作"
 COMPARE_COL_CATEGORY = "カテゴリ"
 COMPARE_COL_TARGET = "対象"
 COMPARE_COL_ITEM = "項目"
+COMPARE_COL_TARGET_ITEM = "対象・項目"
 COMPARE_COL_BEFORE = "変更前"
 COMPARE_COL_AFTER = "変更後"
 COMPARE_COL_BEFORE_NO = "前"
@@ -2537,6 +2547,7 @@ GUI_WEB_TEXTS.update(
         "compare.col.category": COMPARE_COL_CATEGORY,
         "compare.col.target": COMPARE_COL_TARGET,
         "compare.col.item": COMPARE_COL_ITEM,
+        "compare.col.target_item": COMPARE_COL_TARGET_ITEM,
         "compare.col.before": COMPARE_COL_BEFORE,
         "compare.col.after": COMPARE_COL_AFTER,
         "compare.col.before_no": COMPARE_COL_BEFORE_NO,
@@ -3968,7 +3979,7 @@ CLI_BATCH_HELP = {
     "quiet": "標準エラーへのサマリの表示を抑える",
     "dry_run": "解釈して比較の予定を一覧に出すだけ。比較しない(終了コード 0)",
     "save": "各 job の結果を、このディレクトリに1件1ファイルで保存する(既定: 保存しない)",
-    "pair_by_name": "直下のファイル名が完全一致するものを対にし、一覧を出す(比較しない)",
+    "pair_by_name": "直下のファイル名が完全一致するものを対にし、一覧を出す(比較しない)。機種は組ごとに中身から自動で見分けます（--write-manifest で書いたマニフェストの platform を直せば、決めた機種で比べられます）",
     "confirm": "--pair-by-name の対で比較を実行する。--llm では、要約を確かめた後に AI への送信を実行する",
     "write_manifest": "--pair-by-name の対を組のファイルとして書いて終わる",
     "llm": "各組の差分を AI に送り、注釈を付ける。--confirm が無ければ、送る内容の要約を出すだけで送らない",
@@ -4064,6 +4075,8 @@ def cli_batch_manifest_written(path: str) -> str:
 CLI_RENDER_SIDE_BEFORE = "変更前"
 CLI_RENDER_SIDE_AFTER = "変更後"
 CLI_RENDER_NO_DIFF = "差分なし"
+# 構造化比較の値が無い(足した行の変更前など。REQ-276)
+STRUCTURED_VALUE_NOT_SET = "（未設定）"
 CLI_RENDER_NONE = "なし"
 CLI_RENDER_NO_PROMPT = "なし(切り分けなし)"
 CLI_RENDER_UNKNOWN_COMMAND = "(コマンド不明)"

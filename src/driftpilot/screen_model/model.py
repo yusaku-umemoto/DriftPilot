@@ -205,6 +205,7 @@ from driftpilot.storage import (
     resaved_record,
     save,
 )
+from driftpilot.value_text import value_text
 
 Side = Literal["before", "after"]
 Mode = Literal["structured", "raw", "both"]
@@ -597,8 +598,8 @@ def _diff_value(d: Any, side: str) -> str:
     value = d[side]
     if d["category"] == "static_routes" and isinstance(value, dict) and "vendor_specific" in value:
         rest = {k: v for k, v in value.items() if k != "vendor_specific"}
-        return f"{rest!r}{route_detail_note(value['vendor_specific'])}"
-    return _value(value)
+        return f"{value_text(rest)}{route_detail_note(value['vendor_specific'])}"
+    return "" if value is None else value_text(value)
 
 
 def _op_key(op: str) -> str:

@@ -87,6 +87,7 @@ from driftpilot.messages import (
 )
 from driftpilot.cli.output import machine_stdout, open_machine_file
 from driftpilot.core import (
+    AUTO_PLATFORM,
     DEFAULT_MAX_TOTAL_DIFFS,
     BatchInterrupted,
     BatchLlmPreview,
@@ -577,13 +578,16 @@ def _run_pairing(args: argparse.Namespace) -> int:
         sys.stdout.write(listing)
         target = Path(args.write_manifest)
         try:
-            written = write_manifest(pairing_manifest(pairing, target.absolute().parent), target)
+            written = write_manifest(
+                pairing_manifest(pairing, target.absolute().parent, platform=AUTO_PLATFORM),
+                target,
+            )
         except (ManifestWriteError, ManifestError) as exc:
             raise CliError(str(exc)) from exc
         print(cli_batch_manifest_written(str(written)))
         return EXIT_SAME
     # --confirm: 標準出力は JSON Lines なので、一覧は標準エラーに出す。--quiet でも消さない
     sys.stderr.write(listing)
-    manifest = parse_manifest(pairing_manifest(pairing, None), base_dir=None)
+    manifest = parse_manifest(pairing_manifest(pairing, None, platform=AUTO_PLATFORM), base_dir=None)
     unpaired = {"before_only": list(pairing.before_only), "after_only": list(pairing.after_only)}
     return _execute(args, manifest, {}, unpaired=unpaired)
