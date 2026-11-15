@@ -11,9 +11,12 @@ fortinet では同じ行の単位で「既定の表を除いた行のうち、�
 """
 
 import csv
+import re
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from driftpilot import i18n
 from driftpilot.config_parser import FlatNode, FlatTree, InterpretedLines, parse_config_traced
@@ -23,6 +26,11 @@ from driftpilot.coverage_report.fold import FOLD_VERSION, fold_line, scope_label
 from driftpilot.coverage_report.fortinet_dedicated import block_name, is_default_table, is_generic
 from driftpilot.segmentation import classify_exposure
 
+if TYPE_CHECKING:
+    from driftpilot.llm_analyzer.masking import Masker
+
+# 判定が「送らない」で形が無いときの形
+UNSENT_SHAPE = "<unsent>"
 EXPOSURES = ("normal", "exposed", "unknown")
 INDEX_NAME = "_index.tsv"
 # 区間のコマンドを持たないことを示す _index.tsv の値(廃止した試作 split_terminal_log.py が書いた値)。判定の対象外なので unknown にする
@@ -210,7 +218,7 @@ def measure_text(text: str, path: str = "", exposure: str = "normal", platform: 
         key = tuple(node.path())
         pattern_id = interpreted.pattern_id(node)
         if pattern_id is None:
-            result.shapes[(scope_label(key), fold_line(key[-1]))] += 1
+            result.shapes[(scope_label(key), unresolved_shape(key[-1], key[:-1]))] += 1
             continue
         result.interpreted += 1
         result.hits[pattern_id] += 1
@@ -225,7 +233,43 @@ def flat_scope_label(path: tuple[str, ...], platform: str | None = None) -> str:
     """
     if len(path) <= 1:
         return "top"
-    return " > ".join(_fold_flat(scope, platform) for scope in path[:-1])
+    return " > ".join(unresolved_shape(scope, path[:index], platform) for index, scope in enumerate(path[:-1]))
+
+
+@lru_cache(maxsize=1)
+def _default_masker() -> "Masker":
+    """既定の伏せる表の判定器。利用者の設定は読まない(`coverage` の今の入力だけで形が決まるように)。1回だけ作って使い回す。
+
+    伏せる側の部品は coverage_report.fold を import するため、ここで遅れて import する(循環 import を避ける)。
+    """
+    from driftpilot.llm_analyzer.masking import Masker
+
+    return Masker()
+
+
+_NUMBERED_SECRET = re.compile(r"<secret:\d+>")
+
+
+@lru_cache(maxsize=8192)
+def unresolved_shape(text: str, ancestors: tuple[str, ...] = (), platform: str | None = None) -> str:
+    """未解釈の行(か範囲の行)の形。AI に送る道と同じ既定の伏せる表で、祖先の行(外側から順)といっしょに判定してから畳む(ADR-0205)。
+
+    - 送る(pass・plain): 今の畳み方
+    - 伏せる(mask): 判定の文の `<secret:数字>` を `<secret>` にしてから、今の畳み方
+    - 送らない(unsent): 判定の形から先頭の `[範囲] ` を除いた文。それ以上は畳まない。形が無ければ `<unsent>`
+
+    記号の番号が行の間で続かないよう、行ごとに使い捨ての記号表で判定する。
+    """
+    from driftpilot.llm_analyzer.masking import scope_label as unsent_scope_label
+
+    judged = _default_masker().judge_alone(text, ancestors)
+    if judged.decision == "unsent":
+        if judged.shape is None:
+            return UNSENT_SHAPE
+        return judged.shape.removeprefix(f"[{unsent_scope_label(ancestors)}] ")
+    if judged.decision == "mask" and judged.text is not None:
+        return _fold_flat(_NUMBERED_SECRET.sub("<secret>", judged.text), platform)
+    return _fold_flat(text, platform)
 
 
 def _fold_flat(text: str, platform: str | None) -> str:
@@ -246,7 +290,9 @@ def _measure_flat(result: FileResult, tree: FlatTree, interpreted: InterpretedLi
             _count_fortinet_dedicated(result, nodes[0].path()[0], ids)
         missed = next((node for node, pattern_id in zip(nodes, ids) if pattern_id is None), None)
         if missed is not None:
-            result.shapes[(flat_scope_label(missed.path(), tree.platform), _fold_flat(missed.text, tree.platform))] += 1
+            missed_path = missed.path()
+            shape = unresolved_shape(missed.text, missed_path[:-1], tree.platform)
+            result.shapes[(flat_scope_label(missed_path, tree.platform), shape)] += 1
             continue
         result.interpreted += 1
         for pattern_id in dict.fromkeys(ids):

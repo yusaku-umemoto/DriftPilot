@@ -17,6 +17,13 @@ Arista の最上位の `ip security` も同じ ipsec に写す(機種をまた�
 `ip security ` + その行の原文を鍵にした項目を作り、その中の子を持たない行を、鍵を外した原文(さらに子を持つ行の中では
 道すじを ` > ` でつないだもの)の集合にする。ここでは鍵の語に shared-key・pre-shared-key も足す(ADR-0113 決定2)。
 `key controller` は鍵の値を持たない見出しなので読み、ほかの鍵の語を持つ中の見出しは、見出しも中も未解釈にする。
+
+NEC IX の最上位の `ike proposal|policy <名前> …`・`ike keepalive|local-id|remote-id|commit-bit|suppress-dangling <名前> …`・
+`ike nat-traversal policy <名前>`(ike の塊)と、`ipsec autokey-proposal <名前> …`・`ipsec autokey-map|dynamic-map|
+manualkey-map <名前> …`・`ipsec local-id|remote-id|commit-bit <名前> …`(ipsec の塊)の1行、`ikev2 default-profile`・
+`ikev2 profile <名前>` のブロックも同じ ipsec に写す(ADR-0209 決定3・4、REQ-292)。名前でつながる行は、名前ごとに1つの塊にまとめる。
+鍵の行(`ike policy … key …`・`ikev2 authentication psk … key …`・`ipsec manualkey …` など)は、伏せる表の秘密語がある行を
+見分ける has_mask_word が真になるので、IR に入れず未解釈のままにする(鍵を外した残りも入れない)。
 """
 
 import re
@@ -25,7 +32,7 @@ from dataclasses import dataclass, field
 
 from hier_config import HConfig, HConfigChild
 
-from driftpilot.config_parser.device_settings import has_secret
+from driftpilot.config_parser.device_settings import has_mask_word, has_secret
 from driftpilot.config_parser.ir import Ipsec, IpsecBlock, new_ipsec
 from driftpilot.config_parser.patterns import Pattern, apply_first
 from driftpilot.config_parser.tracking import InterpretedLines
@@ -39,6 +46,7 @@ _KEY_CONTROLLER = "key controller"
 _KEY_MARK = " <key>"
 _SEPARATOR = " > "
 _BLOCK_SCOPE = "crypto block"
+_IKEV2_PROFILE_SCOPE = "ikev2 profile"
 _IP_SECURITY_SCOPE = "ip security"
 _IP_SECURITY_BLOCK_SCOPE = "ip security block"
 
@@ -140,6 +148,101 @@ def _ip_security_setting(m: re.Match[str], ctx: _Ctx) -> bool:
     return True
 
 
+def _named_block(key: str, ctx: _Ctx) -> IpsecBlock:
+    """名前でつながる塊(keys_configured は偽)を返す。無ければ作る。同じ鍵の行は1つの塊にまとめる。"""
+    ctx.current = _ipsec(ctx)["blocks"].setdefault(key, {"settings": [], "keys_configured": False})
+    return ctx.current
+
+
+def _join(*words: str | None) -> str:
+    """None と空を除いて、空白1つでつなぐ。"""
+    return " ".join(word for word in words if word)
+
+
+def _ike(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`ike proposal|policy <名前> [<残り>]`。残りを塊 `ike <種類> <名前>` の settings に足す(無ければ塊だけ作る)。
+
+    塊は、秘密語がある行(鍵の行)でも作る。ただしその行は未解釈(鍵を外した残りも入れない)。子を持つ行は未解釈。
+    """
+    if ctx.has_children:
+        return False
+    block = _named_block(f"ike {m['head']} {m['name']}", ctx)
+    if has_mask_word(m.string):
+        return False
+    if m["rest"]:
+        _add(block["settings"], m["rest"])
+    return True
+
+
+def _ike_policy_option(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`ike keepalive|local-id|… <名前> [<残り>]`。塊 `ike policy <名前>` の settings に `<語> [<残り>]` を足す。"""
+    if ctx.has_children:
+        return False
+    block = _named_block(f"ike policy {m['name']}", ctx)
+    if has_mask_word(m.string):
+        return False
+    _add(block["settings"], _join(m["word"], m["rest"]))
+    return True
+
+
+def _ike_nat_traversal(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`ike nat-traversal policy <名前>`。塊 `ike policy <名前>` の settings に `nat-traversal` を足す。"""
+    if ctx.has_children:
+        return False
+    block = _named_block(f"ike policy {m['name']}", ctx)
+    if has_mask_word(m.string):
+        return False
+    _add(block["settings"], "nat-traversal")
+    return True
+
+
+def _autokey_proposal(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`ipsec autokey-proposal <名前> [<残り>]`。塊 `ipsec autokey-proposal <名前>` の settings に残りを足す。
+
+    秘密語がある行と子を持つ行は、塊も作らず未解釈。
+    """
+    if ctx.has_children or has_mask_word(m.string):
+        return False
+    block = _named_block(f"ipsec autokey-proposal {m['name']}", ctx)
+    if m["rest"]:
+        _add(block["settings"], m["rest"])
+    return True
+
+
+def _ipsec_map(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`ipsec autokey-map|dynamic-map|manualkey-map|local-id|remote-id|commit-bit <名前> [<残り>]`。
+
+    塊 `ipsec map <名前>` の settings に `<語> [<残り>]` を足す。行の順によらず同じ名前は1つの塊。
+    秘密語がある行と子を持つ行は、塊も作らず未解釈。
+    """
+    if ctx.has_children or has_mask_word(m.string):
+        return False
+    _add(_named_block(f"ipsec map {m['name']}", ctx)["settings"], _join(m["word"], m["rest"]))
+    return True
+
+
+def _ikev2_profile(m: re.Match[str], ctx: _Ctx) -> bool:
+    """子を持つ `ikev2 default-profile`・`ikev2 profile <名前>` だけ読む。見出しの原文を鍵にした塊を作る。
+
+    子を持たない行と、秘密語がある見出しは、塊も作らず未解釈。
+    """
+    if not ctx.has_children or has_mask_word(m.string):
+        return False
+    _named_block(m.string, ctx)
+    return True
+
+
+def _ikev2_profile_setting(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`ikev2` の塊の中の子を持たない行の原文(空白は1つ)を settings に足す。
+
+    子を持つ行と、秘密語がある行(`local-authentication psk …`・`sa-proposal enc …` など)は、子も含めて未解釈。
+    """
+    if ctx.has_children or has_mask_word(m.string):
+        return False
+    _add(ctx.current["settings"], " ".join(m.string.split()))
+    return True
+
+
 _STRIP_NOTE = (
     "語が key・password・secret に等しい最初の位置から行の終わりまでを外す(大文字小文字は区別しない。"
     "pre-shared-key は外さない)。外した残りに語の中に鍵が埋まった(key, や password= などの)形が残る行は未解釈"
@@ -208,9 +311,89 @@ PATTERNS: tuple[Pattern, ...] = (
             "子を持つ行は文字列にしないが解釈済みにする。ただし鍵の語を持つか語の中に鍵が埋まった行は、その行も子孫も未解釈"
         ),
     ),
+    Pattern(
+        "ipsec.ike", "top", r"ike (?P<head>proposal|policy) (?P<name>\S+)(?: (?P<rest>.+))?",
+        "ipsec.blocks[ike proposal|policy <名前>].settings",
+        "ike proposal IKE-PROP1 encryption aes-256 hash sha2-256 group 2048-bit lifetime 86400", _ike,
+        note=(
+            "手続き。NEC IX の子を持たない行。残りを塊 `ike <種類> <名前>` の settings の集合に足す"
+            "(残りが無ければ塊だけ作る。同じ文字列は重ねず、文字列の昇順。keys_configured は偽のまま)。"
+            "伏せる表の秘密語がある行(`ike policy <名前> peer … key …` など)は、塊は作るが行は未解釈"
+            "(鍵を外した残りも入れない)。子を持つ行は未解釈(ADR-0209 決定3、REQ-292)"
+        ),
+    ),
+    Pattern(
+        "ipsec.ike_policy_option", "top",
+        r"ike (?P<word>keepalive|local-id|remote-id|commit-bit|suppress-dangling) (?P<name>\S+)(?: (?P<rest>.+))?",
+        "ipsec.blocks[ike policy <名前>].settings", "ike keepalive IKE-P1 10 3", _ike_policy_option,
+        note=(
+            "手続き。NEC IX の子を持たない行。塊 `ike policy <名前>` の settings に `<語> [<残り>]` を足す"
+            "(見出しの `ike policy <名前> …` が無くても塊を作り、同じ名前は1つにまとめる)。"
+            "秘密語がある行は塊は作るが行は未解釈(ADR-0209 決定3、REQ-292)"
+        ),
+    ),
+    Pattern(
+        "ipsec.ike_nat_traversal", "top", r"ike nat-traversal policy (?P<name>\S+)",
+        "ipsec.blocks[ike policy <名前>].settings", "ike nat-traversal policy IKE-P1", _ike_nat_traversal,
+        note="手続き。NEC IX の行。塊 `ike policy <名前>` の settings に `nat-traversal` を足す(ADR-0209 決定3、REQ-292)",
+    ),
+    Pattern(
+        "ipsec.autokey_proposal", "top", r"ipsec autokey-proposal (?P<name>\S+)(?: (?P<rest>.+))?",
+        "ipsec.blocks[ipsec autokey-proposal <名前>].settings", "ipsec autokey-proposal IPSEC-PROP1 esp-aes-256 esp-sha",
+        _autokey_proposal,
+        note=(
+            "手続き。NEC IX の子を持たない行。残りを塊 `ipsec autokey-proposal <名前>` の settings の集合に足す"
+            "(残りが無ければ塊だけ作る)。秘密語がある行と子を持つ行は、塊も作らず未解釈(ADR-0209 決定4、REQ-292)"
+        ),
+    ),
+    Pattern(
+        "ipsec.map", "top",
+        r"ipsec (?P<word>autokey-map|dynamic-map|manualkey-map) (?P<name>\S+)(?: (?P<rest>.+))?",
+        "ipsec.blocks[ipsec map <名前>].settings", "ipsec autokey-map IPSEC-M1 ACL-VPN peer 192.0.2.1 IPSEC-PROP1",
+        _ipsec_map,
+        note=(
+            "手続き。NEC IX の子を持たない行。塊 `ipsec map <名前>` の settings に `<語> [<残り>]` を足す"
+            "(同じ名前の行は、行の順によらず1つの塊にまとめる)。秘密語がある行と子を持つ行は、塊も作らず未解釈"
+            "(ADR-0209 決定4、REQ-292)"
+        ),
+    ),
+    Pattern(
+        "ipsec.map_option", "top",
+        r"ipsec (?P<word>local-id|remote-id|commit-bit) (?P<name>\S+)(?: (?P<rest>.+))?",
+        "ipsec.blocks[ipsec map <名前>].settings", "ipsec local-id IPSEC-M1 198.51.100.0/24", _ipsec_map,
+        note="手続き。ipsec.map と同じ塊 `ipsec map <名前>` に、`<語> [<残り>]` を足す(ADR-0209 決定4、REQ-292)",
+    ),
+    Pattern(
+        "ipsec.ikev2_profile", "top", r"ikev2 (?:default-profile|profile \S+)", "ipsec.blocks[見出しの原文]",
+        "ikev2 default-profile", _ikev2_profile,
+        note=(
+            "手続き。NEC IX の子を持つ見出しだけ読み、見出しの原文を鍵にした塊を作る(中の行は ipsec.ikev2_profile.setting)。"
+            "子が1行も読めなくても見出しは解釈済み。子を持たない行と、秘密語がある見出しは、塊も作らず未解釈"
+            "(ADR-0209 決定4、REQ-292)"
+        ),
+    ),
+    Pattern(
+        "ipsec.ikev2_profile.setting", _IKEV2_PROFILE_SCOPE, r".+", "ipsec.blocks[鍵].settings", "dpd interval 30",
+        _ikev2_profile_setting,
+        note=(
+            "手続き。`ikev2` の塊の中の子を持たない行の原文(空白は1つ)を settings の集合に足す。"
+            "子を持つ行は子も含めて未解釈。伏せる表の秘密語がある行(`local-authentication psk`・`sa-proposal enc …` など)"
+            "は未解釈(ADR-0209 決定4、REQ-292)"
+        ),
+    ),
 )
-_LEAF_PATTERNS = tuple(pattern for pattern in PATTERNS if pattern.id not in {"ipsec.block", "ipsec.ip_security"})
-_BLOCK_PATTERNS = tuple(pattern for pattern in PATTERNS if pattern.id != "ipsec.option")
+_SINGLE_LINE_IDS = frozenset({
+    "ipsec.ike", "ipsec.ike_policy_option", "ipsec.ike_nat_traversal",
+    "ipsec.autokey_proposal", "ipsec.map", "ipsec.map_option",
+})
+_LEAF_PATTERNS = tuple(
+    pattern for pattern in PATTERNS if pattern.id not in {"ipsec.block", "ipsec.ip_security", "ipsec.ikev2_profile"}
+)
+_BLOCK_PATTERNS = tuple(
+    pattern for pattern in PATTERNS if pattern.id != "ipsec.option" and pattern.id not in _SINGLE_LINE_IDS
+)
+# 見出しの id → 中の行の scope
+_CHILD_SCOPES = {"ipsec.block": _BLOCK_SCOPE, "ipsec.ikev2_profile": _IKEV2_PROFILE_SCOPE}
 
 
 def _read_ip_security(node: HConfigChild, prefix: list[str], ctx: _Ctx, interpreted: InterpretedLines) -> None:
@@ -243,10 +426,10 @@ def extract_ipsec(tree: HConfig, interpreted: InterpretedLines) -> Ipsec | None:
                     interpreted.mark(line, heading.id)
                     _read_ip_security(line, [], ctx, interpreted)
             continue
-        if pattern.id != "ipsec.block":
+        if (scope := _CHILD_SCOPES.get(pattern.id)) is None:
             continue
         for line in block.children:
             ctx.has_children = bool(line.children)
-            if (setting := apply_first(PATTERNS, _BLOCK_SCOPE, line.text, ctx)) is not None:
+            if (setting := apply_first(PATTERNS, scope, line.text, ctx)) is not None:
                 interpreted.mark(line, setting.id)
     return ctx.ipsec

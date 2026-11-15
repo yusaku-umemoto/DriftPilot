@@ -1,12 +1,19 @@
-"""未解釈行を「形」に畳み込む規則 fold-v1(ADR-0011 決定5、REQ-10)。
+"""未解釈行を「形」に畳み込む規則(ADR-0011 決定5、REQ-10、ADR-0205 決定1〜3)。
 
 形は「その行そのもの」から計算し、親の行は含めない。親は scope_label が粗いラベルとして別に出す。
-規則を変えたら FOLD_VERSION を上げる(版の違うレポートは頻度ランキングを比べられないため)。
+規則を変えたら版を上げる(版の違うレポートは頻度ランキングを比べられないため)。版の定数は2つある。
+
+- FOLD_VERSION: `coverage` のレポート(と比べた結果の保存ファイル)の版。fold-v2 は、未解釈の行の形を作る前に
+  AI に送る道と同じ既定の伏せる表で行を判定してから、この畳み方(fold_word・fold_line)で畳む(measure.py)。
+  伏せる行は `<secret>`、送らない行は判定の形になり、秘密の値がレポートに出ない
+- WORD_FOLD_VERSION: fold_word・fold_line の語の規則そのものの版(fold-v1)。伏せる表の被覆(`mask-coverage`)の形が使う。
+  語の規則を変えたときに上げる(FOLD_VERSION も合わせて上げる)
 """
 
 import re
 
-FOLD_VERSION = "fold-v1"
+FOLD_VERSION = "fold-v2"
+WORD_FOLD_VERSION = "fold-v1"
 
 _IPV4 = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?")
 _MAC = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}|[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}")

@@ -39,6 +39,7 @@ from driftpilot.messages import (
     cli_render_segment_line,
     cli_render_select,
     cli_render_show_fallback,
+    cli_render_show_unexplained,
     cli_render_split_head,
     cli_render_unpaired_line,
     cli_render_unparsed,
@@ -144,6 +145,8 @@ def _show_text(result: ShowCompareResult) -> list[str]:
         else:
             detail = repr(d["before"] if d["op"] == "removed" else d["after"])
         lines.append(f"[{d['op']}] {label}: {detail}")
+    if result.method == "both":
+        lines.append(cli_render_show_unexplained(result.unexplained_lines))
     return lines
 
 
@@ -223,6 +226,12 @@ def _payload(outcome: CompareOutcome) -> dict[str, Any]:
                 if show
                 else None
             )
+            if show is not None and show.method in ("raw", "both"):
+                payload["show"]["raw"] = _plain(show.raw)
+                if show.raw is not None and show.raw.options is None:
+                    del payload["show"]["raw"]["options"]
+            if show is not None and show.method == "both":
+                payload["show"]["unexplained_lines"] = show.unexplained_lines
         payload |= head
         payload["segmentation"] = {side: _split_json(seg[side]) for side, _ in SIDES}
         payload["default_exposure"] = (

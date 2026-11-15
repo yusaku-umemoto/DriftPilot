@@ -1,9 +1,12 @@
 """1 つのログに入っている複数の機器を見つけ、機器ごとの文に分ける(ADR-0194 決定1〜3。REQ-267 §2)。
 
 機器は、プロンプトの hostname で見分ける。プロンプトの候補の見つけ方は `splitter.detect_prompt` と同じ
-(`CANDIDATE`・`COMMAND_SHAPED`・コマンドの形が続く行が 1 回以上・出るのが 2 回以上)。
+(`CANDIDATE`・`COMMAND_SHAPED`・コマンドの形が続く行が 1 回以上・出るのが 2 回以上・
+ホスト名の頭が文字か数字であること。`*>` などの表の印で始まる候補は数えない)。
 hostname は `_host` の結果から、末尾に空白なしで付いたかっこ書き 1 つを外した名前(`edge-a(config-if)#` は `edge-a`)。
 FortiGate の形(`fw-01 #`・`fw-01 (root) #`)は `FORTIGATE_PROMPT` の host でまとめる。
+アラクサラ AX の形(`AX_PROMPT`。`> `・`# `・`!OFFICE1# `・20文字までのホスト名)も同じ基準で見分け、host の部分でまとめる
+(`!` と設定モードは名前に含めない。裸のプロンプトは名前が空の 1 台。ADR-0207)。
 
 今の区間の切り分け(`detect_prompt`・`split_log`)は変えない。ここは比較の窓の知らせと書き出しのためだけの部品。
 行の中身は変えない(見分けるときだけ、ページ送りの印と制御文字を外した行を見る)。
@@ -14,6 +17,7 @@ import re
 from dataclasses import dataclass
 
 from driftpilot.segmentation.splitter import (
+    AX_PROMPT,
     CANDIDATE,
     COMMAND_SHAPED,
     CONTROL,
@@ -21,6 +25,8 @@ from driftpilot.segmentation.splitter import (
     PAGER,
     _erase_pager,
     _host,
+    _host_head_ok,
+    _strip_dollar,
     _within_limit,
 )
 
@@ -72,7 +78,7 @@ def _general_hosts(plains: list[str]) -> list[str]:
         if not m or not _within_limit(m.group("prefix")):
             continue
         key = device_key(m.group("prefix"))
-        if not key:
+        if not key or not _host_head_ok(key):
             continue
         freq[key] += 1
         if COMMAND_SHAPED.match(m.group("rest").strip()):
@@ -94,22 +100,42 @@ def _fortigate_hosts(plains: list[str]) -> list[str]:
     return [host for host in total if score[host] >= 1 and total[host] >= 2]
 
 
+def _ax_hosts(plains: list[str]) -> list[str]:
+    """AX の形のプロンプトで機器と決まった名前(ログに最初に出た順)。裸のプロンプトの名前は空の文字列。"""
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in plains:
+        m = AX_PROMPT.match(line)
+        if not m:
+            continue
+        host = m.group("host")
+        if not _host_head_ok(host):
+            continue
+        total[host] += 1
+        if COMMAND_SHAPED.match(_strip_dollar(m.group("rest"))):
+            score[host] += 1
+    return [host for host in total if score[host] >= 1 and total[host] >= 2]
+
+
 def _line_host(plain: str, known: frozenset[str]) -> str | None:
     """この行が、機器と決まった名前のプロンプトの行ならその名前。そうでなければ None。"""
     m = CANDIDATE.match(plain)
     if m and _within_limit(m.group("prefix")):
         key = device_key(m.group("prefix"))
-        if key in known:
+        if _host_head_ok(key) and key in known:
             return key
     m = FORTIGATE_PROMPT.match(plain)
     if m and m.group("host") in known:
+        return m.group("host")
+    m = AX_PROMPT.match(plain)
+    if m and _host_head_ok(m.group("host")) and m.group("host") in known:
         return m.group("host")
     return None
 
 
 def _hosts_in_order(lines: list[str]) -> tuple[list[str], list[str]]:
     plains = [_plain(line) for line in lines]
-    found = set(_general_hosts(plains)) | set(_fortigate_hosts(plains))
+    found = set(_general_hosts(plains)) | set(_fortigate_hosts(plains)) | set(_ax_hosts(plains))
     known = frozenset(found)
     order: list[str] = []
     for plain in plains:

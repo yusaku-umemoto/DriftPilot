@@ -38,6 +38,7 @@ from driftpilot.llm_analyzer.payload import (
     _show_gate,
     _Sides,
     _value_path,
+    _name_in_block,
 )
 
 # llm_analyzer は messages を読まないので、利用者に見える文はここに持つ(日本語・英語。REQ-258)。鍵の組と差し込みの名前は両方で同じ
@@ -156,6 +157,8 @@ def _structured_row(diff: Diff, masker: Masker, sides: _Sides, rec: _Recorder) -
         line = str(masked).strip()
         before, after = (line, "") if op == "removed" else ("", line)
         return RedactedDiff(op, category, "", _PARENT_JOIN.join(shown), before, after, False)
+    if _name_in_block(diff, sides, rec):
+        return _omitted_diff(op, category)
     before = _mask_tree(diff["before"], _value_path(diff, diff["before"]), masker, sides, rec)
     after = _mask_tree(diff["after"], _value_path(diff, diff["after"]), masker, sides, rec)
     if before is _DROP or after is _DROP:
@@ -212,7 +215,7 @@ def redact_result(
     """
     has_diffs = bool(
         (structured is not None and structured.diffs)
-        or (show is not None and show.method == "structured" and show.diffs)
+        or (show is not None and show.method in ("structured", "both") and show.diffs)
         or (raw is not None and raw.diffs)
         or any(row.is_diff for row in raw_rows)
     )
@@ -226,7 +229,7 @@ def redact_result(
     diffs: list[RedactedDiff] = []
     if structured is not None:
         diffs += [_structured_row(diff, masker, sides, rec) for diff in structured.diffs]
-    if show is not None and show.method == "structured":
+    if show is not None and show.method in ("structured", "both"):
         diffs += [_show_row(diff, masker, rec) for diff in show.diffs]
     rows: list[RedactedRawRow] = []
     for k in _shown_rows(raw_rows):

@@ -37,7 +37,11 @@ const DIALOG_TEXTS = [
   "compare.export.body",
   "compare.col.resize",
   "compare.multi.paired_by_hand", // 手で組にした組の印（REQ-269）
+  "compare.multi.show_raw", // show を単純比較で出した組の印（REQ-282）
+  "compare.multi.show_both", // show を表と単純比較の両方で出した組の印（REQ-282）
 ];
+// 一覧の行の show_method（Python が決める）から、印の文のキーを引く（REQ-282）
+const SHOW_METHOD_MARKS = { raw: "compare.multi.show_raw", both: "compare.multi.show_both" };
 // 列の幅の境目を付ける 5 つの表（REQ-224 / ADR-0163）。fill は残りを埋める列の番号（無ければ最後の列）、fillMin はその最低の幅（px）。
 // multi-table の fill は先頭の「AI に送る」のチェックの列を出しているときの番号（出していないときは 1 つ前。REQ-265）
 const COLUMN_TABLES = [
@@ -72,6 +76,7 @@ const shown = {
   focus: 0,
   result: 0,
   rows: null, // 描いた表の中身の番号（Python の result の rows_revision）
+  openTab: null, // open_tab のタブを選んだ番号（Python の result の open_tab_revision。新しい結果を出したときだけ進む。REQ-282）
   notice: null,
   multi: null,
   send: null, // 描いた一覧に「AI に送る」の列があったか（REQ-265）
@@ -442,6 +447,10 @@ function renderMulti(multi) {
         // 手で組にした印（REQ-269）。状態の文の後ろに足す。textContent だけで描く
         status.append(" ", make("span", "pilot-manual-mark", texts["compare.multi.paired_by_hand"]));
       }
+      if (Object.hasOwn(SHOW_METHOD_MARKS, row.show_method)) {
+        // show の比べ方の印（REQ-282）。「手で組にした」の印があればその後ろに足す。textContent だけで描く
+        status.append(" ", make("span", "pilot-show-method-mark", texts[SHOW_METHOD_MARKS[row.show_method]]));
+      }
       tr.append(make("td", "", row.name), status, make("td", "pilot-num", row.diffs));
       tr.title = row.name;
       if (row.unpaired) {
@@ -753,6 +762,16 @@ function drawResult(result) {
     text($(`tab-${tab}`), result.titles[tab]);
   }
   drawTabStates(result);
+  // 1組を比べたとき、show が both なら表、raw なら単純比較のタブを開く（REQ-282。まとめて比べているときは null）。
+  // 新しい結果を出したとき（open_tab_revision が進んだとき）だけ選ぶ。前後の行数を変えただけの描き直し（rows_revision だけ進む）では
+  // 選び直さない。選んだあとで、押せるタブの確かめを通す
+  if (result.open_tab_revision !== shown.openTab) {
+    shown.openTab = result.open_tab_revision;
+    if (result.open_tab) {
+      selectTab(result.open_tab);
+      keepSelectableTab(result.fallback_tab);
+    }
+  }
   note("structured-warnings", result.warnings);
   text($("structured-note"), result.structured_note);
   // 機種違いの失敗のときだけ、エラーの全文と警告を「詳しい内容」に入れる（文字のまま。結果が変わるたびに閉じる）

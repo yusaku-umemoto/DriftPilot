@@ -4,9 +4,13 @@
 `|` の後ろ(パイプ)はそのまま残す(`show run | section x` は `show run` と別のコマンド)。
 """
 
+import re
+import warnings
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 from driftpilot.segmentation.splitter import Segment
 
@@ -41,19 +45,114 @@ def _complete(word: str, vocabulary: frozenset[str]) -> str:
     return hits[0] if len(hits) == 1 else word
 
 
-def command_key(text: str, platform: str | None = None) -> str:
-    """組にするためのコマンドの名前。空白を詰めて小文字にし、語ごとに既知の語の表で一意に前方一致すれば完全な語にする。
+# ntc-templates の索引の Command の列の語。種類ごとに (種類, 値 1, 値 2) の形で持つ(ADR-0202 決定1)
+#   ("abbr", 要る部分, 全部の形)  `sy[[stem]]` → ("abbr", "sy", "system")
+#   ("plain", 語, 語)             `info`
+#   ("regex", 正規表現, "")       `(\S+)` `\d+` など。打った語に全体が当たるか
+_Matcher = tuple[str, "str | re.Pattern[str]", str]
+_REGEX_CHARS = frozenset("\\.^$*+?{}[]()|")
+_ABBREVIATED = re.compile(r"([^\\.^$*+?{}\[\]()|]+)\[\[([^\\.^$*+?{}\[\]()|]+)\]\]")
 
+# 語の数ごとの索引の行。初めて使うときに読む(coverage_show と同じく import の輪を作らない)
+_INDEX: dict[int, list[tuple[_Matcher, ...]]] | None = None
+
+
+def _index_path() -> Path:
+    import ntc_templates
+
+    return Path(ntc_templates.__file__).parent / "templates" / "index"
+
+
+def _parse_word(word: str) -> _Matcher | None:
+    """索引の語 1 つを読む。正規表現として読めない語、または警告が出る語は None(その行は使わない)。"""
+    found = _ABBREVIATED.fullmatch(word)
+    if found:
+        need, rest = found.group(1).lower(), found.group(2).lower()
+        return ("abbr", need, need + rest)
+    if not _REGEX_CHARS.intersection(word):
+        return ("plain", word.lower(), word.lower())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # FutureWarning など、警告が出る語は使わない(外には 1 つも出さない)
+        try:
+            return ("regex", re.compile(word, re.IGNORECASE), "")
+        except (re.error, Warning, RecursionError, OverflowError):
+            return None
+
+
+def _load_index() -> dict[int, list[tuple[_Matcher, ...]]]:
+    global _INDEX
+    if _INDEX is None:
+        index: dict[int, list[tuple[_Matcher, ...]]] = defaultdict(list)
+        try:
+            lines = _index_path().read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            lines = []
+        header_seen = False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not header_seen:  # 最初の行は見出し(Template, Hostname, Platform, Command)
+                header_seen = True
+                continue
+            fields = stripped.split(",", 3)
+            if len(fields) < 4 or not fields[3].strip():
+                continue
+            matchers = [_parse_word(w) for w in fields[3].split()]
+            if any(m is None for m in matchers):
+                continue
+            index[len(matchers)].append(tuple(m for m in matchers if m is not None))
+        _INDEX = dict(index)
+    return _INDEX
+
+
+def _word_sentence(matcher: _Matcher, typed: str) -> str | None:
+    """索引の語に打った語が当たるなら、キーに使う形(略し方つきは全部の形、略し方の無い語はそのまま、正規表現は打った語)。"""
+    kind, first, second = matcher
+    if kind == "abbr":
+        assert isinstance(first, str)
+        return second if typed.startswith(first) and second.startswith(typed) else None
+    if kind == "plain":
+        return second if typed == first else None
+    assert isinstance(first, re.Pattern)
+    return typed if first.fullmatch(typed) else None
+
+
+@lru_cache(maxsize=4096)
+def _index_key(head: str) -> str | None:
+    """`|` の前の部分を索引で照らす。当たった文がすべて同じならその文、当たりが無い・文が分かれるなら None。"""
+    words = head.split()
+    if not words:
+        return None
+    sentences: set[str] = set()
+    for matchers in _load_index().get(len(words), ()):
+        parts = [_word_sentence(m, w) for m, w in zip(matchers, words, strict=True)]
+        if all(part is not None for part in parts):
+            sentences.add(" ".join(p for p in parts if p is not None))
+            if len(sentences) > 1:
+                return None
+    return next(iter(sentences)) if sentences else None
+
+
+def command_key(text: str, platform: str | None = None) -> str:
+    """組にするためのコマンドの名前。空白を詰めて小文字にする。
+
+    `write terminal` は固定の対応。次に ntc-templates の索引で照らし、略し方でそろえる(ADR-0202 決定1。
+    `get sys stat` → `get system status`)。索引で決まらなければ、語ごとに既知の語の表で一意に前方一致すれば完全な語にする。
     一意でなければ元の語のまま。`|` の後ろは置き換えず、「前の部分 | 後ろの部分」の形にそろえる。
     platform は REQ-121 の形どおり受け取るが、今は使わない(機種ごとの語の表は無い)。
     """
     head, bar, tail = " ".join(text.split()).lower().partition("|")
-    vocabulary = _vocabulary()
     words = head.split()
     if _is_write_terminal(words):
         key = WRITE_TERMINAL_KEY
     else:
-        key = " ".join(_complete(w, vocabulary) for w in words)
+        indexed = _index_key(" ".join(words))
+        if indexed is not None:
+            key = indexed
+        else:
+            vocabulary = _vocabulary()
+            key = " ".join(_complete(w, vocabulary) for w in words)
     if bar:
         key = f"{key} | {tail.strip()}".strip()
     return key

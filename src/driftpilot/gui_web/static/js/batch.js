@@ -57,7 +57,12 @@ const EXTRA_TEXTS = [
   "batch.col.suggest_all",
   // キャラクターがオンのときの「AI で解析」の文（ADR-0181 決定2）
   "batch.button.ai_send.character",
+  // 状態の横に出す、show の比べ方の印（REQ-282。比較の窓と同じ鍵）
+  "compare.multi.show_raw",
+  "compare.multi.show_both",
 ];
+// 行の show_methods（Python が決める。raw・both の順）から、印の文のキーを引く
+const SHOW_METHOD_MARKS = { raw: "compare.multi.show_raw", both: "compare.multi.show_both" };
 // 文字の欄と「選ぶ…」「開く…」のボタン（Python の欄の名前と、確定したときの比べるもの）
 const PATHS = [
   { input: "before-dir", pick: "before-pick", field: "before_dir", source: "folders" },
@@ -499,6 +504,15 @@ function drawTable(rows, state) {
         td.append(namePathCell(row[column.key]));
       } else {
         text(td, row[column.key]);
+        if (column.key === "status") {
+          // show の比べ方の印（REQ-282）。状態の文のあとに、単純比較・表＋単純比較の順で足す（textContent だけで描く）。
+          // 印がある行のセルは折り返して全部見せる。数の列は変えない（二重に数えない）
+          const marks = (row.show_methods || []).filter((method) => Object.hasOwn(SHOW_METHOD_MARKS, method));
+          for (const method of marks) {
+            td.append(" ", make("span", "pilot-show-method-mark", texts[SHOW_METHOD_MARKS[method]]));
+          }
+          td.classList.toggle("pilot-cell-wrap", marks.length > 0);
+        }
         td.title = td.textContent; // 切れて見えないセルの全文は、指を置くと出る（文字のまま）
       }
       tr.append(td);

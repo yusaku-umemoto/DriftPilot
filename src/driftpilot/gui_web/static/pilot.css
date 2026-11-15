@@ -1541,6 +1541,22 @@ body[data-pair-dragging="true"] [data-drop-blocked="true"] * {
   white-space: nowrap;
 }
 
+/* show の比べ方の印（REQ-282）: 単純比較で出した組・表と単純比較の両方の組の、状態の文の後ろの小さな印。手で組にした印と同じ形 */
+.pilot-show-method-mark {
+  padding: 0 var(--pilot-space-1);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: 8px;
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+  white-space: nowrap;
+}
+
+/* 折り返すセル（一括比較の窓の状態の列で、印がある行）の中では、印の中の文字も折り返して切れないようにする（REQ-282） */
+.pilot-table--fixed td.pilot-cell-wrap > .pilot-show-method-mark {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* 未解釈: 操作 60・行 460・親 380 */
 .pilot-col-line {
   width: 52%;

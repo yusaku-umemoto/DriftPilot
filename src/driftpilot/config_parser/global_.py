@@ -350,6 +350,11 @@ def _snmp_contact(m: re.Match[str], result: Global) -> bool:
     return True
 
 
+# IPv4 / IPv6 のアドレスの語(`snmp-server host` の 1 語目の次の語がこれなら ASA の nameif つきの形。REQ-307)。
+# IPv6 は 16 進・`:`・`.` だけの語で `:` が 2 つ以上あるもの
+_ADDRESS_WORD = r"(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)"
+
+
 def _snmp_host(m: re.Match[str], result: Global) -> bool:
     options = " ".join(part for part in (m["mode"].strip(), m["rest"]) if part)
     result["snmp"]["hosts"].append(
@@ -595,12 +600,17 @@ PATTERNS: tuple[Pattern, ...] = (
     ),
     Pattern(
         "global.snmp.host", "top",
-        r"snmp-server host (?P<host>\S+)"
-        # auth / noauth / priv は version 3 のときだけセキュリティ指定。1 / 2c ではコミュニティ名になりうる
-        r"(?P<mode>(?: traps| informs)?(?: version (?:(?:1|2c)|3(?: auth| noauth| priv)?))?)"
+        # ASA の `snmp-server host <nameif> <アドレス> …` は読まない(値が options に入って送られるため。REQ-307)
+        rf"snmp-server host (?!\S+ {_ADDRESS_WORD}(?: |$))(?P<host>\S+)"
+        # auth / noauth / priv は version 3 のときだけセキュリティ指定。1 / 2c ではコミュニティ名になりうる。
+        # vrf(IOS の `<アドレス> vrf <名前>`)は traps・informs・version と同じく options の側に読む(REQ-307)
+        r"(?P<mode>(?: vrf \S+)?(?: traps| informs)?(?: version (?:(?:1|2c)|3(?: auth| noauth| priv)?))?)"
         r" (?P<community>\S+)(?: (?P<rest>\S.*))?",
         "snmp.hosts", "snmp-server host 192.0.2.30 version 2c public", _snmp_host,
-        note="手続き。traps / informs と version は options にまとめ、その後ろの語は options の続きにする",
+        note=(
+            "手続き。vrf <名前>・traps / informs と version は options にまとめ、その後ろの語は options の続きにする。"
+            "`snmp-server host <名前> <アドレス> …`(ASA の nameif つきの形)は読まない(未解釈)"
+        ),
     ),
     # v3 の利用者・グループ・ビューと、ほかの snmp の行(REQ-83)。今の community・location・contact・host より後ろに置く
     Pattern(
@@ -719,6 +729,12 @@ PATTERNS: tuple[Pattern, ...] = (
         "global.enable_secret", "top", r"enable secret (?!level )(?:(?P<type>\S+) )?(?P<value>\S+)",
         "enable_secret", "enable secret 9 $9$EXAMPLE", _enable("enable_secret"),
         note=_ONCE + "。level を含む行は読まない",
+    ),
+    # ASA の形(`enable password <値> encrypted|pbkdf2`。値が先で方式が後)。IOS の形のパターンより前に置く(REQ-307)
+    Pattern(
+        "global.enable_password_asa", "top", r"enable password (?P<value>\S+) (?P<type>encrypted|pbkdf2)",
+        "enable_password", "enable password EXAMPLE encrypted", _enable("enable_password"),
+        note=_ONCE + "。ASA の形で、値・方式の順(type は encrypted か pbkdf2)。level を含む行は読まない(未解釈)",
     ),
     Pattern(
         "global.enable_password", "top", r"enable password (?!level )(?:(?P<type>\S+) )?(?P<value>\S+)",

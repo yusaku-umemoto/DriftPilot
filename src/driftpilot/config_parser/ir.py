@@ -43,8 +43,13 @@ class Switchport(TypedDict):
     mode: SwitchportMode | None
     access_vlan: int | None
     native_vlan: int | None
+    # True は `switchport trunk native vlan none`(このとき `native_vlan` は None)。後に `native vlan <数>` があれば
+    # False に戻る(ADR-0206 決定4、REQ-289)
+    native_vlan_none: bool
     # `()` は行が無い、または `all`(どちらも、すべて通す。ADR-0111 決定1)。`add` は前の数の一覧に足す(REQ-176)。
-    # `none` は `trunk_allowed_none` が表す。`remove`・`except` などは未解釈
+    # アライドテレシス AW+ と見立てた config(ADR-0206 決定1)では、前に一覧が無い `add` は空の一覧に足し、
+    # `remove` は前の一覧から引く(全部引けば `()`。決定3、REQ-289)。
+    # `none` は `trunk_allowed_none` が表す。`except` などは未解釈
     trunk_allowed_vlan: tuple[int, ...]
     # True は `switchport trunk allowed vlan none`(1つも通さない。このとき `trunk_allowed_vlan` は `()`)。
     # False は行が無い・数の一覧・`all`(ADR-0132 決定1、REQ-177)
@@ -670,7 +675,10 @@ class User(TypedDict):
 
 
 class EnableCredential(TypedDict):
-    """`enable secret` / `enable password` の型と値(ADR-0049 決定2)。type は書かれていなければ None。"""
+    """`enable secret` / `enable password` の型と値(ADR-0049 決定2)。type は書かれていなければ None。
+
+    ASA の `enable password <値> encrypted|pbkdf2` では type が encrypted か pbkdf2 になる(REQ-307)。
+    """
 
     type: str | None
     value: str
@@ -1081,6 +1089,7 @@ def new_switchport() -> Switchport:
         "mode": None,
         "access_vlan": None,
         "native_vlan": None,
+        "native_vlan_none": False,
         "trunk_allowed_vlan": (),
         "trunk_allowed_none": False,
         "voice_vlan": None,

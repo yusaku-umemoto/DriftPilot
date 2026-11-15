@@ -30,6 +30,7 @@ from driftpilot.core import (
     DEFAULT_RAW_OPTIONS,
     RAW_CONTEXT_DEFAULT,
     RAW_CONTEXT_MAX,
+    SHOW_OUTSIDE_TABLE_REASONS,
     CompareCancelled,
     CompareOutcome,
     CompareRequest,
@@ -126,6 +127,7 @@ from driftpilot.messages import (
     SM_RAW_OFF_BY_MODE,
     SM_SELECT_KIND_PROMPT,
     SM_SET_ASIDE_SEPARATOR,
+    SM_SHOW_OUTSIDE_TABLE,
     SM_SIDE_LABEL,
     SM_STAGE_LABEL,
     SM_STALE_RESULT,
@@ -177,6 +179,7 @@ from driftpilot.messages import (
     sm_preview_summary,
     sm_select_segment_prompt,
     sm_show_fell_back,
+    sm_show_unexplained,
     sm_unparsed_pair,
     status_breakdown,
     unpaired_place,
@@ -414,7 +417,7 @@ def read_counts(outcome: CompareOutcome) -> Counts:
     return Counts(
         structured=len(outcome.structured.diffs) if outcome.structured is not None else None,
         # テンプレートが無く raw にフォールバックした show は、構造化の件数を持たない(raw の件数に出る)
-        show=len(show.diffs) if show is not None and show.method == "structured" else None,
+        show=len(show.diffs) if show is not None and show.method in ("structured", "both") else None,
         raw=len(outcome.raw.diffs) if outcome.raw is not None else None,
         unparsed=dict(outcome.structured.unparsed_counts) if outcome.structured is not None else None,
         warnings=len(outcome.warnings),
@@ -564,6 +567,8 @@ class OutcomeView:
     raw_set_aside: str | None = None
     # 保存した結果を開いたときの窓の下の行(「保存した結果の単純比較の設定: …」。opened_view が入れる)。wx は読まない
     raw_settings_saved: str | None = None
+    # 1組を比べて結果を開いたときに選ぶタブ(structured・raw。show の both・raw だけ。ほかは None=今のタブのまま。REQ-282)。wx は読まない
+    open_tab: str | None = None
 
 
 def answer_blocks(text: str | None) -> list[dict[str, Any]] | None:
@@ -641,13 +646,43 @@ def _structured_rows(outcome: CompareOutcome) -> list[StructuredRow]:
     ]
 
 
+def _outside_table(outcome: CompareOutcome) -> bool:
+    """show を単純比較で出した理由が「表に出ない行が変わった」か。理由の文は比べたときの言語で入るので、日英どちらの文も見る(ADR-0200)。"""
+    show = outcome.show
+    return (
+        show is not None
+        and show.method == "raw"
+        and show.fallback_reason in SHOW_OUTSIDE_TABLE_REASONS
+    )
+
+
+def _show_raw_reason(outcome: CompareOutcome) -> str:
+    """show を単純比較で出した理由の1行(表に出ない行が変わった組は専用の文、テンプレートが無い組は今の文)。"""
+    assert outcome.show is not None
+    return SM_SHOW_OUTSIDE_TABLE if _outside_table(outcome) else sm_show_fell_back(outcome.show.fallback_reason)
+
+
+def show_method(outcome: CompareOutcome | None) -> str | None:
+    """一覧の行に出す、show の比べ方の印の元。単純比較で出した show は "raw"、表と単純比較の両方は "both"、ほかは None。"""
+    if outcome is None or outcome.show is None:
+        return None
+    return outcome.show.method if outcome.show.method in ("raw", "both") else None
+
+
+def show_open_tab(outcome: CompareOutcome) -> str | None:
+    """1組を比べたとき、結果を開いて選ぶタブ。show の both は structured、raw は raw、ほかは None(今のタブのまま。ADR-0200 決定 5)。"""
+    return {"both": "structured", "raw": "raw"}.get(show_method(outcome) or "")
+
+
 def _structured_note(outcome: CompareOutcome) -> str | None:
     if outcome.kind is None:
         return None
     if outcome.mode == "raw":
         return COMPARE_TAB_OFF_MODE_RAW
     if outcome.show is not None and outcome.show.method == "raw":
-        return sm_show_fell_back(outcome.show.fallback_reason)
+        return _show_raw_reason(outcome)
+    if outcome.show is not None and outcome.show.method == "both":
+        return sm_show_unexplained(outcome.show.unexplained_lines)
     if outcome.kind == "config" and outcome.structured is None:
         return outcome.error.message if outcome.error else None
     if (outcome.show is not None and not outcome.show.diffs) or (outcome.structured is not None and not outcome.structured.diffs):
@@ -666,7 +701,7 @@ def structured_off(outcome: CompareOutcome) -> str | None:
     if outcome.mode == "raw":
         return COMPARE_TAB_OFF_MODE_RAW
     if outcome.show is not None and outcome.show.method == "raw":
-        return COMPARE_TAB_OFF_SHOW
+        return SM_SHOW_OUTSIDE_TABLE if _outside_table(outcome) else COMPARE_TAB_OFF_SHOW
     return None
 
 
@@ -675,9 +710,11 @@ def _raw_note(outcome: CompareOutcome) -> str | None:
         return None
     if outcome.raw is None:
         return SM_RAW_OFF_BY_MODE
+    # 単純比較で出した show は、理由の1行を出す。差分が無いときは、次の行に「差分なし」を続ける
+    reason = _show_raw_reason(outcome) if outcome.show is not None and outcome.show.method == "raw" else None
     if not outcome.raw.diffs:
-        return STATUS_LABEL["no_difference"]
-    return None
+        return STATUS_LABEL["no_difference"] if reason is None else f"{reason}\n{STATUS_LABEL['no_difference']}"
+    return reason
 
 
 def align_raw(
@@ -1031,6 +1068,7 @@ def view_outcome(outcome: CompareOutcome) -> OutcomeView:
         warnings_web=warnings_web(outcome),
         structured_off=structured_off(outcome),
         raw_set_aside=raw_set_aside_text(outcome_raw_options(outcome)),
+        open_tab=show_open_tab(outcome),
     )
 
 
@@ -1729,6 +1767,8 @@ class MultiRow:
     unpaired: bool
     # 比較の窓で手で組にした組か(REQ-269。状態の近くに「手で組にした」の印を出す)
     manual: bool = False
+    # show の比べ方の印(REQ-282。単純比較で出した組は "raw"、表と単純比較の両方の組は "both"、ほかは None)
+    show_method: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1764,6 +1804,8 @@ class MultiView:
 
 def diff_count(outcome: CompareOutcome) -> str:
     counts = read_counts(outcome)
+    if show_method(outcome) == "both" and counts.show is not None and counts.raw is not None:
+        return str(counts.show + counts.raw)  # 表と単純比較の差分を合わせた数(REQ-282 §3)
     for value in (counts.structured, counts.show, counts.raw):
         if value is not None:
             return str(value)
@@ -1771,7 +1813,9 @@ def diff_count(outcome: CompareOutcome) -> str:
 
 
 def outcome_entry(name: str, outcome: CompareOutcome, manual: bool = False) -> MultiEntry:
-    return MultiEntry(MultiRow(name, STATUS_LABEL[outcome.status], diff_count(outcome), False, manual), outcome)
+    return MultiEntry(
+        MultiRow(name, STATUS_LABEL[outcome.status], diff_count(outcome), False, manual, show_method(outcome)), outcome
+    )
 
 
 def unpaired_entry(unpaired: Unpaired) -> MultiEntry:
@@ -2058,7 +2102,9 @@ def all_rows(entries: Sequence[MultiEntry]) -> list[AllRow]:
                 AllRow(name, r.op, r.category, _target_item(r.target, r.item), r.before, r.after, r.op_key)
                 for r in view.structured_rows
             ]
-            continue
+            if show_method(outcome) != "both":
+                continue
+        # 表と単純比較の両方の組は、表の差分のあとに単純比較の差分を続ける(REQ-282 §2)
         rows += [
             AllRow(name, raw_mark_label(r), ALL_RAW_CATEGORY, "", r.before_text, r.after_text, "changed" if r.mark == "~" else "")
             for r in view.raw_rows
@@ -2078,7 +2124,7 @@ def pair_tab(outcome: CompareOutcome | None) -> str | None:
     """
     if outcome is None:
         return None
-    if outcome.structured is not None or (outcome.show is not None and outcome.show.method == "structured"):
+    if outcome.structured is not None or (outcome.show is not None and outcome.show.method in ("structured", "both")):
         return "structured"
     if outcome.raw is not None:
         return "raw"

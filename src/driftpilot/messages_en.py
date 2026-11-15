@@ -228,6 +228,16 @@ def warning_message(w: SafetyWarning) -> str:
             f"{_plural(len(w.detail['lines']), 'is a duplicate', 'are duplicates')} "
             "(the same line, or the same item with different values). Neither was dropped, but the IR uses the value from the later line."
         )
+    if w.kind == "top_level_merged":
+        # Line contents and values are not included (detail has only line numbers and the count). Up to 10 line numbers (ADR-0211 decision 4)
+        numbers = list(w.detail["lines"])
+        shown = ", ".join(str(n) for n in numbers[:10]) + (", and others" if len(numbers) > 10 else "")
+        return (
+            f"In {_SIDE_LABEL[w.side or 'before']}, the same heading or line appeared in {w.detail['count']} "
+            f"{_plural(w.detail['count'], 'place', 'places')} at the top level "
+            f"({_plural(min(len(numbers), 10), 'line', 'lines')} {shown}). "
+            "They were merged into one before comparing, as the device does."
+        )
     if w.kind == "platform_mismatch":
         return _platform_mismatch_message(w)
     if w.kind == "pager_marks":
@@ -813,11 +823,15 @@ def llm_unsent_shape_lines(llm: LlmAnalysis) -> list[str]:
 
 def unsent_shape_lines(shapes: "list[UnsentShape] | tuple[UnsentShape, ...]") -> list[str]:
     """Lines listing shapes of lines not sent. Same form for a single comparison and Batch compare (all pairs combined)."""
+    from driftpilot.llm_analyzer.payload import SECRET_SHOW_REASON
+
     if not shapes:
         return []
     lines = ["Shapes of lines not sent (no values; candidates to add to the masking table):"]
     for s in shapes:
-        if s.kind == "pem_block":
+        if s.shape == SECRET_SHOW_REASON:
+            lines.append(f"  [{s.scope}] The body of this pair was not sent because the command lists secrets ({s.count})")
+        elif s.kind == "pem_block":
             lines.append(f"  {s.count:4d} {_plural(s.count, 'block', 'blocks')} ({s.lines} {_plural(s.lines, 'line', 'lines')})  [{s.scope}] {s.shape}")
         else:
             lines.append(f"  {s.count:4d} {_plural(s.count, 'line', 'lines')}  [{s.scope}] {s.shape}")
@@ -2223,6 +2237,9 @@ COMPARE_MULTI_NOTHING_TO_SAVE = "There are no sections with a counterpart, so th
 COMPARE_MULTI_CHOOSE_PARTNER = "Choose partner…"
 COMPARE_MULTI_UNPAIR = "Unpair"
 MULTI_PAIRED_BY_HAND = "Paired by hand"
+# Marks beside the status of a pair row (and in the Batch compare table) for how show was compared (ADR-0200 decision 5; REQ-282)
+MULTI_SHOW_RAW_MARK = "Simple compare"
+MULTI_SHOW_BOTH_MARK = "Table + simple compare"
 COMPARE_PARTNER_TITLE = "Choose partner"
 
 
@@ -2595,6 +2612,8 @@ GUI_WEB_TEXTS.update(
         "compare.multi.choose_partner": COMPARE_MULTI_CHOOSE_PARTNER,
         "compare.multi.unpair": COMPARE_MULTI_UNPAIR,
         "compare.multi.paired_by_hand": MULTI_PAIRED_BY_HAND,
+        "compare.multi.show_raw": MULTI_SHOW_RAW_MARK,
+        "compare.multi.show_both": MULTI_SHOW_BOTH_MARK,
         "compare.paste.prompt": PASTE_PROMPT,
         "compare.dialog.ok": DIALOG_OK,
         "compare.dialog.cancel": DIALOG_CANCEL,
@@ -3842,6 +3861,14 @@ def sm_show_fell_back(reason: str) -> str:
     return f"Could not read with the show template, so Simple compare was used: {reason}"
 
 
+SM_SHOW_OUTSIDE_TABLE = "Lines outside the table changed, so this is shown as a simple compare"
+
+
+def sm_show_unexplained(count: int) -> str:
+    """Note above the Structured tab when lines outside the table also changed after show was compared as a table (ADR-0200 decision 5)."""
+    return f"Lines outside the table also changed ({count} {_plural(count, 'line', 'lines')}). Check the Simple compare tab too"
+
+
 def sm_select_segment_prompt(side_labels: list[str]) -> str:
     """Prompt to choose a section, naming the sides (Before / After) that have several."""
     return f"{' and '.join(side_labels)} has more than one section. Choose the section to compare, then compare again"
@@ -3959,6 +3986,37 @@ CLI_HELP = {
     "gui.help": "Open the comparison screen (needs pip install 'driftpilot[gui]')",
     "llm_check.help": "Send one short fixed text to the AI to check that the key and model connect (a very small charge may apply)",
     "llm_check.yes": "Skip the confirmation before sending (required when the input is not a terminal)",
+    "pilot_call.help": (
+        "Entry for other Pilots to call (the request is a JSON file; the output is one JSON object per line on standard output. "
+        "Does not call the AI)"
+    ),
+    "pilot_call.capabilities": "Print what this tool can do as one line of JSON on standard output",
+    "pilot_call.compare": (
+        "Read a request file, compare the two inputs, and write the results to files in output_dir "
+        "(stops when standard input is closed. Exit codes: no difference 0, difference 1, error 2, selection needed 3, stopped 130)"
+    ),
+    "pilot_call.request": "The request JSON file (UTF-8)",
+}
+
+# --- Error texts of the pilot-call entry for other Pilots (ADR-0203. REQ-286). `{...}` is filled in with .format by the caller.
+# The contents of the request and the inputs are never included (only paths, counts and names) ---
+PILOT_CALL_MESSAGES = {
+    "invalid_request": "The request file cannot be read as a UTF-8 JSON object",
+    "unsupported_schema": "Only schema pilot.call-request with schema_version \"1\" is accepted",
+    "unsupported_operation": "Only the compare operation is accepted",
+    "invalid_inputs": "inputs must be an array with one item whose role is before and one whose role is after, and path must be an absolute path string",
+    "input_not_found": "The input file does not exist (it is not a regular file): {path}",
+    "invalid_output_dir": "output_dir must be the absolute path of an existing empty folder",
+    "llm_not_supported": "Only llm off (or no llm) is accepted",
+    "secret_not_supported": "secret_on_stdin is not accepted (a comparison needs no secret)",
+    "unknown_param": "There are {count} unknown params items (allowed items: {allowed})",
+    "invalid_param": "The value of {name} in params is not valid",
+    "settings_unreadable": "The setting of the words to mask cannot be read: {reason}",
+    "input_unreadable": "{reason}",
+    "compare_failed": "The comparison failed (failed pairs: {count}. codes: {codes})",
+    "write_failed": "Could not write the result file: {path} ({reason})",
+    "cancelled": "Standard input was closed, so the comparison was stopped",
+    "internal_error": "Stopped by an unexpected error: {error_type}",
 }
 
 # --- Error texts of the commands (after "Error: ". REQ-258) ---
@@ -4144,6 +4202,11 @@ def cli_render_applied(before: bool, rule_id: str, count: int) -> str:
 def cli_render_show_fallback(reason: str) -> str:
     """When the show comparison fell back to the raw comparison."""
     return f"Fell back to the raw comparison: {reason}"
+
+
+def cli_render_show_unexplained(count: int) -> str:
+    """When lines that only the raw comparison shows also changed (ADR-0200)."""
+    return f"Lines outside the table also changed ({count} lines)"
 
 
 def cli_render_split_head(label: str, name: str, prompt: str, source: str) -> str:

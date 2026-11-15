@@ -13,7 +13,23 @@
   (`key chain` なら `key chain KC1` の下の行。孫の行でもよい)
 - 例(example)に値は書かない。伏せる位置には `<値>` を置く
 
-形が「鍵らしい」ことを根拠に伏せる処理は置かない(ADR-0019 決定1)。値の形ではなく、行頭からの形で決める。
+値の形による入口は ADR-0199 決定3 の3接頭辞だけ。XML タグには決定4 の value も使う。
+ただし ADR-0208(REQ-291)の `/etc/shadow` の欄2の方式の印(`$6$` など)だけは、値の形の入口(3接頭辞)に足さず、
+行の頭の形(GH-15)の中で見る。値の形の入口は語の頭だけを見るため、欄2が行の途中にある shadow の行には使えないため。
+
+ADR-0208 の4つの形(shadow・Authorization・.env・mysql の -p と --password=)の行の頭の形(GH-15〜19)は、ゲートに当たらない
+ことを `_NO_GATE` で確かめてから当て、表の行(MSK-167〜172)は「行に秘密語が無い」ことを `_NO_SECRET` で確かめてから当てる。
+今「送らない」の行(`PASSWORD=…`・値に秘密語を含む行)は送らないままにするため(送らない行を送る側にしない。ADR-0208 の
+決定3 の「名前がこれらの語だけのときも伏せる」とは結果が違う)。
+割れた秘密の行のかたまりの判定(masking.wrapped_secret_groups)は変えない。足した頭の形もそこでは秘密の行として扱われ、
+続く行が新しい設定の行に見えない出力(shadow・.env・ヘッダーの並び)では、かたまりごと送らないことがある。
+ADR-0210 決定10(REQ-295)で、AOS-CX の秘密の語4つ(secret-key など)と OSPFv3 の IPsec の鍵の頭の形(GH-20・21)を足した。
+これらの行は表に mask の行を持たず、送らない側に落ちる。語の一覧を埋め込んだ条件は4語を含む行に当たらなくなる(守りを強める向き)。
+ADR-0211 決定6(REQ-296)で、IOS-XR の伏せる穴3つ(`snmp-server vrf` の塊の `host …`・VRRP の `text-authentication`・
+`community-map`)の頭の形(GH-22〜24)を足した。これらの行も表に mask の行を持たず、送らない側に落ちる。
+ADR-0214 決定6(REQ-307)で、ASA の伏せる穴2つ(行の中に鍵を書く `aaa-server … host <アドレス> <鍵>`・
+`secondary-pre-fill-username … use-common-password <値>`)の頭の形(GH-25・26)を足した。これらの行も表に mask の行を持たず、
+送らない側に落ちる。
 """
 
 import hashlib
@@ -26,6 +42,39 @@ from typing import Literal
 from driftpilot import i18n
 
 MaskKind = Literal["mask", "pass"]
+
+# 秘密の一覧のコマンド。打ったコマンド(`|` の前)か組のキーが、語の数が同じで語ごとに一覧の語の頭の部分なら当たり、
+# 行の比較の本文・全文を除外する(ADR-0199 決定5、ADR-0202 決定3。`sh snmp comm` のような略した形も当たる)。
+SECRET_SHOW_COMMANDS: tuple[str, ...] = ("show crypto isakmp key", "show snmp community")
+# 秘密の一覧の照らし方の名前。照らし方を変えたことが指紋に出るよう、指紋の元に入れる(ADR-0202 決定3)
+SECRET_SHOW_MATCH = "word-prefix"
+
+
+def _matches_secret_words(command: str) -> str | None:
+    words = " ".join(command.split()).lower().partition("|")[0].split()
+    for secret in SECRET_SHOW_COMMANDS:
+        secret_words = secret.split()
+        if len(words) == len(secret_words) and all(
+            word and secret_word.startswith(word) for word, secret_word in zip(words, secret_words, strict=True)
+        ):
+            return secret
+    return None
+
+
+def secret_show_command(command: str | None) -> str | None:
+    """秘密の一覧のコマンドに当たれば一覧の文、当たらなければ None(ADR-0202 決定3)。
+
+    `|` の前を空白を詰めて小文字にし、一覧の文と語の数が同じで、語ごとに打った語が一覧の語の頭の部分(1 文字以上)なら当たり。
+    組のキー(`command_key`)にも同じ判定をし、どちらかで当たれば当たり(送らない側に倒す)。
+    """
+    if not command or not command.strip():
+        return None
+    found = _matches_secret_words(command)
+    if found is not None:
+        return found
+    from driftpilot.segmentation.pairing import command_key  # import の輪を作らないよう、使うときに読む
+
+    return _matches_secret_words(command_key(command))
 
 # 秘密語の初期値(ADR-0019 決定4)。encrypted-password と api-key は REQ-16 の Q3 で追加した(Junos / FortiGate)。
 # snmp は REQ-20 で追加した。富士通 SR-S の `snmp manager <n> <ip> <コミュニティ> …` は community という語を使わず、
@@ -125,7 +174,29 @@ SECRET_WORDS: tuple[str, ...] = (
     "auth-password",
     "priv-password",
     "service-passphrase",
+    # ADR-0199 決定1 (REQ-279)。平文の秘密語と、未対応の鍵の行。
+    "auth-pwd",
+    "priv-pwd",
+    "login-passwd",
+    "md5-key",
+    "sso-psk",
+    "otp-secret",
+    "sae-password",
+    "server-key",
+    "master-key",
+    "preshared-key-encrypted",
+    "customization-key",
+    "monitoring-key",
+    # ADR-0210 決定10 (REQ-295)。AOS-CX の秘密の語
+    "secret-key",
+    "clearpass-password",
+    "ciphertext",
+    "plaintext",
 )
+
+# ADR-0199 決定3・4。値の接頭辞の例外はこの3つだけ。value は XML タグだけで見る。
+SECRET_VALUE_PREFIXES = ("$M$", "$9$", "%^%#")
+XML_SECRET_NAMES = frozenset({"value"})
 
 
 @dataclass(frozen=True)
@@ -177,6 +248,55 @@ _ALGO = (
     rf"(?!\S*(?<![A-Za-z0-9_-])(?i:{_SECRET_PIECES})(?![A-Za-z0-9_-]))"
     r"(?!(?i:md5|sha256|sha512)(?: |$))\S+"
 )
+
+# ADR-0208(REQ-291)の足した形(GH-15〜19・MSK-167〜172)の頭に付ける「行に秘密語が無い」条件。
+# 判定は秘密語のゲートと同じく、行を英数字・`_`・`-` のかたまりに分けて大文字・小文字を区別せずに見る(`_ALGO` と同じ方法)。
+# ゲートより厳しいか同じ: 秘密語の全語(md5・sha256・sha512 も)、行のどこかの3接頭辞(`$M$`・`$9$`・`%^%#`)、
+# XML の `<value`・`</value`(ゲートは行の頭か閉じるタグが要るが、ここでは行のどこにあっても外す)を外す。
+# 表の行は、今ゲートに当たる行には当たらない(今のまま表を引くか送らない)。`<>` の中の秘密語など、ゲートに当たらず今は送っている
+# 行にも当たらない(頭の形 GH-15〜19 には当たるので、送らない側に倒れる)。語の一覧は読み込み時の SECRET_WORDS で、
+# 設定で足した利用者の語は含まない(`_ALGO` と同じ限界)
+_ALL_SECRET_PIECES = "|".join(re.escape(w) for w in sorted(set(SECRET_WORDS), key=lambda w: (-len(w), w)))
+_NO_SECRET = (
+    rf"(?!.*(?<![A-Za-z0-9_-])(?i:{_ALL_SECRET_PIECES})(?![A-Za-z0-9_-]))"
+    + "(?!.*(?:" + "|".join(re.escape(prefix) for prefix in SECRET_VALUE_PREFIXES) + "))"
+    + r"(?!.*</?value)"
+)
+# ADR-0208 決定3 の `.env` の名前: 頭の `export `、名前の最後の `_` で区切った部分(または名前全体)が秘密を示す語
+_ENV_NAME = (
+    r"(?:export )?(?=[A-Za-z_])(?:[A-Za-z0-9_]*_)?(?i:key|token|password|passwd|pass|pwd|secret|credentials?)"
+)
+# ADR-0208 決定4: パスワードを引数に取るコマンド(パスを除いた名前)と、`-p<値>`・`--password=<値>` の語
+_DB_COMMAND = r"(?:\S*/)?(?:mysql|mysqldump|mysqladmin|mariadb)"
+_NOT_PW_ARG = r"(?!-p\S|--passw(?:or)?d=)\S+"
+_NOT_LONG_PW_ARG = r"(?!--passw(?:or)?d=)\S+"
+# `-p`・`--password=` の直後の値(MSK-171・172)。値は 1 つの引用符のかたまり(中に同じ引用符・バックスラッシュが無い)か、
+# 引用符・バックスラッシュを含まない 1 語だけ。表は語を空白で区切って見るため、空白を含む引用符の値は引用符の対で伏せる。
+# バックスラッシュのエスケープ(`"A\" B"`・`A\ B`)や引用符が語の途中に出る形、引用符の後ろに文字が続く形は、
+# 値の終わりを安全に決められないので当てず、行ごと送らない(後半の断片を残さない)
+# コマンド置換・変数の展開(`$(…)`・`${…}`・`$VAR`・バッククォート・括弧)を含む値も同じく当てない。置換式の中に空白や引用符があると
+# 値の終わりを決められず、式の後半を通常の引数として残すため(二重引用符の中の `$`・バッククォートも当てない。単一引用符の中は文字どおり)
+_ARG_VALUE = r"""(?:"(?P<secret>[^"\\$`]+)"|'(?P<secret2>[^'\\]+)'|(?P<secret3>[^"'\s\\$`()]+))"""
+# ADR-0208 決定1 の shadow の欄2(ハッシュ。ロックの `!` が前に付いてもよい)の方式の印
+_SHADOW_HASH_HEAD = r"!?\$(?:1|2a|2b|2y|5|6|7|y|gy)\$"
+
+
+# 行の頭の形(GH-15〜19)に付ける条件: 秘密語のゲート(masking.py)が当たる行を外す。表の行の _NO_SECRET より緩い。
+# ゲートが見る形だけを見る(語に `<`・`>` が無い語の中の秘密語、語の頭の3接頭辞、`</秘密語>` と `</value>` の閉じるタグ)。
+# `<key>` のように `<>` の中だけに秘密語がある行や、語の途中の `$9$` は、ゲートに当たらず今は送っているが、
+# 頭の形には当たり(表の行は _NO_SECRET で当たらないため)送らない側に倒れる。ゲートに当たる行は頭の形に当たらず、
+# 今までの判定と記録の形のまま。語の一覧は読み込み時の SECRET_WORDS(設定で足した利用者の語は含まない)
+_NO_GATE = (
+    rf"(?!.*(?<!\S)[^\s<>]*?(?<![A-Za-z0-9_-])(?i:{_ALL_SECRET_PIECES})(?![A-Za-z0-9_-])[^\s<>]*(?!\S))"
+    + '(?!.*(?<!\\S)"?(?:' + "|".join(re.escape(prefix) for prefix in SECRET_VALUE_PREFIXES) + "))"
+    + "(?!.*</(?:" + "|".join(re.escape(w) for w in sorted({*SECRET_WORDS, "value"})) + ")>)"
+)
+
+
+def _guarded(head: str) -> str:
+    """行の頭の形 head に、ゲートに当たらない条件を付ける。条件は行全体を見て重いため、頭に当たらない行は先に外す。"""
+    return rf"(?={head}){_NO_GATE}{head}"
+
 
 MASK_PATTERNS: tuple[MaskPattern, ...] = (
     # --- 利用者・特権(Cisco / Arista / NX-OS) ---
@@ -565,7 +685,7 @@ MASK_PATTERNS: tuple[MaskPattern, ...] = (
         note="FortiGate は暗号化した値の前に ENC を置く。項目名によらず ENC の次を伏せる",
     ),
     MaskPattern(
-        "MSK-74", "*", rf"set (?:password|passwd|psksecret|private-key|api-key) {_V}", "mask", "set psksecret <値>", "FortiGate",
+        "MSK-74", "*", rf"set (?:password|passwd|psksecret|private-key|api-key|auth-pwd|priv-pwd|login-passwd|md5-key|sso-psk|otp-secret|sae-password) {_V}", "mask", "set psksecret <値>", "FortiGate",
         note="平文(ENC なし)の値",
     ),
     MaskPattern("MSK-75", "*", r"set type password", "pass", "set type password", "FortiGate", note="利用者の認証の種類"),
@@ -846,12 +966,54 @@ MASK_PATTERNS: tuple[MaskPattern, ...] = (
         "usbmem authentication password-file pw.txt plain <値>", "NEC UNIVERGE IX",
         note="設計側の承認で追加。plain の値だけを伏せ、未知の前後の語や plain 以外は送らない",
     ),
+    # ADR-0199 決定1・2 (REQ-279)
+    MaskPattern(
+        "MSK-165", "aaa server radius dynamic-author", rf"server-key (?:[07] )?{_V}", "mask",
+        "server-key 7 <値>", "Cisco IOS-XR",
+    ),
+    MaskPattern(
+        "MSK-166", "*", rf"(?:ospf |isis |rip |vrrp vrid \d+ )?authentication-mode simple (?:plain|cipher) {_V}", "mask",
+        "ospf authentication-mode simple plain <値>", "Huawei VRP",
+    ),
+    # ADR-0208(REQ-291)。Linux の出力の秘密の形。どの行も頭に _NO_SECRET を付ける(秘密語を含む行は今のまま送らない)
+    MaskPattern(
+        "MSK-167", "*", rf"{_NO_SECRET}[^\s:]+:(?P<secret>{_SHADOW_HASH_HEAD}[^\s:]*):\d*:\S*", "mask",
+        "root:$6$<値>:19000:0:99999:7:::", "Linux (/etc/shadow)",
+        note="欄2(ハッシュ。`!` が前に付いたロックの形も)の全体を伏せる。`!`・`*`・`x`・空の欄は当てない",
+    ),
+    MaskPattern(
+        "MSK-168", "*", rf"{_NO_SECRET}(?i:(?:proxy-)?authorization): (?:\S+ (?P<secret>.+)|(?P<secret2>\S+))", "mask",
+        "Authorization: Bearer <値>", "Linux (HTTP header)",
+        note="値が2語以上なら1語目(方式の語)を残して残りを伏せる。1語だけならその語を伏せる",
+    ),
+    MaskPattern(
+        "MSK-169", "*",
+        rf"""{_NO_SECRET}{_ENV_NAME} ?= ?(?:"(?P<secret>[^"]+)"|'(?P<secret2>[^']+)'|(?P<secret3>[^"'\s].*))""", "mask",
+        "API_KEY=<値>", "Linux (.env)",
+        note="名前の最後の部分が KEY・TOKEN・PASSWORD などの行。引用符の中、無ければ行の残り全部を伏せる。引用符の後ろに語が続く行は送らない",
+    ),
+    MaskPattern(
+        "MSK-170", "*", rf"""{_NO_SECRET}{_ENV_NAME} ?= ?(?:""|'')""", "pass",
+        'API_KEY=""', "Linux (.env)", note="値が空の行",
+    ),
+    MaskPattern(
+        "MSK-171", "*", rf"{_NO_SECRET}{_DB_COMMAND}(?: {_NOT_PW_ARG})* -p{_ARG_VALUE}(?: {_NOT_PW_ARG})*", "mask",
+        "mysql -uadmin -p<値> -h 192.0.2.10", "Linux (mysql)",
+        note="`-p` に続けて空白なしで書いた値(引用符で囲んだ空白入りの値は引用符の中全部)を伏せる。`-p` の後に空白がある・値が無いものは当てない。パスワードの引数が2つある行、エスケープ・途中の引用符・コマンド置換のある値は送らない",
+    ),
+    MaskPattern(
+        "MSK-172", "*",
+        rf"{_NO_SECRET}(?!{_DB_COMMAND} (?:.* )?-p\S)(?:{_NOT_LONG_PW_ARG} )*--passw(?:or)?d="
+        rf"{_ARG_VALUE}(?: {_NOT_LONG_PW_ARG})*",
+        "mask", "mysqladmin --user=admin --password=<値> status", "Linux (--password=)",
+        note="どのコマンドの行でも、`--password=`・`--passwd=` の値(引用符で囲んだ値は引用符の中全部)を伏せる。`mysql -p<値>` を含む行、引数が2つある行、エスケープ・途中の引用符・コマンド置換のある値は送らない",
+    ),
 )
 
 # --- 利用者に見える説明の英語の版(REQ-259 / ADR-0190 決定3) ---
 # 送る前の確かめ・`driftpilot mask-patterns` の出力に出る備考・出どころ・例を、言語に合わせて出す。
 # 伏せる・送らないの判定(match・scope・kind・秘密語・送らない形・指紋の計算)には使わない。MaskPattern の値は日本語のまま変えない
-# (例は表の自己照合とテストの入力に使う)。備考のある 73 件すべてに英語がある(ID → 英語。テストが鍵を照らす)
+# (例は表の自己照合とテストの入力に使う)。備考のある 79 件すべてに英語がある(ID → 英語。テストが鍵を照らす)
 MASK_NOTES_EN: dict[str, str] = {
     "MSK-03": "A public key is not a secret, but the value has no meaning and uses up tokens, so it is masked (ADR-0018 decision 2b). The trailing comment is sent",
     "MSK-04": "Password expiry settings",
@@ -926,6 +1088,12 @@ MASK_NOTES_EN: dict[str, str] = {
     "MSK-162": "Specification of the SSL and SSH ciphers (not a secret)",
     "MSK-163": "Cipher specification of the SSL profile (not a secret)",
     "MSK-164": "Approved addition by the designer. Only the plain value is masked; unknown preceding or following words and forms other than plain are not sent",
+    "MSK-167": "Field 2 (the hash, including the locked form with a leading `!`) is masked as a whole. Fields `!`, `*`, `x` and empty are not matched",
+    "MSK-168": "If the value has two or more words, the first word (the scheme) is kept and the rest is masked. If it is one word, that word is masked",
+    "MSK-169": "A line whose name ends with KEY, TOKEN, PASSWORD and so on. Inside the quotes, or the whole rest of the line when there are none, is masked. A line with words after the quotes is not sent",
+    "MSK-170": "Empty value",
+    "MSK-171": "The value written right after `-p` (no space; everything inside the quotes for a quoted value with spaces) is masked. Not applied when there is a space after `-p` or no value. A line with two password arguments, or with an escape, a stray quote or a command substitution in the value, is not sent",
+    "MSK-172": "In any command line, the value of `--password=` and `--passwd=` (everything inside the quotes for a quoted value) is masked. A line with `mysql -p<value>`, with two password arguments, or with an escape, a stray quote or a command substitution in the value is not sent",
 }
 # 出どころの英語の版(日本語の出どころだけ。ほかはもともと英語)
 _SOURCES_EN: dict[str, str] = {
@@ -988,6 +1156,10 @@ UNSENT_FORMS: tuple[tuple[str, str], ...] = (
     ("UNS-14", r"profile id \d+ apn .+"),
     ("UNS-15", r"set name .+"),
     ("UNS-16", r"bgp neighbor \d+ authentication .+"),
+    ("UNS-17", r"set name .+"),  # ADR-0199 決定2 (FortiSwitch)
+    ("UNS-18", r"set name .+"),
+    ("UNS-19", r"data .+"),  # ADR-0199 決定4 (F5)
+    ("UNS-20", r"\u9375\s*[:\uff1a]\s*.+"),  # ADR-0199 決定5 (ヤマハ)
 )
 # 形の一覧の場所の条件(書き方は表の scope と同じ)。ここに無い形はどこでも当てる
 UNSENT_FORM_SCOPES: dict[str, str] = {
@@ -995,6 +1167,9 @@ UNSENT_FORM_SCOPES: dict[str, str] = {
     "UNS-07": "scansafe",
     "UNS-12": "hsrp",
     "UNS-15": "config system snmp community",
+    "UNS-17": "config switch-controller snmp-community",
+    "UNS-18": "config snmp-community",
+    "UNS-19": "ltm data-group internal",
 }
 # 形の一覧の頭(REQ-198)。割れた秘密の行のかたまりの判定にだけ使い、値が次の行にある「頭だけの行」を見つける。
 # 形の一覧の全部の ID に1つずつ置く。UNS-09 は行が URL の途中(`<英字>://` の後ろに `/` が無い)で終わる形
@@ -1015,11 +1190,15 @@ UNSENT_FORM_HEADS: tuple[tuple[str, str], ...] = (
     ("UNS-14", r"profile id \d+(?: apn)?"),
     ("UNS-15", r"set name"),
     ("UNS-16", r"bgp neighbor \d+ authentication"),
+    ("UNS-17", r"set name"),
+    ("UNS-18", r"set name"),
+    ("UNS-19", r"data"),
+    ("UNS-20", r"\u9375\s*[:\uff1a]"),
 )
 
 # 行の頭の形の入口(ADR-0198 決定2。REQ-277)。秘密語が無くても、行(字下げを除き、語を1つの空白で区切ったもの)の頭から
 # match するなら、秘密語に当たったときと同じく表を引く(mask なら伏せて送り、pass なら送り、どれにも当たらなければ送らない)。
-# 形の一覧(UNSENT_FORMS)は「当たれば送らない」までで、表を引く入口はここだけ。値の形は見ない(ADR-0019 決定1)。
+# 形の一覧(UNSENT_FORMS)は「当たれば送らない」までで、表を引く入口はここだけ。値の形は ADR-0199 決定3 の3接頭辞だけを例外として見る。
 # GH-01 は version 3 の行(利用者名だけで秘密が無い。MSK-17 の pass)を外す。外すのは本当の v3 の構文
 # (`<アドレス> [vrf <名>] [traps|informs] version 3 auth|noauth|priv `)だけ。行のどこかに `version 3` があるだけでは外さない
 # (`traps "<値> version 3" version 2c` のように、コミュニティ名の中に現れうるため)。先読みを `\S+` より前に置くのは、
@@ -1042,10 +1221,37 @@ GATE_HEADS: tuple[tuple[str, str], ...] = (
     ("GH-11", r"mobile pin-auth enable "),  # H-15(NEC)
     ("GH-12", r"ike preshared-key add "),  # H-43(Si-R。書式が未確認なので表の行は足さず、送らない側に落とす)
     ("GH-13", r"usbmem authentication "),  # H-11。設計側の承認による ADR-0198 範囲外の追加
+    ("GH-14", r"(?:ospf |isis |rip |vrrp vrid \d+ )?authentication-mode simple "),  # ADR-0199 決定2
+    # GH-15〜19 は REQ-291(ADR-0208)。Linux の出力の秘密の形。頭に「ゲートに当たらない」条件(_NO_GATE)を付ける(今送らない行は送らないまま)。
+    # 条件は行全体を見て重いため、先に頭の形だけを軽く確かめる(_guarded)。shadow の方式の印は行の途中の欄2にあるため、
+    # 値の形の入口(3接頭辞)ではなくここで見る
+    ("GH-15", _guarded(rf"[^\s:]+:{_SHADOW_HASH_HEAD}")),  # /etc/shadow
+    ("GH-16", _guarded(r"(?i:(?:proxy-)?authorization): \S")),  # Authorization ヘッダー
+    ("GH-17", _guarded(rf"{_ENV_NAME} ?= ?\S")),  # .env
+    ("GH-18", _guarded(rf"{_DB_COMMAND} (?:.* )?-p\S")),  # mysql 系の -p<値>
+    ("GH-19", _guarded(r"(?:.* )?--passw(?:or)?d=\S")),  # --password=<値>
+    # ADR-0210 決定10 (REQ-295)。OSPFv3 の IPsec の鍵（AOS-CX・IOS・IOS-XE）。表の行は足さず、送らない側に落とす
+    ("GH-20", r"(?:ipv6 ospf|ospfv3|ipv6 ospfv3) (?:\d+ )?(?:authentication|encryption) ipsec "),
+    ("GH-21", r"area \S+ (?:virtual-link \S+ )?(?:authentication|encryption) ipsec "),
+    # ADR-0211 決定6 (REQ-296)。IOS-XR の伏せる穴 3 つ。表の行は足さず、送らない側に落とす。
+    # GH-22 は `snmp-server vrf <名前>` の塊の中の `host <アドレス> ` の後に clear・encrypted・traps・informs・version が続く行
+    # (コミュニティ名が入る)。GH-01 と同じく、本当の v3 の構文(`<アドレス> [clear|encrypted] [traps|informs] version 3 auth|noauth|priv `)
+    # は外す。割れた行のかたまりの判定は場所の条件を見ないので、後ろの語で絞り、ASA・IOS の `object network` の
+    # `host <アドレス>` の行に当たらないようにする
+    ("GH-22", r"host (?!\S+(?: (?:clear|encrypted))?(?: (?:traps|informs))? version 3 (?:auth|noauth|priv) )\S+ "
+              r"(?:clear|encrypted|traps|informs|version) "),
+    ("GH-23", r"(?:vrrp \d+ )?text-authentication "),  # VRRP の text-authentication(XR の新旧の形)
+    ("GH-24", r"(?:snmp-server|snmp mib) community-map "),  # XR の community-map・IOS の snmp mib community-map
+    # ADR-0214 決定6 (REQ-307)。ASA の伏せる穴 2 つ。表の行は足さず、送らない側に落とす。
+    # GH-25 は `aaa-server <名前> [(<nameif>)] host <アドレス> <語>` の、語が timeout でない行(行の中に鍵を書く形)。
+    # GH-26 は `secondary-pre-fill-username clientless|ssl-client [hide] use-common-password `(値が続く)
+    ("GH-25", r"aaa-server \S+ (?:\(\S+\) )?host \S+ (?!timeout )\S"),
+    ("GH-26", r"secondary-pre-fill-username (?:clientless|ssl-client) (?:hide )?use-common-password "),
 )
 # 行の頭の形の場所の条件(書き方は UNSENT_FORM_SCOPES と同じ)。ここに無い形はどこでも当てる
 GATE_HEAD_SCOPES: dict[str, str] = {
     "GH-05": "vrrp",
+    "GH-22": "snmp-server vrf",
 }
 
 _FORM_ID = re.compile(r"UNS-\d{2,}")
@@ -1167,6 +1373,8 @@ def masking_fingerprint(patterns: tuple[MaskPattern, ...] | None = None) -> Mask
     heads = [[form_id, regex] for form_id, regex in UNSENT_FORM_HEADS]
     gate_heads = [[head_id, regex, GATE_HEAD_SCOPES.get(head_id, "*")] for head_id, regex in GATE_HEADS]
     document: dict[str, object] = {"patterns": items, "unsent_forms": forms, "unsent_form_heads": heads}
+    document["secret_show_commands"] = list(SECRET_SHOW_COMMANDS)
+    document["secret_show_match"] = SECRET_SHOW_MATCH  # 秘密の一覧の照らし方(ADR-0202 決定3)
     document["gate_heads"] = gate_heads  # 行の頭の形は判定を変えるため含める(ADR-0198 決定2。REQ-277)
     text = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
     return MaskingFingerprint(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], len(table))

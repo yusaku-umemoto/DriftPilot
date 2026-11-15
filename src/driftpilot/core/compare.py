@@ -68,6 +68,8 @@ from driftpilot.diff_engine import (
     compare_show,
 )
 from driftpilot.diff_engine.exposure_check import ExposureNotice, ExposureSide, check_default_exposure
+from driftpilot.diff_engine.show import _TEXTS_EN as _SHOW_TEXTS_EN
+from driftpilot.diff_engine.show import _TEXTS_JA as _SHOW_TEXTS_JA
 from driftpilot.diff_engine.normalization import (
     NormalizationRule,
     apply_rules_traced,
@@ -77,6 +79,7 @@ from driftpilot.diff_engine.normalization import (
 )
 from driftpilot.format_detect import AmbiguousFormatError, detect_format, sniff
 from driftpilot.llm_analyzer import DISABLED, LlmAnalysis, LlmRequest, analyze
+from driftpilot.llm_analyzer.mask_patterns import secret_show_command
 from driftpilot.llm_analyzer.payload import LlmInputs
 from driftpilot.raw_keys import RawOptionsError
 from driftpilot.segmentation import (
@@ -85,10 +88,15 @@ from driftpilot.segmentation import (
     SelectionError,
     SplitResult,
     classify_exposure,
+    command_key,
     diagnose_input,
     select,
     split_log,
 )
+
+# show を単純比較で出した理由が「表に出ない行が変わった」のときの、日本語・英語の文(ADR-0200。REQ-282)。
+# 理由の文は比べたときの言語で入るので、画面は保存した結果を別の言語で開いても見分けられるよう、両方の文で照らす
+SHOW_OUTSIDE_TABLE_REASONS = (_SHOW_TEXTS_JA["outside_table"], _SHOW_TEXTS_EN["outside_table"])
 
 # 進捗の工程名。工程の入口で通知する(中断の確認も同じ位置)
 STAGES = ("split", "select", "detect_kind", "compare", "safety_checks", "llm", "done")
@@ -133,20 +141,9 @@ def run_compare(
             on_progress(stage)
 
     mode = request.mode
-    # kind=config の --platform は既定でないパーサーの系統を選ぶ。意味を持つのは平坦 config の名前だけで、
-    # それ以外(cisco_ios・ntc の名前)は今までどおり「--show-command と両方指定」を求める(REQ-21 §10)
-    flat_name = request.platform in CONFIG_PLATFORM_NAMES
     auto = request.platform == AUTO_PLATFORM
-    if auto:
-        pass  # 機種の自動は show のコマンドとの対を求めない(ADR-0151 決定4)
-    elif request.kind == "config" and flat_name:
-        if (unsupported := _unsupported_platform(mode, request.platform, "request")) is not None:
-            return unsupported
-    elif bool(request.platform) != bool(request.show_command):
-        message = _T["platform_show_command"]
-        if flat_name:
-            message += _T["platform_use_kind_config"].format(platform=request.platform)
-        return _error(mode, "platform_show_command", "request", message)
+    if (problem := request_problem(request)) is not None:
+        return CompareOutcome(status="error", mode=mode, error=problem)
 
     inputs = {"before": request.before, "after": request.after}
     selections: dict[SideName, SideSelection] = {"before": request.before_selection, "after": request.after_selection}
@@ -243,7 +240,7 @@ def run_compare(
                 options=request.raw_options,
             )
             # テンプレートがなければ raw の結果を出す。構造化できたときは --mode both のときだけ raw も付ける
-            raw = show.raw if show.method == "raw" else None
+            raw = show.raw if show.method in ("raw", "both") else None
         if run_raw and raw is None:
             raw = compare_raw(
                 before,
@@ -319,6 +316,7 @@ def run_compare(
         llm,
         request=request,
         kind=kind,
+        show_command=_llm_show_command(request, kind, segmentation),
         error=error,
         auto_platform=auto_platform,
         rules=rules,
@@ -361,6 +359,7 @@ def _llm_step(
     structured: CompareResult | None,
     raw: RawCompareResult | None,
     show: ShowCompareResult | None,
+    show_command: str | None = None,
 ) -> LlmAnalysis:
     """比較の最後の工程(llm)。送らない場合の判断と _llm_analysis の呼び出し。run_compare と analyze_compared が共有する。"""
     if llm is not None and kind == "config" and request.platform == "fujitsu_sir" and looks_not_sir(before, after):
@@ -373,7 +372,7 @@ def _llm_step(
     if error is not None and llm is not None and llm.skip_failed and llm.client is not None:
         # 失敗した比較の結果は送らない(一括比較の送る段。送る内容は作り、理由を残す)
         llm = dataclasses.replace(llm, client=None, unavailable="compare_failed")
-    return _llm_analysis(llm, rules, before, after, structured, raw, show)
+    return _llm_analysis(llm, rules, before, after, structured, raw, show, show_command)
 
 
 def analyze_compared(request: CompareRequest, outcome: CompareOutcome, llm: LlmRequest | None) -> CompareOutcome:
@@ -394,6 +393,7 @@ def analyze_compared(request: CompareRequest, outcome: CompareOutcome, llm: LlmR
         llm,
         request=request,
         kind=outcome.kind,
+        show_command=_llm_show_command(request, outcome.kind, segmentation),
         error=outcome.error,
         auto_platform=outcome.auto_platform,
         rules=effective_rules(request),
@@ -466,6 +466,7 @@ def _llm_analysis(
     structured: CompareResult | None,
     raw: RawCompareResult | None,
     show: ShowCompareResult | None,
+    show_command: str | None = None,
 ) -> LlmAnalysis:
     """差分を読むだけで書き換えない。行単位の差分の行番号に合わせて、比較と同じ正規化をした行を渡す。
 
@@ -483,6 +484,7 @@ def _llm_analysis(
         after_lines=inputs.after_lines,
         before_source=inputs.before_source,
         after_source=inputs.after_source,
+        show_command=show_command,
     )
 
 
@@ -515,7 +517,28 @@ def llm_inputs(request: CompareRequest, outcome: CompareOutcome) -> LlmInputs | 
     before, after = selected["before"], selected["after"]
     if before is None or after is None:
         return None
-    return _analysis_inputs(effective_rules(request), before.text, after.text, outcome.raw, outcome.show)
+    return dataclasses.replace(
+        _analysis_inputs(effective_rules(request), before.text, after.text, outcome.raw, outcome.show),
+        show_command=_llm_show_command(request, outcome.kind, segmentation),
+    )
+
+
+def _llm_show_command(
+    request: CompareRequest, kind: str | None, segmentation: dict[SideName, SideSegmentation]
+) -> str | None:
+    """明示指定と選択済みの両側を補完し、秘密の一覧のコマンドがあれば優先する。"""
+    if kind != "show":
+        return None
+    commands = [request.show_command] if request.show_command else []
+    for side in SIDES:
+        selected = segmentation[side].selected
+        if selected is not None and selected.command:
+            commands.append(selected.command)
+    # 明示指定や変更前の通常コマンドで、変更後の秘密の区間を送る側へ戻さない。略した形も当たる(ADR-0202 決定3)。
+    secret = next((found for found in map(secret_show_command, commands) if found is not None), None)
+    if secret is not None:
+        return secret
+    return command_key(commands[0]) if commands else None
 
 
 def _resolve_kind(request: CompareRequest, before: str, after: str):
@@ -629,6 +652,28 @@ def _with_hints(error: CompareError, hints: list[SafetyWarning]) -> CompareError
     from driftpilot.messages import warning_message
 
     return dataclasses.replace(error, message=error.message + "".join(f" {warning_message(w)}" for w in hints))
+
+
+def request_problem(request: CompareRequest) -> CompareError | None:
+    """入力を読む前の、要求の組み合わせの確かめ(run_compare の最初の工程 request)。誤りがなければ None。
+
+    確かめるのは、機種の名前と show のコマンドの対と、平坦 config の未対応の機種。run_compare はこの結果を status=error で返す。
+    ほかの入口が、比べる前に同じ決まりで断るために公開している(ADR-0203)。
+    """
+    # kind=config の --platform は既定でないパーサーの系統を選ぶ。意味を持つのは平坦 config の名前だけで、
+    # それ以外(cisco_ios・ntc の名前)は今までどおり「--show-command と両方指定」を求める(REQ-21 §10)
+    flat_name = request.platform in CONFIG_PLATFORM_NAMES
+    if request.platform == AUTO_PLATFORM:
+        return None  # 機種の自動は show のコマンドとの対を求めない(ADR-0151 決定4)
+    if request.kind == "config" and flat_name:
+        unsupported = _unsupported_platform(request.mode, request.platform, "request")
+        return unsupported.error if unsupported is not None else None
+    if bool(request.platform) != bool(request.show_command):
+        message = _T["platform_show_command"]
+        if flat_name:
+            message += _T["platform_use_kind_config"].format(platform=request.platform)
+        return _error(request.mode, "platform_show_command", "request", message).error
+    return None
 
 
 def _unsupported_platform(mode, platform: str | None, stage: str, segmentation=None) -> CompareOutcome | None:

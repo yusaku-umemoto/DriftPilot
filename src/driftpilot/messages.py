@@ -225,6 +225,14 @@ def warning_message(w: SafetyWarning) -> str:
             f"{_SIDE_LABEL[w.side or 'before']}の {scope} の下で、{lines} 行目が重複しています"
             "(同じ行、または同じ項目に違う値)。どちらも捨てていませんが、IR は後の行の値を使います。"
         )
+    if w.kind == "top_level_merged":
+        # 行の中身・値は含めない(detail には行番号と数しか無い)。行番号は先頭の 10 個まで(ADR-0211 決定4)
+        numbers = list(w.detail["lines"])
+        shown = "・".join(str(n) for n in numbers[:10]) + ("ほか" if len(numbers) > 10 else "")
+        return (
+            f"{_SIDE_LABEL[w.side or 'before']}の最上位で、同じ見出し・同じ行が {w.detail['count']} か所にありました"
+            f"（{shown} 行目）。機器と同じく 1 つにまとめて比べました。"
+        )
     if w.kind == "platform_mismatch":
         return _platform_mismatch_message(w)
     if w.kind == "pager_marks":
@@ -802,7 +810,9 @@ def unsent_shape_lines(shapes: "list[UnsentShape] | tuple[UnsentShape, ...]") ->
         return []
     lines = ["送らなかった行の形(値は含まない。伏せる表に足す候補):"]
     for s in shapes:
-        if s.kind == "pem_block":
+        if s.shape == "秘密の一覧のコマンド":
+            lines.append(f"  [{s.scope}] 秘密の一覧のコマンドのため、この組の本文を送っていません ({s.count})")
+        elif s.kind == "pem_block":
             lines.append(f"  {s.count:4d} ブロック({s.lines} 行)  [{s.scope}] {s.shape}")
         else:
             lines.append(f"  {s.count:4d} 行  [{s.scope}] {s.shape}")
@@ -2207,6 +2217,9 @@ COMPARE_MULTI_NOTHING_TO_SAVE = "相手のある区間が無いため、保存�
 COMPARE_MULTI_CHOOSE_PARTNER = "相手を選ぶ…"
 COMPARE_MULTI_UNPAIR = "組を外す"
 MULTI_PAIRED_BY_HAND = "手で組にした"
+# 一覧の組の行・一括比較の窓の表の状態の横に出す、show の比べ方の印(ADR-0200 決定 5。REQ-282)
+MULTI_SHOW_RAW_MARK = "単純比較"
+MULTI_SHOW_BOTH_MARK = "表＋単純比較"
 COMPARE_PARTNER_TITLE = "相手を選ぶ"
 
 
@@ -2574,6 +2587,8 @@ GUI_WEB_TEXTS.update(
         "compare.multi.choose_partner": COMPARE_MULTI_CHOOSE_PARTNER,
         "compare.multi.unpair": COMPARE_MULTI_UNPAIR,
         "compare.multi.paired_by_hand": MULTI_PAIRED_BY_HAND,
+        "compare.multi.show_raw": MULTI_SHOW_RAW_MARK,
+        "compare.multi.show_both": MULTI_SHOW_BOTH_MARK,
         "compare.paste.prompt": PASTE_PROMPT,
         "compare.dialog.ok": DIALOG_OK,
         "compare.dialog.cancel": DIALOG_CANCEL,
@@ -3801,6 +3816,14 @@ def sm_show_fell_back(reason: str) -> str:
     return f"show のテンプレートで読めないため、単純比較にしました: {reason}"
 
 
+SM_SHOW_OUTSIDE_TABLE = "表に出ない行が変わったので、単純比較で出しています"
+
+
+def sm_show_unexplained(count: int) -> str:
+    """show を表で比べたあと、表に出ない行も変わったとき、構造化のタブの上に出す案内(ADR-0200 決定 5)。"""
+    return f"表に出ない行も変わっています（{count} 行）。単純比較のタブも見てください"
+
+
 def sm_select_segment_prompt(side_labels: list[str]) -> str:
     """区間が複数ある側の名前(変更前・変更後)を並べた、区間を選ぶ案内。"""
     return f"{'・'.join(side_labels)}に区間が複数あります。比較する区間を選んで、もう一度比較してください"
@@ -3918,6 +3941,34 @@ CLI_HELP = {
     "gui.help": "比較画面を開く(要 pip install 'driftpilot[gui]')",
     "llm_check.help": "AI に決まった短い文を1回だけ送り、キーとモデルでつながるかを確かめる(ごく少額の料金がかかりうる)",
     "llm_check.yes": "送る前の確認を飛ばす(入力が端末でないときは必須)",
+    "pilot_call.help": "ほかの Pilot から呼ぶ入口(依頼は JSON のファイル、出力は標準出力の 1 行 1 つの JSON。AI は呼ばない)",
+    "pilot_call.capabilities": "できることを JSON の 1 行で標準出力に出す",
+    "pilot_call.compare": (
+        "依頼のファイルを読んで 2 つの入力を比べ、結果を output_dir のファイルに書く"
+        "(標準入力が閉じたら止める。終了コード: 差分なし 0・差分あり 1・エラー 2・選択待ち 3・止めた 130)"
+    ),
+    "pilot_call.request": "依頼の JSON のファイル(UTF-8)",
+}
+
+# --- ほかの Pilot から呼ぶ入口 pilot-call の error の文(ADR-0203。REQ-286)。`{…}` は使う側が .format で埋める。
+# 依頼や入力の中身は入れない(パス・件数・名前だけ) ---
+PILOT_CALL_MESSAGES = {
+    "invalid_request": "依頼のファイルを、UTF-8 の JSON のオブジェクトとして読めません",
+    "unsupported_schema": "依頼の schema は pilot.call-request、schema_version は \"1\" だけ受けます",
+    "unsupported_operation": "operation は compare だけ受けます",
+    "invalid_inputs": "inputs は、role が before と after のものを 1 つずつ持つ配列にし、path は絶対パスの文字列にしてください",
+    "input_not_found": "入力のファイルがありません(普通のファイルではありません): {path}",
+    "invalid_output_dir": "output_dir は、ある空のフォルダーの絶対パスにしてください",
+    "llm_not_supported": "llm は off(または無し)だけ受けます",
+    "secret_not_supported": "secret_on_stdin は受けません(比較に秘密は要りません)",
+    "unknown_param": "知らない params の項目が {count} 件あります(使える項目: {allowed})",
+    "invalid_param": "params の {name} の値が正しくありません",
+    "settings_unreadable": "伏せる語の設定を読めません: {reason}",
+    "input_unreadable": "{reason}",
+    "compare_failed": "比較できませんでした(失敗した組 {count} 件。code: {codes})",
+    "write_failed": "結果のファイルを書けませんでした: {path}({reason})",
+    "cancelled": "標準入力が閉じられたため、比較を止めました",
+    "internal_error": "予期しないエラーで止まりました: {error_type}",
 }
 
 # --- コマンドの誤りの文(「エラー: 」の後ろ。REQ-258) ---
@@ -4103,6 +4154,11 @@ def cli_render_applied(before: bool, rule_id: str, count: int) -> str:
 def cli_render_show_fallback(reason: str) -> str:
     """show の比較を raw 比較に切り替えたとき。"""
     return f"raw 比較にフォールバックしました: {reason}"
+
+
+def cli_render_show_unexplained(count: int) -> str:
+    """show を表で比べたあと、単純比較にだけ出る行も変わったとき(ADR-0200)。"""
+    return f"表に出ない行も変わった（{count} 行）"
 
 
 def cli_render_split_head(label: str, name: str, prompt: str, source: str) -> str:

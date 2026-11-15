@@ -18,11 +18,15 @@ hier_config はツリーにする前に、テキストを前処理する。木�
   (ADR-0067 決定2。ライブラリの規則は残したまま足す)
 - バナー(`banner … ^C` から終わりの区切りまで)を、改行を含む1つの子にまとめる
 - 木を組んだ後に、ブロックの最後の子が `exit` なら消す(同じ `exit` が2つ並べば、後ろの1つだけが消える)
+IOS-XR は、木にする前に閉じの語(`end-policy`・`end-set` など)の行を消し、XR と見立てた config だけ最上位の同じ見出しの
+塊を 1 つにまとめる(config_parser/iosxr.py。ADR-0211。ルート直下の重複の扱いはその後の文字列に対して今のまま)。
 A型では、この木を抽出の前に字下げの崩れを直してから使う(ADR-0121 決定2、indentation.py)。
 文章を字下げで数えた値は、木の中身の数ではない。木について数えるときは build_tree() を通す。
 """
 
 import ast
+import re
+from functools import lru_cache
 
 from hier_config import HConfig, MatchRule, Platform, get_hconfig, get_hconfig_driver
 from hier_config.models import ParentAllowsDuplicateChildRule, PerLineSubRule
@@ -53,6 +57,58 @@ _EIGRP_EXIT_RULES = tuple(
 )
 
 _DUPLICATE_PREFIX = "Found a duplicate section: "
+
+
+@lru_cache(maxsize=None)
+def _line_rules() -> tuple[PerLineSubRule, ...]:
+    """木にする前に各行へ当てる、行を消す規則(ライブラリの規則と、DriftPilot が足した規則)。"""
+    rules = get_hconfig_driver(Platform.CISCO_IOS).rules
+    return (*rules.per_line_sub, *_EIGRP_EXIT_RULES)
+
+
+def is_dropped_line(line: str) -> bool:
+    """この行が、木にする前の前処理で消える(木に残らない)か。バナーの外の行について答える。
+
+    ライブラリと同じく、先頭の空白を残して残りの空白を1つにまとめてから、規則を順に当てる。
+    字下げの無い `!`・`#` のコメントや `end`・`version …` がこれに当たる(AW+ のポートの範囲の分割が使う。REQ-289)。
+    """
+    indent = len(line) - len(line.lstrip())
+    text = " " * indent + " ".join(line.split())
+    for rule in _line_rules():
+        text = re.sub(rule.search, rule.replace, text)
+    return not text.rstrip()
+
+
+def banner_line_kinds(lines: list[str]) -> list[int]:
+    """各行がバナーの中か。0 は外、1 はバナーの最初の行(`banner …`)、2 はバナーの続き(終わりの行を含む)。
+
+    ライブラリがバナーを1つの子にまとめる規則と同じに数える。終わりの印は、`^` で始まる行・`EOF`・`%`・`!`・
+    最初の行の3語目(区切りの印)の1文字目と2文字目・その3語目を含む行で、印は次のバナーにも引き継がれる。
+    最初の行そのものでは終わらない。終わりが無ければ最後の行までバナー。
+    """
+    kinds: list[int] = []
+    end_lines = {"EOF", "%", "!"}
+    end_contains: list[str] = []
+    in_banner = False
+    for line in lines:
+        if in_banner:
+            kinds.append(2)
+            if line.startswith("^") or line in end_lines or any(marker in line for marker in end_contains):
+                in_banner = False
+            continue
+        if line.startswith("banner ") and line != "banner motd ##":
+            in_banner = True
+            kinds.append(1)
+            words = line.split()
+            if len(words) > 2:
+                end_contains.append(words[2])
+                if words[2].startswith('"'):
+                    end_contains.append('"')
+                end_lines.add(words[2][:1])
+                end_lines.add(words[2][:2])
+            continue
+        kinds.append(0)
+    return kinds
 
 
 def build_tree(text: str) -> HConfig:

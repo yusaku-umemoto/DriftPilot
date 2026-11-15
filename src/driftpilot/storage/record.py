@@ -57,6 +57,9 @@ RESULT_RAW_OPTIONS_KEY = "options"
 # REQ-242 で足した result の項目(ADR-0179 決定2)。AI の答えがあり、やり取りのどれかに値があるときだけ書く
 # (答えが無い保存・やり取りの無い保存は今と1文字も変えない)。版を据え置いたため、無い保存も読む(None)
 CONVERSATION_KEY = "conversation"
+# REQ-281 で足した result.show の項目(ADR-0200)。表で比べたときも単純比較を流し、説明できなかった行の数を持つ。
+# 版を据え置いたため、これが無い保存(REQ-281 より前)も 0 として読む(show の組は method が structured か raw のまま)
+SHOW_UNEXPLAINED_KEY = "unexplained_lines"
 DEFAULT_LABEL = "compare"
 _UNSAFE_LABEL = re.compile(r"[^A-Za-z0-9._-]")
 _MISSING = object()
@@ -487,6 +490,7 @@ def from_record(record: Any) -> StoredRecord:
     if isinstance(result, dict):
         result = _fill_pager_marks(result)
         result = _fill_raw_options(result)
+        result = _fill_show_unexplained(result)
         # REQ-242 より前の保存・答えが無い保存・やり取りの無い保存には result.conversation が無い。None として読む
         # (auto_platform と同じ扱い)。あれば形を確かめてから、(質問, 回答) の並びに直して組み立てる
         result = {**result, CONVERSATION_KEY: _read_conversation(result.get(CONVERSATION_KEY))}
@@ -594,6 +598,16 @@ def _fill_raw_options(result: dict[str, Any]) -> dict[str, Any]:
     if isinstance(show, dict) and isinstance(raw := show.get("raw"), dict):
         filled["show"] = {**show, "raw": _fill_raw_dict(raw)}
     return filled
+
+
+def _fill_show_unexplained(result: dict[str, Any]) -> dict[str, Any]:
+    """REQ-281 より前の保存には result.show.unexplained_lines が無い。0 として読む。
+    元の dict は変えずに写しを返す(_fill_pager_marks・_fill_raw_options と同じ書き方)。show が辞書でなければ何もしない。
+    """
+    show = result.get("show")
+    if isinstance(show, dict) and SHOW_UNEXPLAINED_KEY not in show:
+        return {**result, "show": {**show, SHOW_UNEXPLAINED_KEY: 0}}
+    return result
 
 
 def _fill_raw_dict(raw: dict[str, Any]) -> dict[str, Any]:

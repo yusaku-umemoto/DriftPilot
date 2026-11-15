@@ -57,6 +57,7 @@ from driftpilot.screen_model.model import (
     plain_llm,
     read_counts,
     redact_text,
+    show_method,
 )
 from driftpilot.core import DEFAULT_RAW_OPTIONS, RawOptions
 from driftpilot.report_output import Report, ReportPair
@@ -392,6 +393,16 @@ class BatchTableRow:
     job_id: str = ""
     included: bool = True
     platform_index: int | None = None
+    # show の比べ方の印(REQ-282)。並びは "raw"(単純比較)、"both"(表＋単純比較)の順で、無ければ空。
+    # 複数のコマンドの組は、どれか1つでも当てはまるコマンドがあれば付ける(混ざれば両方)。数の列は変えない(二重に数えない)
+    show_methods: tuple[str, ...] = ()
+
+
+def job_show_methods(result: JobResult) -> tuple[str, ...]:
+    """結果のある組の、show の比べ方の印の元(raw・both の順)。複数のコマンドの組は全部のコマンドの組を見る。"""
+    outcomes = [pair.outcome for pair in result.multi.pairs] if result.multi is not None else [result.outcome]
+    found = {show_method(outcome) for outcome in outcomes}
+    return tuple(method for method in ("raw", "both") if method in found)
 
 
 def platform_undetected(auto: AutoPlatform | None) -> bool:
@@ -506,6 +517,7 @@ def table_rows(
                 ai_point(result.outcome.llm),
                 result.outcome.status == "difference",
                 **extra,
+                show_methods=job_show_methods(result),
             )
         )
     return rows

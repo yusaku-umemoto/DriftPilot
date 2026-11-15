@@ -54,6 +54,7 @@ def analyze(
     after_lines: Sequence[str],
     before_source: Sequence[str] | None = None,
     after_source: Sequence[str] | None = None,
+    show_command: str | None = None,
     clock: Callable[[], str] = _now,
 ) -> LlmAnalysis:
     """差分を伏せて送り、回答を注釈として返す。
@@ -63,17 +64,17 @@ def analyze(
     """
     sources = (before_source, after_source)
     try:
-        return _analyze(request, structured, raw, show, before_lines, after_lines, sources, clock)
+        return _analyze(request, structured, raw, show, before_lines, after_lines, sources, clock, show_command)
     except Exception as exc:  # noqa: BLE001 - 解析の失敗で比較を止めない(ADR-0018 決定4)
         return LlmAnalysis(status="skipped", reason="internal_error", detail={"error_type": type(exc).__name__})
 
 
-def _analyze(request, structured, raw, show, before_lines, after_lines, sources, clock) -> LlmAnalysis:
+def _analyze(request, structured, raw, show, before_lines, after_lines, sources, clock, show_command) -> LlmAnalysis:
     words = normalize_words(request.extra_secret_words)
     masker = Masker(secret_words=words)
     # 使用中が既定で show の比較なら「状態の確認」の本文で送る(ADR-0146 決定6)。送らないときの版も同じ決まりで決める。
     # 送る差分の種類は payload.source_of と同じ条件(構造化比較が無く、show の構造化の比較がある)で先に見る
-    show_compare = structured is None and show is not None and show.method == "structured"
+    show_compare = structured is None and show is not None and show.method in ("structured", "both")
     template = template_for(request.prompt_template, "show" if show_compare else None)
     common = {
         "max_diffs": request.max_diffs,
@@ -92,6 +93,7 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
         masker=masker,
         max_diffs=request.max_diffs,
         include_after_text=request.include_after_text,
+        show_command=show_command,
     )
     reason: LlmReason
     if payload is None:

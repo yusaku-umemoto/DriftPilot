@@ -13,7 +13,7 @@ from driftpilot.segmentation.splitter import Segment
 # 入力の誤りの文(小文字。行頭の空白を除き、大文字・小文字を問わず前方一致で見る)。後から足せるようにここ 1 か所にまとめる。
 # 「% BGP not active」「% No such interface」のような、この一覧に無い % の行は当てない。
 INPUT_ERROR_PHRASES: tuple[str, ...] = (
-    "% invalid input detected",
+    "% invalid input",
     "% incomplete command",
     "% ambiguous command",
     "% invalid command",

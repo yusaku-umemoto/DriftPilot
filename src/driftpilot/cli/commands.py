@@ -224,11 +224,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--top", type=int, default=MASK_TOP, metavar="N", help=_H["mask_coverage.top"].format(default=MASK_TOP)
     )
     sub.add_parser("gui", help=_H["gui.help"])
-    from driftpilot.cli import batch, llm_check, selfcheck  # batch と llm_check はこのモジュールを読むため、ここで読む
+    # batch・llm_check・pilot_call はこのモジュールを読むため、ここで読む
+    from driftpilot.cli import batch, llm_check, pilot_call, selfcheck
 
     batch.add_parser(sub)
     llm_check.add_parser(sub)
     selfcheck.add_parser(sub)
+    pilot_call.add_parser(sub)
     return parser
 
 
@@ -712,6 +714,10 @@ def _run(args: argparse.Namespace) -> int:
         from driftpilot.cli import selfcheck
 
         return selfcheck.run(args)
+    if args.command == "pilot-call":
+        from driftpilot.cli import pilot_call
+
+        return pilot_call.run(args)
     if args.command == "gui":
         return _run_gui(args)
     return _run_compare(args)

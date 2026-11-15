@@ -879,6 +879,9 @@ class CompareApi(Api):
         # 表の中身の番号(REQ-264 §2)。表も変わるときは _result_changed で result_revision と一緒に進める。
         # AI の答えだけが変わったとき(送る前の確認・答え)は result_revision だけ進め、画面は表・選んでいる行・位置を描き直さない
         self._rows_revision = 0
+        # 開くタブの番号(REQ-282)。新しい結果を出したとき(_show・_show_opened)だけ進める。前後の行数・単純比較の既定の変更など、
+        # 比べ直さず表だけ描き直すときは進めない(画面は変わったときだけ open_tab のタブを選ぶ)
+        self._open_tab_revision = 0
         self._fill = 0  # 変わったら、画面は欄に form を入れ直す
         self._focus_revision = 0
         self._multi_revision = 0  # 変わったら、画面は一覧の行を作り直す
@@ -1975,6 +1978,7 @@ class CompareApi(Api):
         llm は view の元の AI 解析(429 の待つ秒を AI の面の行に出すときだけ使う。ADR-0168 決定4)。
         """
         self._outcome = view
+        self._open_tab_revision += 1
         self._result_changed()
         # 窓の下の文は、差分ありの内訳を添えた pywebview の文(REQ-113 §3。wx は status_text のまま)
         self._result_status = view.status_text_web
@@ -2053,6 +2057,7 @@ class CompareApi(Api):
         """
         self._opened = band
         self._outcome = view
+        self._open_tab_revision += 1
         self._result_changed()
         self._result_status = view.status_text_web
         self._status = [view.status_text_web, view.counts_text]
@@ -3640,6 +3645,8 @@ class CompareApi(Api):
                     "structured_rows": [],
                     "structured_op_keys": [],
                     "raw_note": None,
+                    "open_tab": None,
+                    "open_tab_revision": self._open_tab_revision,
                     "raw_rows": [],
                     "unparsed_note": None,
                     "unparsed_rows": [],
@@ -3682,6 +3689,10 @@ class CompareApi(Api):
                     # 操作の列の印の鍵(REQ-276)。structured_rows と同じ数・同じ順。行の形は変えず、別のキーで渡す
                     "structured_op_keys": [row.op_key for row in view.structured_rows],
                     "raw_note": view.raw_note,
+                    # 1組を比べたとき、結果を開いて選ぶタブ(REQ-282。show の both は structured、raw は raw、ほかは null)。
+                    # まとめて比べているとき(一覧がある)は null(タブは今の決まりのまま。既存のキーの形は変えない)
+                    "open_tab": view.open_tab if self._mview is None else None,
+                    "open_tab_revision": self._open_tab_revision,
                     "raw_rows": [
                         {
                             "mark": row.mark,

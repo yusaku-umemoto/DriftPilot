@@ -428,6 +428,35 @@ def words_of(section: Mapping[str, Any], path: Path) -> tuple[str, ...]:
     return tuple(value)
 
 
+def combined_words(
+    user: Mapping[str, Any], user_path: Path, work: Mapping[str, Any], work_path: Path
+) -> tuple[str, ...]:
+    """利用者ごとの設定と作業フォルダの設定の追加の秘密語を、この順で重複なく足し合わせる(load_settings の足し方)。"""
+    words = [*words_of(user, user_path)]
+    words += [w for w in words_of(work, work_path) if w not in words]
+    return tuple(words)
+
+
+def load_extra_secret_words(
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> tuple[str, ...]:
+    """追加の秘密語だけを読む(load_settings(...).extra_secret_words と同じ値)。
+
+    config.toml と作業フォルダの driftpilot.toml の [llm].extra_secret_words だけを読む。保管庫・キーの環境変数・
+    api_key・プロファイル・指示文のファイルは読まない(ほかの Pilot から呼ぶ入口が、AI の鍵に触れずに伏せ方をそろえるため。
+    ADR-0203)。読めない・形が違うときは SettingsError。
+    """
+    env = os.environ if env is None else env
+    cwd = Path.cwd() if cwd is None else cwd
+    user_path = user_config_path(platform=platform, env=env, home=home)
+    work_path = cwd / WORKDIR_CONFIG
+    return combined_words(_read_section(user_path), user_path, _read_section(work_path), work_path)
+
+
 def is_limit(value: object) -> bool:
     """上限にできる値か(真偽値でない 1 以上の整数。ADR-0071 決定5)。"""
     return type(value) is int and value >= 1
@@ -666,9 +695,8 @@ def load_settings(
             base_url, base_url_source = cli_destination(chosen.api_format, chosen.cli_path), "profile"
     custom = chosen.custom if chosen is not None and chosen.api_format == CUSTOM_HTTP_JSON else None
     cli = chosen is not None and is_cli(chosen.api_format)
-    words = [*words_of(user, user_path)]
-    work_words = words_of(work, work_path)
-    words += [w for w in work_words if w not in words]
+    words = combined_words(user, user_path, work, work_path)
+    work_words = words_of(work, work_path)  # 設定画面で別に見せる(workdir_secret_words)
     # 上限は利用者ごとの設定ファイルからだけ読む(作業フォルダの値は読まず、検査もしない。ADR-0071 決定5)
     limits = {key: limit_of(user, key, user_path) for key in LIMIT_KEYS}
     # 指示文は指示文のプロファイルから読む。config.toml と作業フォルダの prompt_template は読まず、検査もしない(ADR-0079)

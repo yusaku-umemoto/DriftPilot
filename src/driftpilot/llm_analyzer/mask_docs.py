@@ -12,6 +12,7 @@ from driftpilot.llm_analyzer.mask_patterns import (
     GATE_HEADS,
     MASK_PATTERNS,
     SECRET_WORDS,
+    SECRET_SHOW_COMMANDS,
     UNSENT_FORM_SCOPES,
     UNSENT_FORMS,
     MaskPattern,
@@ -31,7 +32,7 @@ _HEADER_JA = f"""<!-- 自動生成。手で編集しない。 -->
 > 再生成: `{GENERATE_COMMAND}`
 > 表を変えたのにこのファイルがずれていると、テストが失敗する。
 
-表を引くのは、秘密語を含む行だけである(ADR-0019 決定4、ADR-0143)。秘密語を含まない行は、表を引かずにそのまま送る。
+表を引く基本の入口は、秘密語を含む行である(ADR-0019 決定4、ADR-0143)。下記の追加の入口にも当たらない行は、そのまま送る。
 行を空白で語に分け、語が秘密語と完全一致すれば含むとみなす。`<` も `>` も無い語は、英数字・`_`・`-` のかたまりに分け、
 どれかが秘密語と大文字・小文字を区別せずに一致しても含むとみなす(`secret=…`・`Password:`・`"secret"`・`SECRET`。ADR-0143 決定1)。
 `-` と `_` は区切りにしない(`send-community`・`client-secret-name` は含まない)。全角の語は見ない(ADR-0143 決定4)。
@@ -46,7 +47,7 @@ _HEADER_JA = f"""<!-- 自動生成。手で編集しない。 -->
 
 書式は行(字下げを除き、語を1つの空白で区切ったもの)全体に対する正規表現。
 scope は親ブロックで、`top` は親の行が無いこと、`*` はどこでもよいこと。それ以外は、祖先の行のどれかがその語で始まること。
-形が「鍵らしい」ことを根拠に伏せる処理は無い(ADR-0019 決定1)。PEM ブロックは表とは別に、ブロックごと送らない。
+ADR-0199 決定3 の例外として、空白で区切った語が `$M$`・`$9$`・`%^%#`、または二重引用符の直後にそれらで始まれば表を引く。表に無ければ送らず、記録にも値を残さない。ほかの値の形では判定しない。XML のタグだけは `value` も秘密の名前として見る(決定4)。PEM ブロックは表とは別に、ブロックごと送らない。
 端末の幅で折り返されて割れた秘密の行のかたまりも、PEM と同じにブロックごと送らない(ADR-0137 決定2)。
 秘密語の無い決まった形の行(下の「秘密語の無い、送らない形」)は、ゲートの前で送らないと決める(ADR-0137 決定3)。
 """
@@ -59,7 +60,7 @@ _HEADER_EN = f"""<!-- Generated automatically. Do not edit by hand. -->
 > Regenerate: `{GENERATE_COMMAND}`
 > If the table is changed and this file is out of date, a test fails.
 
-The table is consulted only for lines that contain a secret word (ADR-0019 decision 4, ADR-0143). A line without a secret word is sent as it is, without consulting the table.
+The basic gate for consulting the table is a line containing a secret word (ADR-0019 decision 4, ADR-0143). A line matching none of the additional gates below is sent as it is.
 A line is split into words by spaces, and it is regarded as containing a secret word when a word matches a secret word exactly.
 A word with neither `<` nor `>` is also split into runs of letters, digits, `_` and `-`, and the line is regarded as containing a secret word when any run matches a secret word ignoring case (`secret=…`, `Password:`, `"secret"`, `SECRET`. ADR-0143 decision 1).
 `-` and `_` are not separators (`send-community` and `client-secret-name` do not contain one). Full-width words are not looked at (ADR-0143 decision 4).
@@ -74,7 +75,7 @@ Even without a secret word, a line that matches the "Heads of lines" table below
 
 The form is a regular expression for the whole line (with the indent removed and the words separated by a single space).
 scope is the parent block: `top` means there is no parent line, and `*` means anywhere. Otherwise, one of the ancestor lines must start with that word.
-There is no processing that masks something because its form looks like a key (ADR-0019 decision 1). A PEM block is not sent as a whole block, separately from the table.
+As a narrow exception (ADR-0199 decision 3), a whitespace-separated word starting with `$M$`, `$9$` or `%^%#`, optionally after one double quote, consults the table. If no row matches, the line is not sent and its value is excluded from the record. Other value forms do not trigger the gate. XML tags also recognize `value` as a secret name (decision 4). A PEM block is not sent as a whole block, separately from the table.
 A group of secret lines that were split by wrapping at the terminal width is also not sent as a whole block, like PEM (ADR-0137 decision 2).
 A line of a fixed form without a secret word (see "Forms that are not sent, without a secret word" below) is decided as not sent before the gate (ADR-0137 decision 3).
 """
@@ -84,6 +85,8 @@ _HEADER = i18n.choose(_HEADER_JA, _HEADER_EN)
 _DOC_JA = {
     "fingerprint": "表の指紋: `{digest}`({count} 件。mask {mask} 件 / pass {pass_} 件)。"
     "LLM 解析の結果の `llm.masking_fingerprint` と突き合わせる(docs/notes/req-16-llm.md)。\n",
+    "secret_show_title": "## 秘密の一覧のコマンド（行の比較）\n",
+    "secret_show_note": "打ったコマンド（`|` の前）か組のキーが、一覧の文と語の数が同じで、語ごとに一覧の語の頭の部分になる区間（`sh snmp comm` のような略した形も含む）は、行の差分の本文と変更後の全文を送らない。記録は件数と理由だけ。表の比較は列の判定のまま（ADR-0199 決定5・ADR-0202 決定3）。\n",
     "words_title": "## 秘密語(初期値)\n",
     "words_note": "設定(`llm.extra_secret_words`)で語を足せる。初期値の語は外せない。\n",
     "table_title": "## 表\n",
@@ -100,6 +103,8 @@ _DOC_JA = {
 _DOC_EN = {
     "fingerprint": "Table fingerprint: `{digest}` ({count} rows. mask {mask} / pass {pass_}). "
     "Compare it with `llm.masking_fingerprint` in the LLM analysis result (docs/notes/req-16-llm.md).\n",
+    "secret_show_title": "## Commands that list secrets (line comparison)\n",
+    "secret_show_note": "A section is excluded when its typed command (the part before `|`) or its pairing key has the same number of words as a listed command and each word is a leading part of the listed word (abbreviated forms such as `sh snmp comm` also match). Its line differences and full after text are not sent. Record only counts and the reason. Structured show comparisons keep their column checks (ADR-0199 decision 5, ADR-0202 decision 3).\n",
     "words_title": "## Secret words (initial values)\n",
     "words_note": "Words can be added in the settings (`llm.extra_secret_words`). The initial words cannot be removed.\n",
     "table_title": "## Table\n",
@@ -136,6 +141,7 @@ def render_json(patterns: tuple[MaskPattern, ...] = MASK_PATTERNS) -> str:
         "fingerprint": fp.digest,
         "count": fp.count,
         "secret_words": list(SECRET_WORDS),
+        "secret_show_commands": list(SECRET_SHOW_COMMANDS),
         "patterns": [_record(p) for p in patterns],
         "unsent_forms": [
             {"id": form_id, "match": regex, "scope": UNSENT_FORM_SCOPES.get(form_id, "*")} for form_id, regex in UNSENT_FORMS
@@ -192,4 +198,5 @@ def render_markdown(patterns: tuple[MaskPattern, ...] = MASK_PATTERNS) -> str:
     ]
     for head_id, regex in GATE_HEADS:
         out.append(f"| `{head_id}` | {_cell(GATE_HEAD_SCOPES.get(head_id, '*'))} | {_code(regex)} |")
+    out += ["", _DOC["secret_show_title"], _DOC["secret_show_note"], *[f"- `{command}`" for command in SECRET_SHOW_COMMANDS]]
     return "\n".join(out).rstrip("\n") + "\n"

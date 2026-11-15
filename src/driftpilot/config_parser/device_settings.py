@@ -41,6 +41,7 @@ Cisco の WAN と NX-OS の `sdm …`・`ip source binding …`・`dialer-list �
 import re
 from bisect import insort
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 
 from hier_config import HConfig, HConfigChild
 
@@ -114,6 +115,29 @@ def has_secret(*texts: str) -> bool:
         )
         for text in texts
     )
+
+
+@lru_cache(maxsize=1)
+def _mask_words() -> frozenset[str]:
+    """伏せる表の秘密語の集合(既定の語だけ。利用者が設定で足した語は含まない)。初めて呼ばれたときに作る。"""
+    # llm_analyzer/__init__ が多くの部品を読み、config_parser の読み込みが輪になるおそれがあるので、呼ばれたときに読む
+    from driftpilot.llm_analyzer.mask_patterns import SECRET_WORDS
+
+    return frozenset(SECRET_WORDS)
+
+
+def has_mask_word(text: str) -> bool:
+    """行が、伏せる表の秘密語を含むか(ADR-0209 決定2、REQ-292)。
+
+    llm_analyzer.masking.first_secret_word が秘密語に当たるか、has_secret が真なら True。
+    NEC IX の `ike policy … key …`・`ikev2 … psk …`・`ip access-list snmp …` など、has_secret だけでは
+    見分けられない行を、AI に送る側の判定と同じ語で読まないために使う。
+    """
+    if has_secret(text):
+        return True
+    from driftpilot.llm_analyzer.masking import first_secret_word
+
+    return first_secret_word(text, _mask_words()) is not None
 
 
 def _add(values: list[str], text: str) -> None:

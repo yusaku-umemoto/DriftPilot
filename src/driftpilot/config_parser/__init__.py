@@ -6,6 +6,7 @@ hier_config はツリー化と単体ヘルパーにだけ使い、Config View �
 from hier_config import HConfig
 
 from driftpilot.config_parser.acls import extract_acls
+from driftpilot.config_parser.awplus import looks_like_awplus, split_port_ranges
 from driftpilot.config_parser.bfd import extract_bfd
 from driftpilot.config_parser.bgp import extract_bgp
 from driftpilot.config_parser.eigrp import extract_eigrp
@@ -73,6 +74,7 @@ from driftpilot.config_parser.ir import (
     Vxlan,
     new_ir,
 )
+from driftpilot.config_parser.iosxr import prepare_iosxr
 from driftpilot.config_parser.isis import extract_isis
 from driftpilot.config_parser.lines import extract_lines
 from driftpilot.config_parser.mlag import extract_mlag
@@ -158,6 +160,7 @@ __all__ = [
     "parse_config",
     "parse_config_traced",
     "parse_config_with_tree",
+    "top_level_merged_lines",
 ]
 
 
@@ -182,12 +185,16 @@ def parse_config_traced(text: str, platform: str | None = None) -> tuple[IR, HCo
     flat = flat_platform(platform)
     if flat is not None:
         return _parse_flat_traced(text, flat)
-    tree = build_tree(text)
+    # AW+ と見立てたときだけ、木にする前にポートの範囲を1ポートずつに分ける(ADR-0206 決定1・5、REQ-289)
+    awplus = looks_like_awplus(text)
+    # XR の閉じの語の対を見て閉じの語の行を消し、XR と見立てたときは最上位の同じ見出しの塊をまとめる(ADR-0211、REQ-296)
+    prep = prepare_iosxr(text)
+    tree = build_tree(split_port_ranges(prep.text) if awplus else prep.text)
     repair_indentation(tree)
     interpreted = InterpretedLines()
 
     ir = new_ir()
-    ir["interfaces"] = extract_interfaces(tree, interpreted)
+    ir["interfaces"] = extract_interfaces(tree, interpreted, awplus=awplus)
     ir["vlans"] = extract_vlans(tree, interpreted)
     ir["acls"], ir["ipv6_acls"], ir["mac_acls"] = extract_acls(tree, interpreted)
     ir["ospf"] = extract_ospf(tree, interpreted)
@@ -218,6 +225,17 @@ def parse_config_traced(text: str, platform: str | None = None) -> tuple[IR, HCo
     ir["mpls"], ir["ptp"] = extract_mpls_ptp(tree, interpreted)
     ir["unparsed"] = interpreted.unparsed(tree)
     return ir, tree, interpreted
+
+
+def top_level_merged_lines(text: str, platform: str | None = None) -> tuple[int, ...]:
+    """XR と見立てた config で、最上位の同じ見出しとしてまとめて消した行の行番号(text の1始まり。昇順)。
+
+    parse_config_traced と同じ前処理(prepare_iosxr)の結果を返すので、parse と食い違わない。
+    平坦な機種(B型・D型)と、まとめなかった config は空。diff_engine の警告 top_level_merged が使う(ADR-0211 決定4)。
+    """
+    if flat_platform(platform) is not None:
+        return ()
+    return prepare_iosxr(text).merged_lines
 
 
 def _parse_flat_traced(text: str, flat: FlatPlatform) -> tuple[IR, FlatTree, InterpretedLines]:

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from driftpilot import i18n
-from driftpilot.coverage_report import FOLD_VERSION
+from driftpilot.coverage_report import WORD_FOLD_VERSION
 from driftpilot.llm_analyzer.mask_patterns import MASK_PATTERNS, masking_fingerprint
 from driftpilot.llm_analyzer.masking import (
     WRAPPED_SHAPE,
@@ -144,7 +144,7 @@ def to_text(report: MaskCoverage, top: int = DEFAULT_TOP) -> str:
     fp = masking_fingerprint()
     total = report.total
     out = [
-        _T["heading"].format(files=report.files, total=f"{total:,}", digest=fp.digest, count=fp.count, fold_version=FOLD_VERSION),
+        _T["heading"].format(files=report.files, total=f"{total:,}", digest=fp.digest, count=fp.count, fold_version=WORD_FOLD_VERSION),
         "",
     ]
     for c in CATEGORIES:
@@ -166,7 +166,7 @@ def to_json(report: MaskCoverage, top: int = DEFAULT_TOP) -> str:
     payload = {
         "masking_fingerprint": fp.digest,
         "patterns_count": fp.count,
-        "fold_version": FOLD_VERSION,
+        "fold_version": WORD_FOLD_VERSION,
         "files": report.files,
         "total": report.total,
         "counts": {c: report.counts[c] for c in CATEGORIES},

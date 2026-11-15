@@ -37,7 +37,15 @@ from driftpilot.core.batch_llm import (
     llm_preview,
     withhold,
 )
-from driftpilot.core.compare import STAGES, analyze_compared, choose_platform, llm_inputs, run_compare
+from driftpilot.core.compare import (
+    SHOW_OUTSIDE_TABLE_REASONS,
+    STAGES,
+    analyze_compared,
+    choose_platform,
+    llm_inputs,
+    request_problem,
+    run_compare,
+)
 from driftpilot.core.compare_all import (
     IN_WHOLE,
     MultiCompareOutcome,
@@ -52,6 +60,7 @@ from driftpilot.core.compare_all import (
     job_pair_results,
     pair_by_hand,
     partner_candidates,
+    sendable_outcome,
     sendable_pair,
     unpair,
     wants_all,
@@ -61,6 +70,7 @@ from driftpilot.core.compare_all import (
     whole_sections,
 )
 from driftpilot.core.compare_all import overall_status as multi_overall_status
+from driftpilot.core.masked_payload import MaskedPayload, masked_all, masked_single
 from driftpilot.core.types import (
     SCHEMA_VERSION,
     AutoPlatform,
@@ -106,6 +116,7 @@ __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "MODES",
     "SCHEMA_VERSION",
+    "SHOW_OUTSIDE_TABLE_REASONS",
     "STAGES",
     "AutoPlatform",
     "BatchInterrupted",
@@ -125,6 +136,7 @@ __all__ = [
     "LlmAnalysis",
     "LlmRequest",
     "Manifest",
+    "MaskedPayload",
     "ManifestError",
     "MultiCompareOutcome",
     "MultiStatus",
@@ -159,6 +171,8 @@ __all__ = [
     "job_pair_results",
     "llm_inputs",
     "llm_preview",
+    "masked_all",
+    "masked_single",
     "multi_overall_status",
     "options_from_plain",
     "options_to_plain",
@@ -167,8 +181,10 @@ __all__ = [
     "partner_candidates",
     "parse_manifest",
     "request_for",
+    "request_problem",
     "run_batch",
     "run_compare",
+    "sendable_outcome",
     "sendable_pair",
     "unpair",
     "wants_all",

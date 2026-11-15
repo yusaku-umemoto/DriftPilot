@@ -376,12 +376,16 @@ def sendable_pair(pair: PairResult) -> bool:
     比較が失敗した組・選択待ちの組・機種の自動の判定が食い違った組(ADR-0151)・機種に Si-R を指定して中身が別の機種に見える組
     (REQ-222)は送らない。1組の比較で送らない組と同じ。
     """
-    outcome = pair.outcome
+    return sendable_outcome(pair.request, pair.outcome)
+
+
+def sendable_outcome(request: CompareRequest, outcome: CompareOutcome) -> bool:
+    """sendable_pair の決まりを、組でない 1 件の比較(要求と結果)にも使えるようにしたもの(ADR-0203)。"""
     if outcome.status in ("error", "needs_selection"):
         return False
     if outcome.auto_platform is not None and outcome.auto_platform.conflict:
         return False
-    if outcome.kind == "config" and pair.request.platform == "fujitsu_sir":
+    if outcome.kind == "config" and request.platform == "fujitsu_sir":
         texts = _selected_texts(outcome)
         if texts is None or looks_not_sir(*texts):
             return False
@@ -443,6 +447,7 @@ def whole_sections(
                 after_lines=inputs.after_lines,
                 before_source=inputs.before_source,
                 after_source=inputs.after_source,
+                show_command=inputs.show_command,
             )
         )
     return positions, sections, unchanged

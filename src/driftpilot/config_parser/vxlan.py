@@ -95,7 +95,7 @@ _INTERFACE_WORDS = frozenset(
         "channel-group",
         "clns", "comment", "counter", "cts", "description", "device-tracking", "dhcp", "dot1x", "duplex", "encapsulation", "ethernet", "evpn", "flow",
         "flowcontrol",
-        "hold-queue", "ip", "ipv6", "isis", "keepalive", "l2", "lacp", "link", "link-debounce", "lldp", "load-interval", "mac", "mac-address",
+        "hold-queue", "ip", "ipv4", "ipv6", "isis", "keepalive", "l2", "lacp", "link", "link-debounce", "lldp", "load-interval", "mac", "mac-address",
         "mab", "macsec", "media-type", "medium", "mka", "mlag", "mls", "mop", "mpls", "mtu", "mvrp", "negotiate", "negotiation",
         "node-segment", "pim", "poe",
         "port-channel", "power", "priority-queue", "ptp", "qos", "queue-set", "service-policy", "service-profile", "sflow", "shutdown",
@@ -107,6 +107,8 @@ _INTERFACE_WORDS = frozenset(
         "pppoe-client", "pulse-time", "vpc", "zone-member",
         # NX-OS の hsrp(ADR-0136 決定3、REQ-183)
         "hsrp",
+        # NEC IX の IPsec・IKEv2(ADR-0209 決定6、REQ-292)
+        "ikev2", "ipsec",
     }
 )
 # 項目に写す設定の頭の語(`vxlan ` を外した後)。`no ` の付いた形は options に入れない

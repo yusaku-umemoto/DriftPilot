@@ -6,6 +6,24 @@
 
 （なし）
 
+## 0.2.5
+
+- **安全の修正:** 次の形の秘密の値を、構造化比較の差分の欄に入れて AI に送っていました。値を伏せるか、行を送らないようにしました
+  - Cisco ASA の `enable password <値> encrypted`
+  - `snmp-server host` の ASA の形と、Cisco IOS の `vrf` 付きの形のコミュニティ名
+- **安全の修正:** 秘密の語が無いために、そのまま AI に送っていた形を、伏せるか送らないようにしました
+  - Cisco IOS-XR の `snmp-server vrf` の中の `host … <コミュニティ名>`・VRRP の `text-authentication`・`snmp-server community-map`
+  - Aruba AOS-CX の `secret-key`・`clearpass-password`、OSPFv3 の IPsec の鍵（AOS-CX と Cisco IOS・IOS-XE）
+  - ASA の `aaa-server … host <アドレス> <鍵>` などと、FortiOS・Huawei の残りの形
+  - 暗号化した値に決まった形（`$M$`・`$9$`・`%^%#` で始まる値）を持つ行
+- **安全の修正:** show のうち秘密を並べるコマンド（`show snmp community`・`show crypto isakmp key`）は、略して打っても本文を AI に送らないようにしました
+- 伏せる処理に、Linux の出力の秘密の形（`/etc/shadow` のハッシュ、`Authorization` のヘッダー、`.env` の `*_KEY=` など、`mysql -p…`・`--password=`）を足しました
+- show を表で比べたときも単純比較を流し、表に出ない行の変化を見落とさないようにしました（「単純比較」か「表＋単純比較」で出します）。表の行のキーを、識別の列（隣接・宛先・アドレス・インターフェースなど）から選ぶようにしました
+- 端末のログの区切りを直しました（引数つきの 1 コマンド、NX-OS の BGP 表の `*>`、設定モードの `do show`、出力が空のコマンド、プロンプトが 1 回だけのログ、アラクサラ AX のプロンプト）。略したコマンド（`get sys stat` など）も同じコマンドとして組にします
+- アライドテレシス AW+（`vlan database`・トランクの `add`・ポートの範囲）、NEC IX（IKE・IPsec・1 行の ACL）、Cisco IOS-XR（`end-policy` などの区切りの行で止まっていた config）を読めるようにしました
+- `coverage` のレポートで、読めなかった行の秘密の値を伏せてから出すようにしました
+- ほかの Pilot から呼ぶ入口 `pilot-call capabilities`・`pilot-call compare` を足しました
+
 ## 0.2.4
 
 - **安全の修正:** Cisco の `snmp-server host <アドレス> … <コミュニティ名>` の行を、単純比較と全文の道で、コミュニティ名を伏せずに AI に送っていました。コミュニティ名だけを伏せて送るようにしました。同じように秘密の語が無い形（NEC の `snmp-agent`、`rmon event … trap`、VRRP・RIP の認証の行など）も伏せるか送らないようにしました

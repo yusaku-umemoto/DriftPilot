@@ -12,10 +12,12 @@ DiffOp = Literal["added", "removed", "changed"]
 # input_form は読み込みで入力の形を戻したこと(文字コードなど。ADR-0138 決定7)。
 # input_hint は入力の様子から当てた案内(折り返しの疑いなど。直していない。ADR-0138 決定7。REQ-189)。
 # platform_auto は機種を自動にしたときの判定なし・食い違いの知らせ(ADR-0151 決定2)。
+# top_level_merged は XR と見立てた config で、最上位の同じ見出し・同じ行を 1 つにまとめたこと(ADR-0211 決定4)。
 # どれも分岐に使わない列挙のため、足しても schema_version は上げない
 WarningKind = Literal[
     "empty_category",
     "tree_diff_mismatch",
+    "top_level_merged",
     "duplicate_line",
     "platform_mismatch",
     "pager_marks",

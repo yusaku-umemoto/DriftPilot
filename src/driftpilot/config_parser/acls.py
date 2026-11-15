@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from hier_config import HConfig
 
+from driftpilot.config_parser.device_settings import has_mask_word
 from driftpilot.config_parser.ir import Acl, AclEntry, AclType
 from driftpilot.config_parser.patterns import Pattern, apply_first
 from driftpilot.config_parser.tracking import InterpretedLines
@@ -26,6 +27,9 @@ class _Ctx:
     ipv6_acls: dict[str, Acl] = field(default_factory=dict)
     mac_acls: dict[str, Acl] = field(default_factory=dict)
     named: set[str] = field(default_factory=set)
+    # NEC IX の1行の形で作った名前(IPv4・IPv6)。同じ名前の次の1行は、この集合にあれば足す
+    single_line: set[str] = field(default_factory=set)
+    single_line_v6: set[str] = field(default_factory=set)
     current: Acl | None = None
     # 読んでいる最上位の行が子を持つか
     has_children: bool = False
@@ -73,6 +77,38 @@ def _mac_named(m: re.Match[str], ctx: _Ctx) -> bool:
     return _open(ctx.mac_acls, m["name"], "extended", ctx)
 
 
+def _single_line(acls: dict[str, Acl], made: set[str], m: re.Match[str], ctx: _Ctx) -> bool:
+    """NEC IX の1行の ACL を、名前の ACL のエントリに足す(出現順。同じ行が2回あれば2つ)。
+
+    子を持つ行と、伏せる表の秘密語がある行(名前が `snmp` など)は読まない。同じカテゴリにすでにある名前は、
+    1行の形で作った名前でなければ読まない(見出しの形・番号付きで先にできた ACL に足さない。ADR-0209 決定5、REQ-292)。
+    """
+    if ctx.has_children or has_mask_word(m.string):
+        return False
+    name = m["name"]
+    acl = acls.get(name)
+    if acl is None:
+        acl = acls[name] = {"name": name, "type": "extended", "numbered": False, "entries": []}
+        made.add(name)
+    elif name not in made:
+        return False
+    acl["entries"].append({"seq": None, "text": " ".join(m["text"].split())})
+    return True
+
+
+def _single_line_v4(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`ip access-list <名前> permit|deny <残り>`。名前は ctx.named にも入れる(同じ番号の `access-list` 行は読まない)。"""
+    if not _single_line(ctx.acls, ctx.single_line, m, ctx):
+        return False
+    ctx.named.add(m["name"])
+    return True
+
+
+def _single_line_v6(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`ipv6 access-list <名前> permit|deny <残り>`。"""
+    return _single_line(ctx.ipv6_acls, ctx.single_line_v6, m, ctx)
+
+
 def _numbered(m: re.Match[str], ctx: _Ctx) -> bool:
     """番号付き ACL の1行を、その番号の ACL のエントリに足す。
 
@@ -101,6 +137,18 @@ def _entry(m: re.Match[str], ctx: _Ctx) -> bool:
 # 並び＝優先順位(現在の if / elif の順)。
 PATTERNS: tuple[Pattern, ...] = (
     Pattern(
+        "acls.single_line", "top", r"ip access-list (?!dynamic )(?P<name>\S+) (?P<text>(?:permit|deny) .+)",
+        "acls[name].entries", "ip access-list ACL-VPN permit ip src 198.51.100.0/24 dest 203.0.113.0/24",
+        _single_line_v4,
+        note=(
+            "手続き。NEC IX の1行の ACL(子を持たない行)。名前が初めてなら type を extended・numbered を偽にして作り、"
+            "`permit|deny <残り>`(空白は1つ)を seq の無いエントリとして出現順に足す(同じ行が2回あれば2つ。ADR-0209 決定5、REQ-292)。"
+            "子を持つ行と、伏せる表の秘密語がある行(名前が snmp など)は未解釈。同じ名前がすでにあれば、"
+            "1行の形で作った名前でなければ未解釈(後から来る同じ名前の見出しの形も acls.named 系の決まりで未解釈)。"
+            "名前が dynamic の行と、名前の次の語が permit・deny でない行は当たらず未解釈"
+        ),
+    ),
+    Pattern(
         "acls.named", "top", r"ip access-list (?P<type>standard|extended|role-based) (?P<name>\S+)", "acls[name]",
         "ip access-list extended OUTSIDE_IN", _named,
         note="手続き。同じ名前がすでにあれば読まない(その行と子行は未解釈)",
@@ -128,6 +176,14 @@ PATTERNS: tuple[Pattern, ...] = (
         "acls.entries", "ip access-list", r"(?:(?P<seq>\d+) )?(?P<text>\S.*)", "acls[name].entries",
         "10 permit ip any any", _entry,
         note="手続き。名前付き ACL の子行はすべてエントリとして出現順に持つ。中身は分解しない",
+    ),
+    Pattern(
+        "ipv6_acls.single_line", "top", r"ipv6 access-list (?!dynamic )(?P<name>\S+) (?P<text>(?:permit|deny) .+)",
+        "ipv6_acls[name].entries", "ipv6 access-list ACL6-VPN permit icmp src any dest any", _single_line_v6,
+        note=(
+            "手続き。acls.single_line の IPv6 版(ADR-0209 決定5、REQ-292)。type は extended・numbered は偽。"
+            "子を持つ行と、伏せる表の秘密語がある行は未解釈。同じ名前がすでにあれば、1行の形で作った名前でなければ未解釈"
+        ),
     ),
     Pattern(
         "ipv6_acls.named", "top", r"ipv6 access-list (?:(?P<type>standard) )?(?!standard$)(?P<name>\S+)",

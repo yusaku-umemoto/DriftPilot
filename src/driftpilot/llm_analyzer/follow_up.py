@@ -137,6 +137,7 @@ def rebuild_after_text(
         after_lines=inputs.after_lines,
         before_source=inputs.before_source,
         after_source=inputs.after_source,
+        show_command=inputs.show_command,
         masker=Masker(secret_words=words),
         max_diffs=first.max_diffs,
         include_after_text=True,
@@ -179,6 +180,7 @@ def same_sent_body(
             after_lines=inputs.after_lines,
             before_source=inputs.before_source,
             after_source=inputs.after_source,
+            show_command=inputs.show_command,
             masker=Masker(secret_words=normalize_words(first.secret_words or ())),
             max_diffs=first.max_diffs,
             include_after_text=False,
@@ -264,6 +266,11 @@ def rebuild_whole_after_text(
         after_lines=section.after_lines,
         before_source=section.before_source,
         after_source=section.after_source,
+        show_command=(
+            section.show_command
+            if section.structured is None and (section.show is None or section.show.method != "structured")
+            else None
+        ),
         masker=masker,
     )
     if len(after_text.body) > MAX_FULL_TEXT_CHARS:

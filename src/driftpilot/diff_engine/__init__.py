@@ -5,7 +5,7 @@ from collections import Counter
 from hier_config import HConfig
 from hier_config.exceptions import DuplicateChildError
 
-from driftpilot.config_parser import IR, FlatTree, parse_config_with_tree
+from driftpilot.config_parser import IR, FlatTree, parse_config_with_tree, top_level_merged_lines
 from driftpilot.config_parser.tree import duplicate_path
 from driftpilot.diff_engine.compare import compare
 from driftpilot.diff_engine.normalization import NormalizationRule, builtin_rules, load_rules
@@ -42,6 +42,8 @@ def compare_configs(before_text: str, after_text: str, platform: str | None = No
     after_ir, after_tree = _parse_side(after_text, platform, "after")
     diffs = compare(before_ir, after_ir)
     warnings = [
+        *_merged_warnings(before_text, platform, "before"),
+        *_merged_warnings(after_text, platform, "after"),
         *_duplicate_warnings(before_tree, "before"),
         *_duplicate_warnings(after_tree, "after"),
         *check_empty_categories(before_tree, before_ir, "before"),
@@ -87,6 +89,21 @@ def _duplicate_line_numbers(text: str, scope: tuple[str, ...], line: str) -> tup
             numbers.append(number)
         parents.append((indent, normalized))
     return tuple(numbers) if len(numbers) >= 2 else ()
+
+
+def _merged_warnings(text: str, platform: str | None, side: Side) -> list[SafetyWarning]:
+    """XR と見立てて最上位の同じ見出し・同じ行を 1 つにまとめたら、その知らせを 1 つ返す(ADR-0211 決定4)。
+
+    行番号は text(前処理の前)の 1 始まり。parse と同じ前処理(top_level_merged_lines)で求める。detail に行の中身は入れない。
+    """
+    lines = top_level_merged_lines(text, platform)
+    if not lines:
+        return []
+    return [
+        SafetyWarning(
+            kind="top_level_merged", side=side, category=None, detail={"lines": list(lines), "count": len(lines)}
+        )
+    ]
 
 
 def _duplicate_warnings(tree: HConfig | FlatTree, side: Side) -> list[SafetyWarning]:

@@ -18,12 +18,16 @@ PEM ブロック(`-----BEGIN ` から `-----END ` まで)は行単位の表で�
 (REQ-198)。どちらも「送らない」にしかできない(送る側に戻す道は無い)。
 
 秘密語が無くても、行の頭の形(mask_patterns.GATE_HEADS。ADR-0198 決定2)に頭から当たる行は、秘密語に当たったときと同じく
-表を引く。当たれば伏せて送るか送り、どれにも当たらなければ送らない。判定の順は、見えない文字 → 形の一覧 → (秘密語か行の頭の形に
+表を引く。ADR-0199 決定3 の3接頭辞で始まる値も同じ入口とし、XML タグには value も使う(決定4)。
+値の形の入口は3接頭辞のままで、ADR-0208 の `/etc/shadow` の欄2の方式の印(`$6$` など)は、ここには足さず、行の頭の形(GH-15)の
+正規表現の中で見る(判定の処理は変えない)。足した頭の形(GH-15〜19)も、割れた秘密の行のかたまりの判定では今までの頭の形と同じく
+秘密の行として扱う。続く行が新しい設定の行に見えない出力(shadow・.env・ヘッダーの並び)は、かたまりごと送らないことがある。
+当たれば伏せて送るか送り、どれにも当たらなければ送らない。判定の順は、見えない文字 → 形の一覧 → (秘密語・行の頭の形・値の形に
 当たらなければそのまま送る)→ 表 → 送らない。
 
 見えない文字(Unicode の種類が Cc・Cf の文字。タブ・LF・CR を除く)のある行は、形の一覧とゲートより前に送らないと決める
 (ADR-0142 決定1)。BOM の無い UTF-16 の NUL や語の中のゼロ幅の文字で、秘密語の判定を外れるため。文字の種類だけを見ていて、
-値の形は見ない(ADR-0019 決定1)。形には行の中身を残さない(ADR-0142 決定2)。
+値の形は ADR-0199 決定3 の3接頭辞だけを例外として見る。形には行の中身を残さない(ADR-0142 決定2)。
 """
 
 import re
@@ -39,6 +43,8 @@ from driftpilot.llm_analyzer.mask_patterns import (
     GATE_HEADS,
     MASK_PATTERNS,
     SECRET_WORDS,
+    SECRET_VALUE_PREFIXES,
+    XML_SECRET_NAMES,
     UNSENT_FORM_HEADS,
     UNSENT_FORM_SCOPES,
     UNSENT_FORMS,
@@ -150,7 +156,7 @@ def _secret_hit(text: str, words: frozenset[str]) -> tuple[int, str] | None:
             return index, word
         if "<" in word or ">" in word:
             for name in _TAG_NAME.findall(word):
-                if name in words and (head.startswith("<" + name) or f"</{name}>" in text):
+                if (name in words or name in XML_SECRET_NAMES) and (head.startswith("<" + name) or f"</{name}>" in text):
                     return index, f"<{name}>"
             continue
         if folded is None:
@@ -201,10 +207,22 @@ def scope_label(ancestors: Sequence[str]) -> str:
     return words[0]
 
 
+def first_secret_value(text: str) -> int | None:
+    """ADR-0199 決定3 の3接頭辞だけを見る。二重引用符は先頭の1文字だけ除く。"""
+    return next(
+        (i for i, word in enumerate(text.split()) if word.removeprefix('"').startswith(SECRET_VALUE_PREFIXES)),
+        None,
+    )
+
+
 def unsent_shape(text: str, words: frozenset[str]) -> str:
     """行頭から最初の秘密語までの形。前の語は fold-v1 で畳み、秘密語より後ろは `…` にする(値を残さない)。"""
     parts = text.split()
     hit = _secret_hit(text, words)
+    value_index = first_secret_value(text)
+    if value_index is not None and (hit is None or value_index <= hit[0]):
+        # 秘密語より前の値も記録しない。値の語そのものは一切残さない。
+        return "…"
     if hit is None:  # 呼び出し側はゲートを通った行だけを渡す
         return "…"
     index, shown = hit  # タグで当たった語は値を含みうるため、`<名前>` だけを残す
@@ -265,6 +283,34 @@ def unsent_form(line: str, ancestors: Sequence[str]) -> str | None:
     return None
 
 
+_WORD = re.compile(r"\S+")
+
+
+def _original_value(line: str, start: int, end: int) -> str:
+    """語を1つの空白で区切った形(body)の位置 [start, end) に当たる、元の行の文字列(空白の重なり・タブを残したもの)。
+
+    body は `" ".join(line.split())` なので、語ごとに位置を対応させる。語の途中は同じ幅で、語の間の空白は元の空白の始まりに寄せる。
+    """
+    words = [(m.start(), m.end()) for m in _WORD.finditer(line)]
+    shift = 0  # body の中の、いまの語の始まり
+    starts: list[tuple[int, int, int]] = []  # (bodyの始まり, bodyの終わり, 元の始まり)
+    for original_start, original_end in words:
+        length = original_end - original_start
+        starts.append((shift, shift + length, original_start))
+        shift += length + 1
+
+    def locate(position: int, *, is_end: bool) -> int:
+        for body_start, body_end, original_start in starts:
+            if body_start <= position < body_end or (is_end and position == body_end):
+                return original_start + (position - body_start)
+        for body_start, body_end, original_start in starts:  # 語の間(空白の位置)。その前の語の終わりへ
+            if position == body_end:
+                return original_start + (body_end - body_start)
+        return len(line)
+
+    return line[locate(start, is_end=False) : locate(end, is_end=True)]
+
+
 class Masker:
     """1回の解析の判定器。記号表を持つ(構造化差分と行単位の差分で共有する)。"""
 
@@ -280,11 +326,14 @@ class Masker:
         self.symbols = SymbolTable()
 
     def gated(self, text: str) -> bool:
-        """見えない文字がある(ADR-0142)か、秘密語に当たるか。真なら表を引くか、送らない側へ進む。
+        """見えない文字・秘密語(XML の専用名を含む)・3接頭辞の値に当たるか。真なら表を引くか送らない側へ進む。
 
         show の差分の道(payload._show_body)は judge を通らずこれだけを見るため、見えない文字もここで見る(ADR-0143 決定5)。
         """
-        return has_unseen_char(text) or first_secret_word(text, self._words) is not None
+        return (
+            has_unseen_char(text) or first_secret_word(text, self._words) is not None
+            or first_secret_value(text) is not None
+        )
 
     def is_secret_column(self, name: object) -> bool:
         """show の表の列の名前が秘密か。`_`・`-`・空白で区切った部分のどれかが秘密語に(大文字・小文字を問わず)当たる(REQ-277)。"""
@@ -304,6 +353,10 @@ class Masker:
     def is_pass(self, line: str) -> bool:
         """表の pass に当たる行か(祖先なしで判定する)。記号表の番号を使わないよう、使い捨ての記号表で判定する。"""
         return self._judge(line, (), SymbolTable()).decision == "pass"
+
+    def judge_alone(self, line: str, ancestors: Sequence[str] = ()) -> LineJudgement:
+        """1行を使い捨ての記号表で判定する。番号が行の間で続かず、この判定器の記号表も変えない(`is_pass` と同じ形)。"""
+        return self._judge(line, ancestors, SymbolTable())
 
     def _judge(self, line: str, ancestors: Sequence[str], symbols: SymbolTable) -> LineJudgement:
         if has_unseen_char(line):
@@ -345,7 +398,8 @@ class Masker:
             out, last = [], 0
             for start, end in spans:
                 out.append(body[last:start])
-                out.append(symbols.symbol(body[start:end]))
+                # 記号の番号は、空白を詰める前の元の行の値で決める(引用符の中の空白だけが違う値を同じ記号にしない。ADR-0018 決定3)
+                out.append(symbols.symbol(_original_value(line, start, end)))
                 last = end
             out.append(body[last:])
             return LineJudgement("mask", indent + "".join(out), pattern.id)
@@ -442,7 +496,8 @@ def wrapped_secret_groups(
 
     def has_secret(text: str) -> bool:
         return (
-            first_secret_word(text, secret) is not None or bool(_form_line_ids(text)) or gate_head(text) is not None
+            first_secret_word(text, secret) is not None or first_secret_value(text) is not None
+            or bool(_form_line_ids(text)) or gate_head(text) is not None
         )
 
     def unscoped_form(text: str) -> bool:

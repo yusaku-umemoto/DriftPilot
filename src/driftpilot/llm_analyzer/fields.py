@@ -222,7 +222,7 @@ UNMASKED_FIELDS: dict[str, str] = {
     "global.snmp.communities[]": "コミュニティ1つ。要素の項目ごとに判定する",
     "global.snmp.communities[].access": "RO / RW の別か、NX-OS の group <役割>",
     "global.snmp.communities[].acl": "ACL 名(ADR-0018 決定2 で伏せない)",
-    "global.snmp.hosts[].options": "traps / informs / version の指定",
+    "global.snmp.hosts[].options": "traps / informs / vrf / version の指定",
     "global.snmp.communities[].view": "ビューの名前(REQ-83)",
     "global.snmp.users": "一覧そのもの。要素の項目(name / settings / auth_configured / priv_configured)ごとに判定する",
     "global.snmp.users[]": "SNMPv3 の利用者1人。要素の項目ごとに判定する",

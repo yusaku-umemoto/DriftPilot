@@ -13,7 +13,7 @@ from ipaddress import IPv4Address, IPv4Interface, IPv6Address, IPv6Interface
 from hier_config import HConfig, HConfigChild
 from hier_config.platforms.functions import expand_range
 
-from driftpilot.config_parser.device_settings import has_secret
+from driftpilot.config_parser.device_settings import has_mask_word, has_secret
 from driftpilot.config_parser.ir import Interface, InterfaceType, Vrrp, new_interface
 from driftpilot.config_parser.isis import is_key_form
 from driftpilot.config_parser.patterns import Pattern, apply_first
@@ -52,6 +52,10 @@ class _Ctx:
     comment: bool = False
     # 子を持つ NX-OS の `hsrp <数> [<残り>]` を読んだら、中の行に付ける頭(`<数>` か `<数> <残り>`。ADR-0136 決定3、REQ-183)
     hsrp_prefix: str | None = None
+    # アライドテレシス AW+ と見立てた config か(ADR-0206 決定1、REQ-289)。トランクの `add`・`remove` の読み方が変わる
+    awplus: bool = False
+    # このインターフェースで前に `switchport trunk allowed vlan all` を読んだか(AW+ の `add` の判定に使う)
+    allowed_all: bool = False
 
 
 def _open(m: re.Match[str], ctx: _Ctx) -> bool:
@@ -135,6 +139,14 @@ def _access_vlan(m: re.Match[str], ctx: _Ctx) -> bool:
 
 def _native_vlan(m: re.Match[str], ctx: _Ctx) -> bool:
     ctx.interface["switchport"]["native_vlan"] = int(m["id"])
+    ctx.interface["switchport"]["native_vlan_none"] = False
+    return True
+
+
+def _native_vlan_none(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`none` は `native_vlan` を None にして `native_vlan_none` を True にする(ADR-0206 決定4)。"""
+    ctx.interface["switchport"]["native_vlan"] = None
+    ctx.interface["switchport"]["native_vlan_none"] = True
     return True
 
 
@@ -151,6 +163,7 @@ def _allowed_vlan_all(m: re.Match[str], ctx: _Ctx) -> bool:
     """`all` は行が無いときと同じ `()` にする(すべて通す。ADR-0111 決定1)。`none` の印は False に戻す。"""
     ctx.interface["switchport"]["trunk_allowed_vlan"] = ()
     ctx.interface["switchport"]["trunk_allowed_none"] = False
+    ctx.allowed_all = True
     return True
 
 
@@ -165,15 +178,35 @@ def _allowed_vlan_add(m: re.Match[str], ctx: _Ctx) -> bool:
     """前に読んだ数の一覧に足す(和集合・昇順。ADR-0131 決定1)。
 
     今の値が `()`(行が無い・`all`・展開できなかった)なら、足す先の意味が決まらないので未解釈にする。
+    ただし AW+ と見立てた config では、`none` でも前に `all` の行でもない `()` を空の一覧とみなして足す
+    (ADR-0206 決定3、REQ-289)。
     """
-    current = ctx.interface["switchport"]["trunk_allowed_vlan"]
-    if not current:
+    switchport = ctx.interface["switchport"]
+    current = switchport["trunk_allowed_vlan"]
+    if not current and not (ctx.awplus and not switchport["trunk_allowed_none"] and not ctx.allowed_all):
         return False
     try:
         added = expand_range(m["range"])
     except ValueError:
         return False
-    ctx.interface["switchport"]["trunk_allowed_vlan"] = tuple(sorted(set(current) | set(added)))
+    switchport["trunk_allowed_vlan"] = tuple(sorted(set(current) | set(added)))
+    return True
+
+
+def _allowed_vlan_remove(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AW+ と見立てた config で、今の値が空でない一覧なら、そこから引く(昇順。全部引けば `()`。ADR-0206 決定3)。
+
+    AW+ でない・今の値が `()`(行が無い・`all`・`none`)・展開できない行は未解釈にする。
+    """
+    switchport = ctx.interface["switchport"]
+    current = switchport["trunk_allowed_vlan"]
+    if not ctx.awplus or not current:
+        return False
+    try:
+        removed = expand_range(m["range"])
+    except ValueError:
+        return False
+    switchport["trunk_allowed_vlan"] = tuple(sorted(set(current) - set(removed)))
     return True
 
 
@@ -523,8 +556,12 @@ def _has_word(text: str, words: frozenset[str]) -> bool:
 
 
 def _access_group(m: re.Match[str], ctx: _Ctx) -> bool:
-    """行の原文(空白は1つ)を access_groups に足す。子を持つ行は読まない。"""
-    if ctx.has_children:
+    """行の原文(空白は1つ)を access_groups に足す。子を持つ行は読まない。
+
+    NEC IX の `ip filter`・`ipv6 filter` の形は、伏せる表の秘密語がある行(ACL の名前が snmp など)も読まない
+    (ADR-0209 決定6、REQ-292)。
+    """
+    if ctx.has_children or (m["filter"] is not None and has_mask_word(m.string)):
         return False
     _add(ctx.interface["access_groups"], " ".join(m.string.split()))
     return True
@@ -836,6 +873,15 @@ def _address_mode_unnumbered(m: re.Match[str], ctx: _Ctx) -> bool:
     return True
 
 
+def _leaf_only(handler: Callable[[re.Match[str], _Ctx], bool]) -> Callable[[re.Match[str], _Ctx], bool]:
+    """子を持たない行だけ handler で読む手続きを返す。子を持つ行は読まず、未解釈に残す(IOS-XR の `ipv4` の行。ADR-0211 決定5)。"""
+
+    def apply(m: re.Match[str], ctx: _Ctx) -> bool:
+        return not ctx.has_children and handler(m, ctx)
+
+    return apply
+
+
 def _line_option(key: str) -> Callable[[re.Match[str], _Ctx], bool]:
     """行の原文(空白は1つ)を key の集合に足す手続きを返す。秘密の語がある行と子を持つ行は読まない(ADR-0109・ADR-0110)。"""
 
@@ -1004,6 +1050,14 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         "interfaces.switchport.native_vlan", "interface", r"switchport trunk native vlan (?P<id>\d+)",
         "switchport.native_vlan", "switchport trunk native vlan 99", _native_vlan,
+        note="読めたら `native_vlan_none` を False に戻す(ADR-0206 決定4、REQ-289)",
+    ),
+    Pattern(
+        "interfaces.switchport.native_vlan_none", "interface", r"switchport trunk native vlan none",
+        "switchport.native_vlan・switchport.native_vlan_none", "switchport trunk native vlan none",
+        _native_vlan_none,
+        note="手続き。`native_vlan` を None、`native_vlan_none` を True にする。後に `native vlan <数>` があれば"
+        "False に戻る。機種の見立てに関係なく読む(ADR-0206 決定4、REQ-289)",
     ),
     Pattern(
         "interfaces.switchport.trunk_allowed_vlan", "interface",
@@ -1016,7 +1070,8 @@ PATTERNS: tuple[Pattern, ...] = (
         "interfaces.switchport.trunk_allowed_vlan_all", "interface", r"switchport trunk allowed vlan all",
         "switchport.trunk_allowed_vlan", "switchport trunk allowed vlan all", _allowed_vlan_all,
         note="手続き。行が無いときと同じ `()` にする(すべて通す。ADR-0111 決定1)。`trunk_allowed_none` を False に"
-        "戻す。2回あれば後の行。`none`・`add` は次のパターンが読む。`remove`・`except` は未解釈",
+        "戻す。2回あれば後の行。`none`・`add` は次のパターンが読む。`remove` は AW+ と見立てたときだけ、"
+        "`trunk_allowed_vlan_remove` が読む(今の値が空でない一覧のとき)。`except` は未解釈",
     ),
     Pattern(
         "interfaces.switchport.trunk_allowed_vlan_none", "interface", r"switchport trunk allowed vlan none",
@@ -1030,7 +1085,16 @@ PATTERNS: tuple[Pattern, ...] = (
         r"switchport trunk allowed vlan add (?P<range>\d[\d,\-]*)", "switchport.trunk_allowed_vlan",
         "switchport trunk allowed vlan add 300,350-352", _allowed_vlan_add,
         note="手続き。前に読んだ数の一覧に範囲を展開して足す(和集合・昇順のタプル)。前に一覧が無い・"
-        "`all` のあと・展開できない行は未解釈(ADR-0131 決定1、REQ-176)",
+        "`all` のあと・展開できない行は未解釈(ADR-0131 決定1、REQ-176)。AW+ と見立てた config では、"
+        "`none` の後でも前に `all` の行でもない、前に一覧が無い `add` は、空の一覧に足す(ADR-0206 決定3、REQ-289)",
+    ),
+    Pattern(
+        "interfaces.switchport.trunk_allowed_vlan_remove", "interface",
+        r"switchport trunk allowed vlan remove (?P<range>\d[\d,\-]*)", "switchport.trunk_allowed_vlan",
+        "switchport trunk allowed vlan remove 20", _allowed_vlan_remove,
+        note="手続き。AW+ と見立てた config で、今の値が空でない一覧なら、範囲を展開してそこから引く(昇順のタプル。"
+        "全部引けば `()`)。AW+ と見立てない・今の値が `()`(行が無い・`all`・`none`)・展開できない行は未解釈"
+        "(ADR-0206 決定3、REQ-289)",
     ),
     Pattern(
         "interfaces.switchport.trunk_group", "interface", r"switchport trunk group (?P<name>\S+)",
@@ -1110,6 +1174,46 @@ PATTERNS: tuple[Pattern, ...] = (
         "interfaces.ip_address_secondary", "interface", r"ip address (?P<addr>\S+) (?P<mask>\S+) secondary",
         "secondary_addresses", "ip address 192.0.2.129 255.255.255.128 secondary", _ip_address_secondary,
         note="書かれた順に足す(primary の ip_address とは別に持つ)。IPv4 として読めないものは未解釈にする",
+    ),
+    # IOS-XR のインターフェースのアドレス(ADR-0211 決定5、REQ-296)。`ip …` と同じ欄に、同じ手続きで読む。
+    # dhcp・unnumbered の語の決まった形を、マスクの形より前に置く。`/` の形・secondary 付きも、そうでない形より前に置く
+    Pattern(
+        "interfaces.ipv4_address_dhcp", "interface", r"ipv4 address dhcp(?: (?P<rest>.+))?", "address_mode",
+        "ipv4 address dhcp", _leaf_only(_address_mode_dhcp),
+        note="手続き。IOS-XR の形。`ip address dhcp` と同じ値(`dhcp [<残り>]`)を address_mode に写す(ADR-0211 決定5)。"
+        "`ipv4 address` のほかのパターンより前に置く。`ipv4 address dhcp-client-options …` は当たらず、"
+        "マスクの形にも読めず未解釈。子を持つ行は未解釈",
+    ),
+    Pattern(
+        "interfaces.ipv4_unnumbered", "interface", r"ipv4 unnumbered (?P<name>\S+)", "address_mode",
+        "ipv4 unnumbered Loopback0", _leaf_only(_address_mode_unnumbered),
+        note="手続き。IOS-XR の形。`unnumbered <if>` を address_mode に写す(`ip unnumbered` と同じ値。ADR-0211 決定5)。"
+        "後ろに語が続く形と、子を持つ行は未解釈",
+    ),
+    Pattern(
+        "interfaces.ipv4_address_prefix_secondary", "interface",
+        r"ipv4 address (?P<addr>[^\s/]+)/(?P<length>\d+) secondary",
+        "secondary_addresses", "ipv4 address 192.0.2.129/25 secondary", _leaf_only(_ip_address_prefix_secondary),
+        note="IOS-XR の `/` の形の secondary(ADR-0211 決定5)。interfaces.ipv4_address_prefix より前に置く。"
+        "IPv4 として読めないものと、子を持つ行は未解釈にする",
+    ),
+    Pattern(
+        "interfaces.ipv4_address_prefix", "interface", r"ipv4 address (?P<addr>[^\s/]+)/(?P<length>\d+)", "ip_address",
+        "ipv4 address 192.0.2.1/24", _leaf_only(_ip_address_prefix),
+        note="IOS-XR の `/` の形(ADR-0211 決定5)。マスクの形と同じ値になる。IPv4 として読めないものは未解釈にする。"
+        "`route-tag` などの語が続く行は当たらず未解釈。子を持つ行も未解釈",
+    ),
+    Pattern(
+        "interfaces.ipv4_address_secondary", "interface", r"ipv4 address (?P<addr>\S+) (?P<mask>\S+) secondary",
+        "secondary_addresses", "ipv4 address 192.0.2.129 255.255.255.128 secondary", _leaf_only(_ip_address_secondary),
+        note="IOS-XR の形(ADR-0211 決定5)。interfaces.ipv4_address より前に置く。"
+        "書かれた順に足す。IPv4 として読めないものと、子を持つ行は未解釈にする",
+    ),
+    Pattern(
+        "interfaces.ipv4_address", "interface", r"ipv4 address (?P<addr>\S+) (?P<mask>\S+)", "ip_address",
+        "ipv4 address 192.0.2.1 255.255.255.0", _leaf_only(_ip_address),
+        note="IOS-XR の形(ADR-0211 決定5)。アドレスとマスクが IPv4 として読めないものは未解釈にする。"
+        "`route-tag` などほかの語が続く行は当たらず未解釈。子を持つ行も未解釈",
     ),
     Pattern(
         "interfaces.ipv6_address_virtual", "interface", r"ipv6 address virtual (?P<addr>[^\s/]+)/(?P<length>\d+)",
@@ -1344,10 +1448,13 @@ PATTERNS: tuple[Pattern, ...] = (
     ),
     Pattern(
         "interfaces.access_group", "interface",
-        r"(?:(?:ip|ipv6|mac) access-group|ipv6 traffic-filter) \S+ (?:in|out)", "access_groups",
+        r"(?:(?:ip|ipv6|mac) access-group|ipv6 traffic-filter) \S+ (?:in|out)"
+        r"|(?P<filter>(?:ip|ipv6) filter \S+ \d+ (?:in|out))", "access_groups",
         "ip access-group ACL-IN in", _access_group,
         note="手続き。行の原文(空白は1つ)を access_groups の集合に足す。同じ文字列は重ねず、文字列の昇順"
-        "(ADR-0057 決定1)。向きの無い形と `vrf` などの語がある形は当たらず未解釈。子を持つ行は未解釈",
+        "(ADR-0057 決定1)。向きの無い形と `vrf` などの語がある形は当たらず未解釈。子を持つ行は未解釈。"
+        "NEC IX の `ip filter <ACL 名> <番号> in|out`・`ipv6 filter …` も読む(ADR-0209 決定6、REQ-292)。"
+        "この形は、伏せる表の秘密語がある行(ACL の名前が snmp など)は未解釈",
     ),
     Pattern(
         "interfaces.dot1x", "interface",
@@ -1515,7 +1622,9 @@ PATTERNS: tuple[Pattern, ...] = (
         r"|(?:ip|ipv6) unreachables|ip directed-broadcast|ip (?:route-cache|cef|split-horizon|virtual-reassembly)(?: .+)?"
         r"|dhcp client .+|ip attached-host .+|ip nat (?:inside|outside)|ip summary-address .+"
         r"|ip load-sharing .+|ip mtu \d+|ipv6 dhcp server .+"
-        r"|ip nhrp (?!authentication(?: |$)).+|ip verify unicast .+|ipv6 dhcp client .+)",
+        r"|ip nhrp (?!authentication(?: |$)).+|ip verify unicast .+|ipv6 dhcp client .+"
+        r"|ipv4 mtu \d+|ipv4 unreachables disable|ipv4 redirects|ipv4 point-to-point|ipv4 directed-broadcast"
+        r"|ipv4 verify .+|ipv4 flowspec .+)",
         "ip_options", "no ip redirects", _line_option("ip_options"),
         note="手続き。行の原文(空白は1つ)を ip_options の集合に足す。同じ文字列は重ねず、文字列の昇順"
         "(ADR-0109 決定3・ADR-0111 決定6)。`ipv6 nd`・`tcp adjust-mss` は後ろの語が要り、`redirects`・`proxy-arp`・"
@@ -1530,7 +1639,10 @@ PATTERNS: tuple[Pattern, ...] = (
         "DMVPN の `ip nhrp …`、`ip verify unicast …`、`ipv6 dhcp client …`(no 付きも。後ろの語が要る)も読む"
         "(ADR-0136 決定2、REQ-182)。ただし `ip nhrp authentication …`(語の無い鍵)は当てず未解釈"
         "(ADR-0136 決定4)。"
-        "表に無い `ip`・`ipv6` の行は未解釈。秘密の語がある行と子を持つ行は未解釈",
+        "IOS-XR の `ipv4 mtu <数>`・`ipv4 unreachables disable`・`ipv4 redirects`・`ipv4 point-to-point`・"
+        "`ipv4 directed-broadcast`・`ipv4 verify …`・`ipv4 flowspec …`(no 付きも。後ろの語が要る形は語が要る)も読む"
+        "(ADR-0211 決定5、REQ-296)。"
+        "表に無い `ip`・`ipv6`・`ipv4` の行は未解釈。秘密の語がある行と子を持つ行は未解釈",
     ),
     Pattern(
         "interfaces.traffic_monitoring", "interface",
@@ -1614,7 +1726,8 @@ PATTERNS: tuple[Pattern, ...] = (
         r"|fabric forwarding|crypto map) .+"
         r"|(?:no )?(?:ppp (?!(?:chap hostname|pap sent-username|eap identity)(?: |$))"
         r"|glbp (?!(?:.* )?authentication(?: |$))|vpc (?!\d+$)).+"
-        r"|(?:no )?clns route-cache",
+        r"|(?:no )?clns route-cache"
+        r"|(?:ipsec|ikev2) .+",
         "port_options", "no snmp trap link-status", _line_option("port_options"),
         note="手続き。行の原文(空白は1つ)を port_options の集合に足す。同じ文字列は重ねず、文字列の昇順"
         "(ADR-0110 決定1)。Arista の `port-channel lacp`・`lacp`・`link tracking`・`link-debounce`・`mac security` "
@@ -1622,6 +1735,10 @@ PATTERNS: tuple[Pattern, ...] = (
         "`stackwise-virtual …` も読む(後ろの語が要る。ADR-0120、REQ-165)。"
         "`counter` も読む(ADR-0121、REQ-166)。"
         "`clns route-cache`(と `no ` つき。その語だけの行)も読む(ADR-0124 決定2、REQ-169)。"
+        "NEC IX の `ipsec …`・`ikev2 …`(`ipsec policy tunnel <マップ名> out`・`ikev2 outgoing-interface …` など。"
+        "後ろの語が要る。no は付けない)も読む(ADR-0209 決定6、REQ-292)。"
+        "`ikev2 peer … authentication psk …` のように psk の語がある行も入るが、AI に送る側が元の行と同じ文字列・"
+        "同じ場所で判定して送らない。`key` などの has_secret の行は入れない。"
         "`switchport trunk encapsulation …`・`flowcontrol …`・`small-frame …`(後ろの語が要る)と `keepalive`(その語だけの行も"
         "後ろの語がある行も)も読む(ADR-0128 決定3、REQ-173。`switchport trunk allowed vlan add …` は当たらず未解釈)。"
         "Arista の `l2 mtu …`・`l2 mru …`・`node-segment …`(no 付きも。後ろの語が要る)も読む(ADR-0133 決定3、REQ-178。"
@@ -1694,11 +1811,16 @@ def _read_cts_manual_block(node: HConfigChild, ctx: _Ctx, interpreted: Interpret
             interpreted.mark(child, pattern.id)
 
 
-def extract_interfaces(tree: HConfig, interpreted: InterpretedLines) -> dict[str, Interface]:
-    """tree のトップレベルの interface 行から、名前をキーにした Interface の辞書を返す。"""
+def extract_interfaces(
+    tree: HConfig, interpreted: InterpretedLines, *, awplus: bool = False
+) -> dict[str, Interface]:
+    """tree のトップレベルの interface 行から、名前をキーにした Interface の辞書を返す。
+
+    awplus は、AW+ と見立てた config か(トランクの `add`・`remove` の読み方が変わる。ADR-0206 決定1、REQ-289)。
+    """
     interfaces: dict[str, Interface] = {}
     for block in tree.children:
-        ctx = _Ctx()
+        ctx = _Ctx(awplus=awplus)
         heading = apply_first(PATTERNS, "top", block.text, ctx)
         if heading is None:
             continue

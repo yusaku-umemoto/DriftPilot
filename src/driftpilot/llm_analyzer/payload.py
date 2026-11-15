@@ -29,12 +29,14 @@ from driftpilot.diff_engine import CompareResult, RawCompareResult, ShowCompareR
 from driftpilot.diff_engine.raw import RawOptionsRecord
 from driftpilot.diff_engine.types import Diff
 from driftpilot.llm_analyzer import fields
+from driftpilot.llm_analyzer.mask_patterns import masking_fingerprint, secret_show_command
 from driftpilot.llm_analyzer.masking import (
     PEM_BEGIN,
     WRAPPED_SHAPE,
     Masker,
     ancestors_by_indent,
     block_index,
+    normalize_words,
     pem_blocks,
     pem_start_shape,
     scope_label,
@@ -81,6 +83,8 @@ _MARKS_EN = {
 }
 _M = i18n.choose(_MARKS_JA, _MARKS_EN)
 
+SECRET_SHOW_REASON = "秘密の一覧のコマンド"
+
 CONTEXT_LINES = 2
 # 変更後の全文で、判定できずに除いた行の代わりに置く1行(差分の文脈の行と同じ文。ADR-0158 決定3)
 FULL_TEXT_OMITTED_JA = _MARKS_JA["omitted"]
@@ -120,6 +124,7 @@ class LlmInputs:
     after_lines: list[str]
     before_source: list[str]
     after_source: list[str]
+    show_command: str | None = None
 
 
 @dataclass(frozen=True)
@@ -253,8 +258,51 @@ def _dump(value: Any) -> str:
 # --- 構造化差分(基準1) ---
 
 
-def _judge_line(text: str, ancestors: tuple[str, ...], masker: Masker, sides: _Sides, rec: _Recorder) -> str | _Drop:
+def _block_hit(text: str, sides: _Sides, *, partial: bool = False) -> tuple[str, int] | None:
+    """text がブロック(PEM・割れた秘密の行のかたまり)の中の行なら、そのブロックの (側, 開始位置)。
+
+    partial が真なら、text の語の並びがブロックの行の語の並びの一部(語の切れ目で)に当たる場合も当てる。
+    行の頭の語や名前を外して持つ項目(NEC IX の `ike proposal <名前> <残り>` の残り・1 行の ACL の `permit …`・名前など。
+    ADR-0209、REQ-292)は、元の行と文字列が同じにならないため。伏せる側に倒れるだけなので、同じ語の並びが
+    ブロックの行にあれば当てる。
+    """
     hit = sides.pem_text.get(text.strip())
+    if hit is not None or not partial:
+        return hit
+    words = " ".join(text.split())
+    if not words:
+        return None
+    padded = f" {words} "
+    for line, found in sides.pem_text.items():
+        if padded in f" {' '.join(line.split())} ":
+            return found
+    return None
+
+
+def _name_in_block(diff: Diff, sides: _Sides, rec: _Recorder) -> bool:
+    """差分の見出しに出る名前(ACL の名前・ipsec の塊の鍵の最後の語)がブロックの行の中にあれば、記録して True。
+
+    これらは項目の値としては判定されず、元の行から外して持つため、ブロックの行に当たったかをここで見る。
+    """
+    names: list[str] = []
+    if diff["category"] in ("acls", "ipv6_acls") and diff["name"]:
+        names.append(str(diff["name"]))
+    if diff["category"] == "ipsec" and len(diff["path"]) >= 2 and diff["path"][0] == "blocks":
+        key_words = str(diff["path"][1]).split()
+        if key_words:
+            names.append(key_words[-1])
+    for name in names:
+        hit = _block_hit(name, sides, partial=True)
+        if hit is not None:
+            sides.record_block(hit, rec)
+            return True
+    return False
+
+
+def _judge_line(
+    text: str, ancestors: tuple[str, ...], masker: Masker, sides: _Sides, rec: _Recorder, *, partial: bool = False
+) -> str | _Drop:
+    hit = _block_hit(text, sides, partial=partial)
     if hit is not None:
         sides.record_block(hit, rec)
         return _DROP
@@ -282,7 +330,7 @@ def _judge_field(
     value: str, prefix: str, ancestors: tuple[str, ...], masker: Masker, sides: _Sides, rec: _Recorder
 ) -> str | _Drop:
     """行の頭の語を外して持つ項目は、語を前に付けた元の行の形で判定し、送るときは語を外す。"""
-    judged = _judge_line(prefix + value, ancestors, masker, sides, rec)
+    judged = _judge_line(prefix + value, ancestors, masker, sides, rec, partial=True)
     if judged is _DROP or not prefix:
         return judged
     if judged.startswith(prefix):
@@ -292,17 +340,40 @@ def _judge_field(
     return _DROP
 
 
+# 行として判定しない(伏せる表を通さない)が、元の行がブロック(折り返した秘密の行のかたまりなど)の中なら送らない項目。
+# NEC IX の `ip filter <ACL 名> <番号> in|out` の行(ADR-0209 決定6、REQ-292)も、ここに入る
+_BLOCK_CHECKED_PATHS = frozenset({"interfaces.*.access_groups[]"})
+
+
+def _key_in_block(key: str, sides: _Sides, rec: _Recorder) -> bool:
+    """ipsec の塊の鍵の最後の語(名前)がブロックの行の中にあれば、記録して True。"""
+    key_words = key.split()
+    hit = _block_hit(key_words[-1], sides, partial=True) if key_words else None
+    if hit is None:
+        return False
+    sides.record_block(hit, rec)
+    return True
+
+
 def _mask_tree(value: Any, path: str, masker: Masker, sides: _Sides, rec: _Recorder) -> Any:
     if value is None:
         return None
     if path in fields.MASKED_FIELDS:
         return masker.mask_value(value)
+    if path in _BLOCK_CHECKED_PATHS and isinstance(value, str):
+        # ACL の名前を持つ行は行として判定しない(ADR-0018 決定2)ので、ブロックの行の中にあるかだけを見る
+        hit = _block_hit(value, sides, partial=True)
+        if hit is not None:
+            sides.record_block(hit, rec)
+            return _DROP
     ancestors = fields.line_ancestors(path)
     if ancestors is not None and isinstance(value, str):
         return _judge_field(value, fields.line_prefix(path), ancestors, masker, sides, rec)
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
+            if path == "ipsec.blocks" and _key_in_block(str(key), sides, rec):
+                continue  # 塊の鍵の名前がブロックの行の中にあれば、その塊は送らない
             masked = _mask_tree(item, fields.child(path, str(key)), masker, sides, rec)
             if masked is _DROP:  # 項目の値が送れない(ACL のエントリの text など)なら、その辞書ごと送らない
                 return _DROP
@@ -336,6 +407,8 @@ def _structured_line(diff: Diff, masker: Masker, sides: _Sides, rec: _Recorder) 
             judged = _judge_parent(parent, tuple(p.strip() for p in parents[:depth]), masker, sides, rec)
             shown.append(_M["omitted"] if judged is None else judged.strip())
         return f"[{op}] unparsed: {' > '.join([*shown, str(masked).strip()])}"
+    if _name_in_block(diff, sides, rec):
+        return None
     before = _mask_tree(diff["before"], _value_path(diff, diff["before"]), masker, sides, rec)
     after = _mask_tree(diff["after"], _value_path(diff, diff["after"]), masker, sides, rec)
     if before is _DROP or after is _DROP:
@@ -602,8 +675,12 @@ def source_of(
     """
     if structured is not None:
         return ("structured", list(structured.diffs)) if structured.diffs else None
+    if show is not None and show.method == "both":
+        return "show", [*show.diffs, *(show.raw.diffs if show.raw else [])]
     if show is not None and show.method == "structured":
         return ("show", list(show.diffs)) if show.diffs else None
+    if show is not None and show.method == "raw":
+        raw = show.raw
     if raw is not None and raw.diffs:
         return "raw", list(raw.diffs)
     return None
@@ -621,6 +698,7 @@ def build_payload(
     before_source: Sequence[str] | None = None,
     after_source: Sequence[str] | None = None,
     include_after_text: bool = False,
+    show_command: str | None = None,
 ) -> Payload | None:
     """送る内容を組み立てる。差分が無ければ None。打ち切りは伏せる前の件数で決める。
 
@@ -633,18 +711,48 @@ def build_payload(
     source, diffs = found
     selected = diffs[:max_diffs]
     rec = _Recorder()
+    secret = secret_show_command(show_command)  # 略した形も当たる。記録には一覧の文を書く(ADR-0202 決定3)
+    # 文脈・親の行の判定より先に止め、元の行から記録の形を作らない。
+    if source == "raw" and secret is not None:
+        for _ in selected:
+            rec.line(f"[{secret}] {SECRET_SHOW_REASON}")
+        after_text = None
+        if include_after_text:
+            for _ in after_lines:
+                rec.line(f"[{secret}] {SECRET_SHOW_REASON}", context=True)
+            after_text = AfterText("", 0, len(after_lines))
+        return Payload(source, "", len(diffs), 0, len(diffs) > max_diffs, rec.result(), after_text)
     sides = _Sides(before_lines, after_lines, before_source, after_source, masker)
     if source == "structured":
         lines, sent = _structured_body(selected, masker, sides, rec)
     elif source == "show":
-        lines, sent = _show_body(selected, masker, rec)
+        table_count = len(show.diffs)
+        lines, sent = _show_body(selected[:table_count], masker, rec)
+        if show.method == "both":
+            raw_selected = selected[table_count:]
+            if secret is not None:
+                for _ in raw_selected:
+                    rec.line(f"[{secret}] {SECRET_SHOW_REASON}")
+            else:
+                raw_lines, raw_sent = _raw_body(raw_selected, show.raw.diffs, masker, sides, rec)
+                if show.raw.options is not None:
+                    raw_lines = [raw_options_line(show.raw.options), *raw_lines]
+                lines += raw_lines
+                sent += raw_sent
     else:
         lines, sent = _raw_body(selected, diffs, masker, sides, rec)
         if raw is not None and raw.options is not None:
             # 単純比較の設定の 1 行(ADR-0166)。件数だけで、利用者の式と置き換える文字は入れない。送った数には数えない
             lines = [raw_options_line(raw.options), *lines]
     # 全文は差分の後に、同じ masker・sides・rec で作る(同じ値は差分と同じ <secret:N>。数は全文の後で取る)
-    after_text = _after_text(masker, sides, rec) if include_after_text else None
+    after_text = None
+    if include_after_text:
+        if show is not None and show.method == "both" and secret is not None:
+            for _ in after_lines:
+                rec.line(f"[{secret}] {SECRET_SHOW_REASON}", context=True)
+            after_text = AfterText("", 0, len(after_lines))
+        else:
+            after_text = _after_text(masker, sides, rec)
     return Payload(source, "\n".join(lines), len(diffs), sent, len(diffs) > max_diffs, rec.result(), after_text)
 
 
@@ -655,12 +763,15 @@ def build_after_text(
     masker: Masker,
     before_source: Sequence[str] | None = None,
     after_source: Sequence[str] | None = None,
+    show_command: str | None = None,
 ) -> AfterText:
     """変更後の全文だけを作る(全部の組をまとめて送った答えへの追加の質問。ADR-0152 決定10)。
 
     判定は build_payload の全文と同じ(_Sides と _after_text をそのまま使う)。masker は差分の本文を作り直した判定器を渡す
     (同じ値は最初の送信と同じ <secret:N> になる)。
     """
+    if secret_show_command(show_command) is not None:
+        return AfterText("", 0, len(after_lines))
     rec = _Recorder()
     sides = _Sides(before_lines, after_lines, before_source, after_source, masker)
     return _after_text(masker, sides, rec)
@@ -700,6 +811,7 @@ class WholeSection:
     after_lines: Sequence[str]
     before_source: Sequence[str] | None
     after_source: Sequence[str] | None
+    show_command: str | None = None
 
 
 @dataclass(frozen=True)
@@ -788,6 +900,7 @@ def whole_body(
             after_source=section.after_source,
             masker=masker,
             max_diffs=max_diffs,
+            show_command=section.show_command,
         )
         if payload is None:
             if section.raw is not None and section.raw.diffs:
@@ -828,3 +941,74 @@ def whole_body(
         structured_zero=structured_zero,
         kinds=tuple(kinds),
     )
+
+
+# --- ほかの Pilot へ返す、伏せた差分の本文(ADR-0203 決定5。REQ-286) ---
+
+# masked_payload.txt だけの印。AI に送る本文の印の表(_MARKS_JA・_MARKS_EN。REQ-260 が値を固定している)には足さない
+_MASKED_MARKS_JA = {"pair_not_sent": "（AI に送らない組のため省略）"}
+_MASKED_MARKS_EN = {"pair_not_sent": "(omitted: this pair is not sent to the AI)"}
+_MM = i18n.choose(_MASKED_MARKS_JA, _MASKED_MARKS_EN)
+MASKED_FINGERPRINT_LINE = "# masking_fingerprint: {digest}"
+MASKED_HEADING = "## {name}"
+
+
+@dataclass(frozen=True)
+class MaskedSection:
+    """伏せた本文の組 1 つ。command は変更前の区間の元のコマンドの文(コマンド不明は None)。
+
+    section が None の組は AI に送らない組(見出しと省略の 1 行だけを書く)。
+    """
+
+    command: str | None
+    section: WholeSection | None
+
+
+@dataclass(frozen=True)
+class MaskedBody:
+    """伏せた差分の本文。text は指紋の行から始まるファイルの中身、not_sent は判定できず送らない側にした行の数。"""
+
+    text: str
+    not_sent: int
+
+
+def masked_body(sections: Sequence[MaskedSection], *, extra_words: Sequence[str] = (), headings: bool) -> MaskedBody:
+    """AI に送るときと同じ伏せ方で、差分の本文だけを作る(指示文・前提の文は入れない。AI は呼ばない)。
+
+    判定器は全部の組で 1 つ(同じ値は同じ <secret:N>)。組ごとに build_payload を、その組の差分の件数を上限にして呼ぶ(打ち切らない)。
+    headings が真なら、組ごとに「## 名前」の見出しを付ける(名前も秘密語の判定を通す)。本文が空の組は書かない。
+    送らない組(section が None)は、見出しと省略の 1 行だけにする。先頭の行は伏せる表の指紋。
+    """
+    masker = Masker(secret_words=normalize_words(extra_words))
+    parts: list[str] = []
+    not_sent = 0
+    for item in sections:
+        names = _Recorder()
+        name = _judge_name(item.command, masker, names) if headings else ""
+        heading = [MASKED_HEADING.format(name=name)] if headings else []
+        not_sent += names.lines + names.context_lines
+        section = item.section
+        if section is None:
+            parts.append("\n".join([*heading, _MM["pair_not_sent"]]))
+            continue
+        found = source_of(section.structured, section.raw, section.show)
+        payload = build_payload(
+            structured=section.structured,
+            raw=section.raw,
+            show=section.show,
+            before_lines=section.before_lines,
+            after_lines=section.after_lines,
+            before_source=section.before_source,
+            after_source=section.after_source,
+            masker=masker,
+            max_diffs=max(1, len(found[1]) if found is not None else 1),
+            show_command=section.show_command,
+        )
+        if payload is None:
+            continue
+        not_sent += payload.unsent.lines + payload.unsent.context_lines
+        if payload.sent_diffs == 0 or not payload.body:
+            continue
+        parts.append("\n".join([*heading, payload.body]))
+    first = MASKED_FINGERPRINT_LINE.format(digest=masking_fingerprint().digest)
+    return MaskedBody("\n\n".join([first, *parts]) + "\n", not_sent)
