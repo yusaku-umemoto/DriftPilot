@@ -192,7 +192,8 @@ class Interface(TypedDict):
     # ほかの行は入れない。ADR-0126 決定3、REQ-171)。Arista の `l2 mtu …`・`l2 mru …`・`node-segment …` と no 付きは
     # 行の原文、子を持たない `comment` から `EOF` までの本文の各行は `comment > <行>`(ADR-0133 決定2・3、REQ-178)。
     # 文字列の昇順。今の項目と同じ設定の行(`channel-group auto` は channel_group_auto など)、秘密の語がある行、子を持つ行は入れない。
-    # None は読んでいない(B型・D型)。A型は読んだうえで無ければ空のリスト
+    # None は読んでいない(B型・D型)。A型は読んだうえで無ければ空のリスト。
+    # Cisco の `[no] logging event <残り>`(`logging event trunk-status` など)も入る(ADR-0217 決定1、REQ-310)
     port_options: list[str] | None
     # PoE の優先度・見張りの行(`power inline port …`・`power inline police …` と no 付き。ADR-0111 決定3。
     # Arista の `poe …`(`poe disabled` だけの行を除く)と no 付きは ADR-0115 決定1)の原文(空白は1つ)の集合。文字列の昇順。秘密の語がある行と子を持つ行は入れない。
@@ -261,6 +262,9 @@ class AclEntry(TypedDict):
 class Acl(TypedDict):
     name: str
     type: AclType
+    # `access-list <番号> …` で作った ACL は True。`ip access-list standard|extended <名前>` の名前が数字だけで、
+    # その番号帯の種類が見出しの種類と同じ(`ip access-list standard 10` など)ときも True(ADR-0217 決定4、REQ-310)。
+    # 比較では、片側が全部 seq なし・もう片側が全部 seq ありのエントリは text の列で比べる
     numbered: bool
     entries: list[AclEntry]
 
@@ -776,7 +780,9 @@ class Global(TypedDict):
     # `fhrp …`・`gnmi-yang`・`gnxi`・`iox`・`vlan filter …` の行と `ipv6 dhcp pool <残り>`・`sampler <残り>`・
     # `app-hosting <残り>`・`router lisp[ <残り>]`・`gnmi-yang <残り>`・`gnxi <残り>` のブロックは ADR-0123 決定1、REQ-168。
     # `udld …`・`switch <数> priority …`・`privilege …` の行と `ip sla <数>`・`track <数> …`・
-    # `object-group network|service <名前>`・`time-range <名前>` のブロックは ADR-0128 決定1、REQ-173。`key chain` は読まない)
+    # `object-group network|service <名前>`・`time-range <名前>` のブロックは ADR-0128 決定1、REQ-173。`key chain` は読まない)。
+    # 最上位の `[no] ap <残り>` の行と `ap <残り>` のブロック(`ap profile <名前>` など)は ADR-0217 決定2、REQ-310
+    # (ap の行だけ、伏せる表の秘密語がある行も読まない)
     device_settings: list[str]
     # ほかの `ntp …`・`logging …` の行の残りの集合。重ねない。昇順(ADR-0050、REQ-61)。
     # `no ntp <残り>` は `no <残り>`(no logging と同じ持ち方。ADR-0121、REQ-166)。
@@ -803,7 +809,9 @@ class Global(TypedDict):
     vlan_internal: str | None
     # `ip virtual-router mac-address <MAC>` の <MAC>。None は行が無い
     virtual_router_mac: str | None
-    # 認証サーバー(TACACS+・RADIUS)とサーバーのグループ(ADR-0070、REQ-81)。鍵の値は持たない
+    # 認証サーバー(TACACS+・RADIUS)とサーバーのグループ(ADR-0070、REQ-81)。鍵の値は持たない。
+    # 子を持つ `aaa server radius dynamic-author` は servers["radius dynamic-author"] に読む(中の `client … server-key …` は
+    # server-key の語までを settings に、後ろの鍵の値は捨てて key_configured を True にする。ADR-0217 決定3、REQ-310)
     aaa_servers: AaaServers
     # バナーの種類(`banner` の次の語) → 区切りの間の本文(前後の改行を外す。ADR-0116 決定1、REQ-161)。
     # 区切りの違い(`^C`・`#` など)は持たない。秘密の語がある本文は入れない。B型・D型は空の辞書

@@ -17,7 +17,8 @@ from dataclasses import dataclass
 INSTRUCTION = "instruction"
 DIFF = "diff"
 FULL = "full"
-READ_ONLY_KINDS = (DIFF, FULL)
+FILE_NAMES = "file_names"  # 組の案を聞く文のファイル名の欄(REQ-313)
+READ_ONLY_KINDS = (DIFF, FULL, FILE_NAMES)
 _KINDS = (INSTRUCTION, *READ_ONLY_KINDS)
 
 

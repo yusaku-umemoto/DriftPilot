@@ -2095,6 +2095,8 @@ COMPARE_BUTTON_PASTE = "貼り付け…"
 COMPARE_BUTTON_PREV = "前の差分"
 COMPARE_BUTTON_NEXT = "次の差分"
 COMPARE_BUTTON_RUN = "比較実行"
+# 一括比較の窓の「比較画面で開く」の後、一括比較が動いていて比べ始められなかったときの窓の下の知らせ(ADR-0216 決定3)
+HANDOFF_NOT_STARTED = f"一括比較が動いているため、まだ比べていません。終わったら「{COMPARE_BUTTON_RUN}」を押してください"
 COMPARE_BUTTON_SAVE = "結果を保存…"
 COMPARE_BUTTON_CANCEL = "中止"
 COMPARE_BUTTON_BATCH = "一括比較…"
@@ -2103,7 +2105,7 @@ COMPARE_BUTTON_SWAP = "入れ替え"  # pywebview の比較の画面だけ(ADR-0
 # pywebview の比較の画面だけ(ADR-0080 決定1・2。wx の画面はチェックボックスのまま)
 COMPARE_BUTTON_SEND_LLM = "AI に送る"
 COMPARE_AUTO_SENDING = "AI に送っています"
-# 「AI で解析」の送る前の確認を作っている間の AI の面の文(REQ-264。比較はやり直さないので比較の工程の名前は出さない)
+# 「定型の質問で解析」の送る前の確認を作っている間の AI の面の文(REQ-264。比較はやり直さないので比較の工程の名前は出さない)
 COMPARE_AI_PREPARING = "AI に送る内容を作っています"
 COMPARE_LLM_PANE = "AI 解析"
 # 知らせ(wx の MessageBox)の題
@@ -2199,6 +2201,7 @@ COMPARE_MULTI_COL_COMMAND = "コマンド"
 COMPARE_MULTI_COL_STATUS = "状態"
 COMPARE_MULTI_COL_DIFFS = "差分"
 COMPARE_MULTI_COL_SEND = "AI に送る"
+COMPARE_MULTI_SEND_MARK = "AI"  # コマンドの組の見出しの「AI に送る」の列に付ける印(ADR-0216 決定5)
 COMPARE_MULTI_SEND_ALL = "すべて選ぶ・すべて外す"
 # 一覧の、片方のログにしかないコマンドの区間の行の状態(ADR-0164 決定3)。無い側を言う
 MULTI_NO_AFTER = "変更後なし"  # 変更前にだけある区間
@@ -2392,12 +2395,41 @@ COMPARE_SPLIT_LABEL = "比較の表と AI の面の境目"
 COMPARE_MULTI_SPLIT_LABEL = "コマンドの組と比較の表の境目"
 # 届いたところまでの答えを中止したときの注記(ADR-0157 決定7)。途中の答えの吹き出しの下に出す
 COMPARE_PARTIAL_STOPPED = "中止しました。途中までの答えです。保存しません"
-COMPARE_AI_EMPTY = "比較した後に「AI で解析」を押すと、ここに AI の答えが出ます"
-COMPARE_AI_INPUT = "AI への質問や指示"
-COMPARE_AI_INPUT_HINT = "Enter で送信、Shift+Enter で改行"
+COMPARE_AI_EMPTY = (
+    "比較した後に「定型の質問で解析」を押すと、選んだプロンプト（定型の質問）で AI が差分を説明します。"
+    "下の欄に質問を打って送ると、今表示している差分だけを AI が調べます"
+)
+COMPARE_AI_INPUT = "AI への質問（今表示している差分について聞きます）"
+COMPARE_AI_INPUT_HINT = "Shift+Enter で送信、Enter で改行"
 COMPARE_AI_PROFILE = "AI プロファイル"
 COMPARE_AI_PROMPT = "プロンプト"
-COMPARE_AI_ANALYZE = "AI で解析"
+COMPARE_AI_ANALYZE = "定型の質問で解析"
+# 欄に質問を打ったときのボタンの名前と、押せない・対象が違うときの文(REQ-312 / ADR-0218 決定3)。質問の中身は入れない
+COMPARE_AI_ASK_SHOWN = "表示中の差分に質問"
+COMPARE_AI_ASK_FOLLOW_UP = "続けて質問"
+COMPARE_AI_ASK_TARGET_NOTE = "表示が前の答えと違うため、新しい質問として送ります（前のやり取りは消えます）"
+COMPARE_AI_SHOWN_UNREAD = "表示している内容を読み取れていません。タブを選び直してください"
+COMPARE_AI_SHOWN_UNPARSED = "構造化不可の行は差分ではないため、質問できません"
+COMPARE_AI_SHOWN_ROW = "この行（AI に送らない組・相手なし・1 回だけ）は質問できません"
+COMPARE_AI_SHOWN_NO_RAW = "単純比較の結果がありません"
+COMPARE_AI_SHOWN_NO_DIFF = "表示している差分がありません"
+COMPARE_AI_TARGET_STRUCTURED = "構造化比較"
+COMPARE_AI_TARGET_RAW = "単純比較"
+COMPARE_AI_TARGET_WHOLE = "全コマンド比較結果（選んだ組）"
+
+
+def compare_ai_target(kind: str, category: str | None = None, command: str | None = None) -> str:
+    """AI の面の「質問の対象: …」(画面に出すだけで、送る文には入れない)。kind は structured・raw・whole。"""
+    if kind == "whole":
+        name = COMPARE_AI_TARGET_WHOLE
+    else:
+        name = COMPARE_AI_TARGET_STRUCTURED if kind == "structured" else COMPARE_AI_TARGET_RAW
+        if kind == "structured" and category is not None:
+            name = f"{name}・カテゴリ {category}"
+        if command:
+            name = f"{name}（{command}）"
+    return f"質問の対象: {name}"
+
 # まとめて比べたとき、AI に送る組を選ぶ(REQ-265。ADR-0193 決定3)
 COMPARE_AI_NO_PAIRS = "AI に送る組を 1 つ以上選んでください"
 
@@ -2411,8 +2443,11 @@ def compare_send_pairs(on: int, total: int) -> str:
 # 窓に出すだけ。保存・HTML・CSV・コピー・送る文には入れない(決定3)
 CHARACTER_NAME = "Mirarin"
 CHARACTER_AVATAR_TITLE = "答えは選んだ AI プロファイルのモデルが書いています"
-COMPARE_AI_ANALYZE_CHARACTER = "AI（Mirarin）で解析"
-COMPARE_AI_EMPTY_CHARACTER = "比較した後に「AI（Mirarin）で解析」を押すと、ここに Mirarin が答えます"
+COMPARE_AI_ANALYZE_CHARACTER = "AI（Mirarin）に定型の質問"
+COMPARE_AI_EMPTY_CHARACTER = (
+    "比較した後に「AI（Mirarin）に定型の質問」を押すと、選んだプロンプト（定型の質問）で Mirarin が差分を説明します。"
+    "下の欄に質問を打って送ると、今表示している差分だけを Mirarin が調べます"
+)
 COMPARE_COPY = "コピー"
 COMPARE_AI_PROFILE_FAILED_TITLE = "AI プロファイルを切り替えられません"
 COMPARE_PROMPT_FAILED_TITLE = "プロンプトを切り替えられません"
@@ -2443,7 +2478,7 @@ def follow_up_destination_changed(before: str, now: str) -> str:
 # 最初の依頼をチャットに残す・保存したやり取りから続けて質問する(ADR-0179 / REQ-242)。pywebview の比較の窓と AI の窓だけ。
 # 打った文は view にだけ入れ、ここの文には入れない(名前はプロンプトとプロファイルの名前だけ)
 def COMPARE_FIRST_REQUEST_PROMPT(name: str) -> str:  # noqa: N802 (名前は REQ-242 §2 のとおり)
-    """打たずに「AI で解析」で送ったときの最初の依頼の吹き出しの文(決定1)。name は送ったときのプロンプトの名前。"""
+    """打たずに「定型の質問で解析」で送ったときの最初の依頼の吹き出しの文(決定1)。name は送ったときのプロンプトの名前。"""
     return f"プロンプト『{name}』で解析"
 
 
@@ -2505,7 +2540,7 @@ def COMPARE_FULL_TEXT_PAIR(name: str) -> str:  # noqa: N802 (名前は REQ-237 �
 COMPARE_HANDED_ANSWER_TITLE = "一括比較の答え"
 # 比べ直した差分が一括比較で送ったときと違い、答えを付けなかった(決定3)
 COMPARE_HANDED_ANSWER_UNUSED = (
-    "一括比較で送ったときと差分が違うため、一括比較の答えは使いませんでした。「AI で解析」から送ってください"
+    "一括比較で送ったときと差分が違うため、一括比較の答えは使いませんでした。「定型の質問で解析」から送ってください"
 )
 
 
@@ -2583,6 +2618,7 @@ GUI_WEB_TEXTS.update(
         "compare.multi.col.status": COMPARE_MULTI_COL_STATUS,
         "compare.multi.col.diffs": COMPARE_MULTI_COL_DIFFS,
         "compare.multi.col.send": COMPARE_MULTI_COL_SEND,
+        "compare.multi.send_mark": COMPARE_MULTI_SEND_MARK,
         "compare.multi.send_all": COMPARE_MULTI_SEND_ALL,
         "compare.multi.choose_partner": COMPARE_MULTI_CHOOSE_PARTNER,
         "compare.multi.unpair": COMPARE_MULTI_UNPAIR,
@@ -2674,9 +2710,23 @@ BATCH_SAVED_TITLE = "保存しました"
 # どの文にも接続先の URL・キー・CLI の場所を入れない
 BATCH_AI_CHECK = "内容を確かめる…"
 BATCH_APPROVAL_CLOSE = "閉じる"  # 「内容を確かめる…」の確認のボタン(送らない)
+# 送信前の確認の「指示文を直す（この送信だけ）」(REQ-313 / ADR-0218 決定6)。どの文にもひな形・指示・秘密の値を入れない
+BATCH_APPROVAL_EDITED_LINE = "指示文: この送信だけ直した文"
+BATCH_EDIT_TITLE = "指示文を直す（この送信だけ）"
+BATCH_EDIT_REBUILD = "直した指示文で作り直す"
+BATCH_EDIT_NOT_SAVED = "直した文はこの送信だけに使い、保存しません"
+BATCH_EDIT_SHOW_TOO = "直すと、show の組にも同じ文を使います（「状態の確認」に入れ替えません）"
+BATCH_EDIT_REFUSED_TITLE = "指示文を直せません"
+
+
+def batch_edit_template_invalid(kind: str) -> str:
+    """直した指示文がひな形の決まりに合わないとき(作り直していない)。種類の句だけで、文の中身は入れない。"""
+    return f"指示文{PROMPT_TEMPLATE_PROBLEM[kind]}。作り直していません"
+
+
 BATCH_AI_FOLLOW_UP_NOTE = "質問するときは、ダブルクリックして比較の窓で開きます"
 BATCH_AUTO_SEND_ON = "自動で AI に送る: オン（実行の後に送る内容のリストを出します。「送る」を押すまで送りません）"
-# 「AI で解析」「内容を確かめる…」を押せない理由(AI の行の下の注記とボタンの title に出す。ADR-0175 決定3)
+# 「定型の質問で解析」「内容を確かめる…」を押せない理由(AI の行の下の注記とボタンの title に出す。ADR-0175 決定3)
 BATCH_AI_REASON_NOT_RUN = "実行した後に送れます"
 BATCH_AI_REASON_RUNNING = "実行が終わってから送れます"
 BATCH_AI_REASON_APPROVAL = "送る前の確認と送信が終わってから送れます"
@@ -2686,7 +2736,7 @@ BATCH_AI_REASON_NO_TARGET = "送れる差分のある組がありません"
 
 def batch_ai_title(pairs: int, diffs: int) -> str:
     """AI の場所の題。外していない組のうち、結果があり、失敗でなく、送る差分がある組の数と差分の合計。"""
-    return f"AI で解析する組: {pairs} 件・差分 {diffs} 件"
+    return f"定型の質問で解析する組: {pairs} 件・差分 {diffs} 件"
 
 
 def batch_run_label(count: int) -> str:
@@ -2774,12 +2824,12 @@ GUI_WEB_TEXTS.update(
         "batch.drop_guide": BATCH_DROP_GUIDE,
         "batch.button.swap": COMPARE_BUTTON_SWAP,
         "batch.button.swap_icon": COMPARE_BUTTON_SWAP_ICON,
-        # AI の場所(REQ-213)。プロファイルとプロンプトの名前・「AI で解析」・コピーは比較の窓と同じ文
+        # AI の場所(REQ-213)。プロファイルとプロンプトの名前・「定型の質問で解析」・コピーは比較の窓と同じ文
         "batch.ai.profile": COMPARE_AI_PROFILE,
         "batch.ai.prompt": COMPARE_AI_PROMPT,
         "batch.button.ai_check": BATCH_AI_CHECK,
         "batch.button.ai_send": COMPARE_AI_ANALYZE,
-        # キャラクターがオンのときの「AI で解析」(ADR-0181 決定2。batch.js が view の character で替える)
+        # キャラクターがオンのときの「定型の質問で解析」(ADR-0181 決定2。batch.js が view の character で替える)
         "batch.button.ai_send.character": COMPARE_AI_ANALYZE_CHARACTER,
         "batch.button.copy": COMPARE_COPY,
         "batch.ai.follow_up_note": BATCH_AI_FOLLOW_UP_NOTE,
@@ -2790,8 +2840,10 @@ GUI_WEB_TEXTS.update(
 # 一括比較の窓(pywebview)で組を直す・外す・組にする・機種を自動で選ぶ(REQ-212 / ADR-0153 決定4〜8)
 BATCH_JOB_EXCLUDED = "外した組"  # 表の状態の列
 BATCH_PLATFORM_UNDETECTED_ROW = "自動: 判定できません"  # 自動の組で、判定なし・食い違いのときの機種の列
-# まとめて比べた組(ADR-0178 決定2)で、config のコマンドごとに機種が分かれたときの機種の列
-BATCH_AUTO_PLATFORM_MIXED = "自動（複数）"
+# まとめて比べた組(ADR-0178 決定2)で、config のコマンドごとに機種が分かれたときの機種の列(ADR-0216 決定2)
+BATCH_AUTO_PLATFORM_MIXED = f"{AUTO_PLATFORM_LABEL}: 複数"
+# 自動の組で、結果に config が無いとき(まとめて比べて config のコマンドの組が無い・1 区間の組が show)の機種の列(ADR-0216 決定2)
+BATCH_AUTO_PLATFORM_NO_CONFIG = f"{AUTO_PLATFORM_LABEL}: config なし"
 # 選択待ちの組を選んだときの答えの欄の理由(ADR-0178 決定5)。{count} は区間の数、{commands} は区間のコマンドの名前の並び
 BATCH_WAITING_SEGMENT = (
     "このファイルには区間が {count} 個あり、区間の指定に合う区間を 1 つに決められませんでした。"
@@ -2934,6 +2986,9 @@ BATCH_PAIR_AI_NOTE = "ファイル名にホスト名が入っていないか確�
 BATCH_PAIR_AI_HELD_BACK = "送らないファイル"
 # 送る全文の欄の見出し。組の案を聞く送信には答えの見え方の決まり(LOOK_RULES)を足さないので、この文だけを送る(ADR-0177 決定4)
 BATCH_PAIR_AI_PROMPT_TITLE = "送る文（この文だけを送ります）:"
+# 送る全文を、直せる指示の欄と直せないファイル名の欄に分けた見出しと注意(REQ-313 / ADR-0218 決定7)
+BATCH_PAIR_AI_FILE_NAMES_TITLE = "ファイル名（直せません）"
+BATCH_PAIR_AI_EDIT_NOTE = "答えの形（JSON）の行を消すと、答えを読めなくなります"
 BATCH_PAIR_AI_NO_FILES = "送るファイルがありません"
 BATCH_PAIR_AI_UNREADABLE = "AI の案を読めませんでした。何も組にしていません"
 BATCH_PAIR_AI_NONE = "AI の案はありませんでした"
@@ -3219,12 +3274,21 @@ AI_PANE_TITLE = "DriftPilot — AI 解析"
 COMPARE_AI_DETACH = "別の窓で開く"  # AI の面の見出しの右端の「↗」の title と aria-label
 COMPARE_AI_FRONT = "別の窓を前に出す"  # 別の窓が開いている間、結果のタブの行の右端に出す「↗」の title と aria-label
 COMPARE_AI_DETACH_ICON = "↗"  # どちらのアイコンも同じ文字(HTML に文を書かない決まりのため、data-text で入れる)
+# AI の欄を隠す・出す(ADR-0216 決定5)。比較の窓だけ。隠した状態は窓の間だけ覚える
+COMPARE_AI_HIDE = "AI の欄を隠す"  # AI の面の見出しの「»」の title と aria-label
+COMPARE_AI_HIDE_ICON = "»"
+COMPARE_AI_SHOW = "AI の欄を出す"  # 結果のタブの行の右端の「« AI」の title と aria-label
+COMPARE_AI_SHOW_TEXT = "« AI"
 
 GUI_WEB_TEXTS.update(
     {
         "compare.ai.detach": COMPARE_AI_DETACH,
         "compare.ai.front": COMPARE_AI_FRONT,
         "compare.ai.detach_icon": COMPARE_AI_DETACH_ICON,
+        "compare.ai.hide": COMPARE_AI_HIDE,
+        "compare.ai.hide_icon": COMPARE_AI_HIDE_ICON,
+        "compare.ai.show": COMPARE_AI_SHOW,
+        "compare.ai.show_text": COMPARE_AI_SHOW_TEXT,
     }
 )
 
@@ -3290,11 +3354,85 @@ RAW_IGNORE_EXAMPLES: tuple[tuple[str, str], ...] = (
     ("稼働時間（uptime）の行", r"\buptime is "),
     ("FortiGate の「#config-version=」の行", r"^#config-version="),
 )
-# 例(文・式・置き換える文字)
+# 例(文・式・置き換える文字)。REQ-311 / ADR-0217 決定 5。
+# 1〜4 は前後の空白（半角の空白とタブ）も含めて当て、置き換える文字の前後に半角の空白を 1 つずつ付ける
+# （表の列の幅が値の長さで変わっても同じ鍵にするため。置き換える文字の前後の空白は画面・保存・読み込みで削らない）。
+# 1 と 2 は同じ置き換える文字（23:59:59 と 1d00h を同じ鍵にする）
 RAW_REPLACE_EXAMPLES: tuple[tuple[str, str, str], ...] = (
-    ("時刻（12:34:56）を <時刻> にする", r"\b\d{1,2}:\d{2}:\d{2}(\.\d+)?\b", "<時刻>"),
-    ("稼働時間の値を <稼働時間> にする", r"(uptime is ).*", r"\1<稼働時間>"),
+    (
+        "時刻（12:34:56・Si-R の経路の 00:14:55 など）を <時間> にする（config の鍵の期限の時刻も隠れます）",
+        r"[ \t]*(?<![\w:.])(?:\d+:)?\d+:[0-5]\d:[0-5]\d(?:\.\d+)?(?![\w:])[ \t]*",
+        " <時間> ",
+    ),
+    (
+        "経過時間の短縮形（Si-R の経路の 1w5d16h・6d23h45m、2d03h など）を <時間> にする（経路のつなぎ直しも見えなくなります）",
+        r"[ \t]*(?<![\w.:])(?=\d+[ywdhms]\d)(?:\d+y)?(?:\d+w)?(?:\d+d)?(?:\d+h)?(?:\d+m)?(?:\d+s)?(?![\w.:])[ \t]*",
+        " <時間> ",
+    ),
+    (
+        "日付（2026-11-16・2026/11/16・11/16/2026）を <日付> にする（config の予定・期限の日付も隠れます）",
+        r"[ \t]*(?<![\w/.:-])(?:(?:19|20)\d\d([-/])(?:0?[1-9]|1[0-2])\1(?:0?[1-9]|[12]\d|3[01])"
+        r"|(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12]\d|3[01])/(?:19|20)\d\d)(?![\d/-])[ \t]*",
+        " <日付> ",
+    ),
+    (
+        "月の名前の日付（Mon Nov 16・Nov 16 2026）を <日付> にする",
+        r"[ \t]*\b(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) +)?"
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d{1,2}(?![\d:])(?:,? +(?:19|20)\d\d)?(?!\w)[ \t]*",
+        " <日付> ",
+    ),
+    ("稼働時間の値（uptime is …・Uptime: …）を <稼働時間> にする", r"(?i)(\buptime\s*(?:is|:|=)\s*).*", r"\1<稼働時間>"),
     ("数（カウンタなど）を <数> にする（すべての数に当たります）", r"\b\d+\b", "<数>"),
+)
+
+# 正規表現の書き方の解説(REQ-311 / ADR-0217 決定 6)。比較の窓と設定の窓の「単純比較」の閉じた折りたたみ(#rawopt-help)。
+# 書き方と例の欄は、式そのものを見せるので半角のかっこを使う(式は写して動く必要がある)。
+# 半角かっこの決まりの例外は、テストが鍵の名前を一覧で名指しする(前置きや型では外さない)。
+# 数(200・20・1,000)は文に直接書く。raw_keys の MAX_PATTERN_CHARS・MAX_PATTERNS・MAX_MATCH_CHARS と合うことをテストで確かめる
+RAW_HELP_TITLE = "正規表現の書き方"
+RAW_HELP_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("syntax", "書き方"),
+    ("meaning", "意味"),
+    ("example", "例"),
+)
+# (名前, 書き方, 意味, 例)。表の行の順
+RAW_HELP_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    ("dot", r".", "何か 1 文字", r"a.c"),
+    ("classes", r"\d・\w・\s", "数字 1 文字・英数字か _ の 1 文字・空白 1 文字", r"\d\d"),
+    ("boundary", r"\b", "語の境目", r"\bvlan\b"),
+    ("anchors", r"^・$", "行の頭・行の終わり", r"^interface "),
+    ("repeat", r"*・+・?", "前の 1 つが 0 回以上・1 回以上・0 か 1 回", r"\d+"),
+    ("count", r"{2,4}", "前の 1 つが 2〜4 回", r"\d{1,3}"),
+    ("set", r"[0-9a-f]・[^ ]", "中のどれか 1 文字・中に無い 1 文字", r"[0-9a-f]{4}"),
+    ("group", r"(…)", r"まとまり。置き換える文字の \1 で中身を使える", r"(uptime is ).*"),
+    ("either", r"a|b", "どちらか", r"(?:permit|deny) "),
+    ("plain_group", r"(?:…)", "番号の付かないまとまり", r"(?:\d+\.){3}\d+"),
+    ("around", r"(?<!…)・(?!…)", "前・後ろが … でないときだけ当たる", r"(?<![\w:])\d+:\d\d"),
+    ("escape", r"\.・\(", "記号そのもの", r"192\.0\.2\.1"),
+    ("ignore_case", r"(?i)", "式の頭に書くと、大文字と小文字を区別しない", r"(?i)uptime"),
+)
+# (名前, 文)。注意の箇条の順
+RAW_HELP_NOTES: tuple[tuple[str, str], ...] = (
+    ("re", "Python の re の書き方です。式は行のどこに当たってもかまいません（行の全体に当てるときは ^ と $ を付けます）"),
+    (
+        "replace",
+        r"置き換えは、当たる所を全部置き換えます。置き換える文字の \1 は 1 つ目の (…) の中身です。\ そのものは \\ と書きます",
+    ),
+    ("compare_only", "置き換えた文字は比べるためだけに使います。画面・AI に送る行・保存は元の行のままです"),
+    (
+        "same_line",
+        "左右で同じ文字になった行は、同じ行とみなします。時刻と経過時間の例は、同じ <時間> にしてあります。"
+        "時刻・経過時間・日付の例は、表の列の幅が変わっても同じになるよう、前後の空白もまとめて 1 つにします",
+    ),
+    (
+        "refused",
+        "使えない式: 繰り返しの中に繰り返しか | がある式（(a+)+・(a|b)* など）と、無視する行で空の文字に当たる式（.*・^$ など）",
+    ),
+    (
+        "limits",
+        "式は 1 つ 200 文字まで、無視する行は 20 個・置き換えは 20 組までです。当てるのは行の頭から 1,000 文字までです",
+    ),
+    ("hides", "無視と置き換えは、本当の変更も隠します。使っている設定は、比べた結果の下に出ます"),
 )
 
 
@@ -3463,6 +3601,130 @@ GUI_WEB_TEXTS.update(
         "raw_options.algorithm.patience": RAW_ALGORITHM_LABEL["patience"],
         "raw_options.algorithm.note": "最小は、変更が 1,000 行を超えると標準で比べます",
         "batch.note.raw_options": BATCH_NOTE_RAW_OPTIONS,
+        # REQ-311: 正規表現の書き方の解説(閉じた折りたたみ #rawopt-help)
+        "raw_options.help": RAW_HELP_TITLE,
+        **{f"raw_options.help.col.{name}": text for name, text in RAW_HELP_COLUMNS},
+        **{
+            f"raw_options.help.row.{name}.{part}": value
+            for name, syntax, meaning, example in RAW_HELP_ROWS
+            for part, value in (("syntax", syntax), ("meaning", meaning), ("example", example))
+        },
+        **{f"raw_options.help.note.{name}": text for name, text in RAW_HELP_NOTES},
+    }
+)
+
+
+# --- 単純比較の設定の「AI に式を頼む…」(REQ-314 / ADR-0218 決定8) ---
+# どの文にも、貼った行・説明・答えの文・式・re.error の文を入れない(理由の種類だけ)
+RULE_AI_TITLE = "AI に式を頼む"  # 送信前の確認の題
+RULE_AI_PROMPT_TITLE = "送る文（この文だけを送ります。読むだけです）:"
+RULE_AI_NOTE = "貼った行と説明に、ホスト名などが入っていないか確かめてください"
+RULE_AI_SEND = "送信する"
+RULE_AI_DONT_SEND = "送信しない"
+RULE_AI_NO_LINES = "貼った行がありません。送っていません"
+RULE_AI_NO_SENDABLE = "送れる行がありません"
+RULE_AI_UNSEEN = "貼った行に見えない文字が入っているため、送っていません"
+# 説明を断った理由の種類(llm_analyzer/follow_up.py の REFUSE_*)
+RULE_AI_DESCRIPTION_REFUSED = {
+    "blank": "どこをそろえたいかを書いてください。送っていません",
+    "too_long": "どこをそろえたいかの説明は 500 字までにしてください。送っていません",
+    "mask": "説明に、伏せる対象になる文字があります。書き直してください。送っていません",
+    "unsent": "説明に、送れない行があります。書き直してください。送っていません",
+    "pem": "説明に、証明書や鍵の行があります。書き直してください。送っていません",
+}
+# 答えを読めなかった理由(llm_analyzer/rule_suggestion.py の REASON_*)
+RULE_AI_REASON_TEXT = {
+    "no_pattern": "PATTERN: の行がありません",
+    "many_patterns": "PATTERN: の行が 2 つ以上あります",
+    "no_replacement": "REPLACEMENT: の行がありません",
+    "too_long": "答えが長すぎます",
+    "shape": "答えの形が違います",
+}
+# 式の確かめで入れなかった理由(rule_suggestion の PROBLEM_*)
+RULE_AI_PROBLEM_TEXT = {
+    "too_long": "式か置き換える文字が長すぎます",
+    "bad_pattern": "式を正規表現として読めません",
+    "nested_repeat": "入れ子の繰り返しを含む式は使えません",
+    "matches_empty": "空の文字に当たる式は使えません",
+    "bad_replacement": "置き換える文字の書き方に誤りがあります",
+    "no_match": "貼った行のどれにも当たりません",
+}
+RULE_AI_NOT_COMPARED = "（比べません）"  # 「行ごと比べない」の表の「後」の欄
+RULE_AI_ASKING = "AI に式を頼んでいます…"
+
+
+def rule_ai_destination(name: str, model: str | None, base_url: str | None) -> str:
+    """送信前の確認の送り先(組の案と同じ出し方)。キーは入れない。"""
+    return batch_pair_ai_destination(name, model, base_url)
+
+
+def rule_ai_unavailable(reason: str | None) -> str:
+    """式を頼む接続が使えないとき(キーが無いなど。送っていない)。"""
+    return f"AI に式を頼めません: {_LLM_REASON.get(reason or '', f'理由: {reason}')}"
+
+
+def rule_ai_too_many_lines(count: int, limit: int) -> str:
+    """貼った行が上限を超えたとき(一部だけ送ることはしない)。"""
+    return f"貼った行が {count:,} 行あり、上限の {limit:,} 行を超えています。1 行も送っていません"
+
+
+def rule_ai_too_many_chars(count: int, limit: int) -> str:
+    """貼った文字が上限を超えたとき(一部だけ送ることはしない)。"""
+    return f"貼った文字が {count:,} 字あり、上限の {limit:,} 字を超えています。1 字も送っていません"
+
+
+def rule_ai_prompt_too_long(limit: int) -> str:
+    return f"送る文が {limit:,} 文字を超えるため、送っていません"
+
+
+def rule_ai_omitted(count: int) -> str:
+    """送信前の確認の、判定できず除いた行の数。"""
+    return f"判定できず、送らない行: {count} 行"
+
+
+def rule_ai_failed(reason: str, error_type: str, status_code: int | None) -> str:
+    """送信の失敗(理由の文と、例外の型の名前・HTTP の状態コードだけ。例外の文面は入れない)。"""
+    detail = f"種類: {error_type}" + (f"、HTTP {status_code}" if status_code is not None else "")
+    return f"AI に式を頼めませんでした: {_LLM_REASON.get(reason, f'理由: {reason}')}（{detail}）"
+
+
+def rule_ai_unreadable(reason: str) -> str:
+    """AI の答えを読めなかったとき。理由の種類だけ(答えの文は入れない)。"""
+    return f"AI の答えを読めませんでした（理由: {RULE_AI_REASON_TEXT.get(reason, reason)}）。欄には入れません"
+
+
+def rule_ai_problem(kind: str) -> str:
+    """式を欄に入れられないとき。誤りの種類だけ(re.error の文は入れない)。"""
+    return f"AI の式を欄に入れられません: {RULE_AI_PROBLEM_TEXT.get(kind, kind)}"
+
+
+def rule_ai_match_count(matched: int, total: int) -> str:
+    """「貼った 12 行のうち 12 行に当たります」。"""
+    return f"貼った {total} 行のうち {matched} 行に当たります"
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "raw_options.ai.button": "AI に式を頼む…",
+        "raw_options.ai.title": RULE_AI_TITLE,
+        "raw_options.ai.lines": "そろえたい行（貼り付け。100 行まで）",
+        "raw_options.ai.description": "どこをそろえたいか",
+        "raw_options.ai.description.hint": "例: 行の先頭の時刻",
+        "raw_options.ai.kind": "作る規則",
+        "raw_options.ai.kind.replace": "置き換える",
+        "raw_options.ai.kind.ignore": "行ごと比べない",
+        "raw_options.ai.full": "欄がいっぱいの種類は選べません（置き換え 20 組・無視する行 20 個まで）",
+        "raw_options.ai.check": "送る内容を確かめる…",
+        "raw_options.ai.close": "閉じる",
+        "raw_options.ai.asking": RULE_AI_ASKING,
+        "raw_options.ai.result.pattern": "式",
+        "raw_options.ai.result.replacement": "置き換える文字",
+        "raw_options.ai.result.note": "説明",
+        "raw_options.ai.result.before": "貼った行（前）",
+        "raw_options.ai.result.after": "そろえた後（後）",
+        "raw_options.ai.result.local": "この表は、貼った元の行に手元で式を当てた結果です（この表は送っていません）",
+        "raw_options.ai.add": "欄に入れる",
+        "raw_options.ai.skip": "入れない",
     }
 )
 
@@ -3573,8 +3835,8 @@ _MIB = 1024 * 1024
 
 
 def update_downloading(done: int, total: int) -> str:
-    """取ってきている間の進み具合(1 MB = 1,048,576 バイト。小数 1 桁)。"""
-    return f"取ってきています… {done / _MIB:.1f} / {total / _MIB:.1f} MB"
+    """ダウンロードしている間の進み具合(1 MB = 1,048,576 バイト。小数 1 桁)。"""
+    return f"ダウンロード中… {done / _MIB:.1f} / {total / _MIB:.1f} MB"
 
 
 def update_apply_confirm(version: str) -> str:
@@ -4506,16 +4768,13 @@ def device_notice_text(before: Sequence[str], after: Sequence[str]) -> str:
 
 
 def device_split_confirm_body() -> str:
-    """書き出す前の注意のダイアログの本文(元の config と同じ扱いにする注意を付ける)。"""
-    return (
-        f"機器ごとに分けたファイルは、{save_caution()}。"
-        "書き出す先のフォルダーを選んでください。その下に新しいフォルダーを作って書きます（元のファイルは変えません）。"
-    )
+    """書き出す前のダイアログの本文(フォルダーを選ぶ 1 文。社外秘の注意は書いた後の知らせに付く。ADR-0216 決定1)。"""
+    return "分割したファイルを置くフォルダーを選んでください。"
 
 
 def device_split_done(folder: Path, before_count: int, after_count: int) -> str:
-    """書き終えたときの、窓の下の知らせ。"""
-    return f"機器ごとに分けました: {folder}（変更前 {before_count} 台・変更後 {after_count} 台）"
+    """書き終えたときの、窓の下の知らせ。後ろに社外秘の注意を付ける(ADR-0216 決定1)。"""
+    return f"機器ごとに分けました: {folder}（変更前 {before_count} 台・変更後 {after_count} 台）。分けたファイルは{save_caution()}"
 
 
 def device_split_failed(reason: str, folder: Path | None) -> str:
@@ -4523,14 +4782,15 @@ def device_split_failed(reason: str, folder: Path | None) -> str:
     base = f"機器ごとのファイルを書けませんでした: {reason}"
     if folder is None:
         return base
-    return f"{base}。途中まで書いたものは {folder} に残しています（消していません）"
+    return f"{base}。途中まで書いたものは {folder} に残しています（消していません）。分けたファイルは{save_caution()}"
 
 
 def device_split_not_opened(folder: Path) -> str:
     """ファイルは書いたが、一括比較の窓には入れられなかったとき。"""
     return (
         f"機器ごとのファイルは {folder} に書きました。"
-        "一括比較の窓では組を直している途中か比較が動いているため、フォルダーを入れていません"
+        "一括比較の窓では組を直している途中か比較が動いているため、フォルダーを入れていません。"
+        f"分けたファイルは{save_caution()}"
     )
 
 

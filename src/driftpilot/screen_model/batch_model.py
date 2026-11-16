@@ -53,6 +53,7 @@ from driftpilot.screen_model.model import (
     LlmPlan,
     Mode,
     file_label,
+    multi_view,
     pair_report,
     plain_llm,
     read_counts,
@@ -65,7 +66,9 @@ from driftpilot.llm_analyzer import LlmAnalysis
 from driftpilot.llm_analyzer.answer_format import first_sentence
 from driftpilot.llm_settings import LlmSettings, default_base_url, display_model
 from driftpilot.messages import (
+    BATCH_APPROVAL_EDITED_LINE,
     BATCH_AUTO_PLATFORM_MIXED,
+    BATCH_AUTO_PLATFORM_NO_CONFIG,
     BATCH_JOB_EXCLUDED,
     BATCH_PLATFORM_UNDETECTED_ROW,
     BATCH_WAITING_FORMAT,
@@ -308,6 +311,12 @@ def _sum(values: Iterable[int | None]) -> int | None:
     return sum(found) if found else None
 
 
+def _outcome_counts(outcome: CompareOutcome) -> tuple[int | None, int | None, dict[str, int] | None]:
+    """1 つの結果の件数(構造化比較の差分(無ければ show の件数), 単純比較の差分, 構造化不可の行)。1 区間の組と、組の行の子の行が使う。"""
+    counts = read_counts(outcome)
+    return (counts.structured if counts.structured is not None else counts.show), counts.raw, counts.unparsed
+
+
 def _row_counts(result: JobResult) -> tuple[int | None, int | None, dict[str, int] | None]:
     """件数の列の値 (構造化比較の差分, 単純比較の差分, 構造化不可の行)。core の結果を読むだけ(数え直さない)。
 
@@ -316,8 +325,7 @@ def _row_counts(result: JobResult) -> tuple[int | None, int | None, dict[str, in
     """
     multi = result.multi
     if multi is None:
-        counts = read_counts(result.outcome)
-        return (counts.structured if counts.structured is not None else counts.show), counts.raw, counts.unparsed
+        return _outcome_counts(result.outcome)
     each = [read_counts(pair.outcome) for pair in multi.pairs]
     structured = _sum(c.structured if c.structured is not None else c.show for c in each)
     unparsed_list = [c.unparsed for c in each if c.unparsed is not None]
@@ -327,16 +335,27 @@ def _row_counts(result: JobResult) -> tuple[int | None, int | None, dict[str, in
     return structured, _sum(c.raw for c in each), unparsed
 
 
+def _count_texts(
+    structured: int | None, raw: int | None, unparsed: dict[str, int] | None
+) -> tuple[str, str, str]:
+    """件数の列の 3 つの文(構造化比較・単純比較・構造化不可)。数が無ければ —。"""
+    return (
+        _count(structured),
+        _count(raw),
+        NO_COUNT if unparsed is None else smb_unparsed_counts(unparsed["before"], unparsed["after"]),
+    )
+
+
 def result_row(result: JobResult) -> ResultRow:
     """件数は core の結果を読むだけ(数え直さない)。状態の名前は STATUS_LABEL(CLI と同じ)。"""
-    structured, raw, unparsed = _row_counts(result)
+    structured, raw, unparsed = _count_texts(*_row_counts(result))
     return ResultRow(
         result.job.index,
         STATUS_LABEL[result.outcome.status],
         job_name(result.job),
-        _count(structured),
-        _count(raw),
-        NO_COUNT if unparsed is None else smb_unparsed_counts(unparsed["before"], unparsed["after"]),
+        structured,
+        raw,
+        unparsed,
         llm_column(result.outcome.llm),
         result_platform(result),
     )
@@ -369,6 +388,23 @@ def result_platform(result: JobResult) -> str:
 
 
 @dataclass(frozen=True)
+class BatchCommandRow:
+    """まとめて比べた組の下に出す、コマンドの組の行(ADR-0216 決定6)。表の組の数・件数の箱・選んだ数には数えない。
+
+    name は秘密の語の判定に通した名前(語を読めなければ BATCH_WAITING_NAMES_HIDDEN)。数は結果のある行だけ(無ければ —)。
+    platform は config の結果の行だけ(ほかは空の文字)。has_diff は状態が「差分あり」の行と相手なしの行で真。
+    """
+
+    name: str
+    status: str
+    platform: str
+    structured: str
+    raw: str
+    unparsed: str
+    has_diff: bool
+
+
+@dataclass(frozen=True)
 class BatchTableRow:
     """組の一覧と結果を 1 つにした表の 1 行。行は組の順で、index は組の番号(job.index)。
 
@@ -396,6 +432,8 @@ class BatchTableRow:
     # show の比べ方の印(REQ-282)。並びは "raw"(単純比較)、"both"(表＋単純比較)の順で、無ければ空。
     # 複数のコマンドの組は、どれか1つでも当てはまるコマンドがあれば付ける(混ざれば両方)。数の列は変えない(二重に数えない)
     show_methods: tuple[str, ...] = ()
+    # まとめて比べた組の下に出すコマンドの組の行(ADR-0216 決定6)。外した組・実行中・結果の無い組・1 区間の組は空
+    commands: tuple[BatchCommandRow, ...] = ()
 
 
 def job_show_methods(result: JobResult) -> tuple[str, ...]:
@@ -427,10 +465,12 @@ def _auto_text(outcome: CompareOutcome) -> str:
 
 
 def _auto_row_platform(result: JobResult, fallback: str) -> str:
-    """機種が自動の組の、結果の機種の列(config と決まったときだけ「自動: …」。show などは result_row のまま)。
+    """機種が自動の組の、結果の機種の列(ADR-0216 決定2)。
 
-    まとめて比べた組(ADR-0178 決定2)は、config のコマンドの組ごとの文が 1 つならその文、2 つ以上なら「自動（複数）」、
-    config のコマンドが無ければ「自動」(job_platform_text と同じ)。
+    1 区間の組は、config と決まったら「自動: <判定した名前>」か「自動: 判定できません」、show と決まったら「自動: config なし」。
+    種類が決まる前に止まった結果は result_row のまま(fallback)。
+    まとめて比べた組(ADR-0178 決定2)は、config のコマンドの組ごとの文が 1 つならその文、2 つ以上なら「自動: 複数」、
+    config のコマンドの組が無ければ「自動: config なし」。
     """
     outcome = result.outcome
     if result.job.platform != AUTO_PLATFORM:
@@ -438,8 +478,10 @@ def _auto_row_platform(result: JobResult, fallback: str) -> str:
     if result.multi is not None:
         texts = list(dict.fromkeys(_auto_text(pair) for pair in _config_pairs(result)))
         if not texts:
-            return job_platform_text(result.job)
+            return BATCH_AUTO_PLATFORM_NO_CONFIG
         return texts[0] if len(texts) == 1 else BATCH_AUTO_PLATFORM_MIXED
+    if outcome.kind == "show":
+        return BATCH_AUTO_PLATFORM_NO_CONFIG
     if outcome.kind != "config":
         return fallback
     return _auto_text(outcome)
@@ -467,13 +509,49 @@ def ai_point(llm: LlmAnalysis | None) -> str:
     return llm_column(llm)
 
 
+def command_rows(result: JobResult, words: Sequence[str] | None) -> tuple[BatchCommandRow, ...]:
+    """まとめて比べた組の、コマンドの組の行(ADR-0216 決定6)。並びと名前は model.multi_view の一覧のとおり。
+
+    名前は秘密の語の判定(redact_text)に通す。words が None(語を読めなかった)なら BATCH_WAITING_NAMES_HIDDEN
+    (waiting_reason と同じ。伏せられないなら出さない)。数は結果のある行だけ 1 区間の組と同じ値、無い行は —。
+    1 区間の組(multi が無い)は空。
+    """
+    if result.multi is None:
+        return ()
+    auto = result.job.platform == AUTO_PLATFORM
+    rows = []
+    for entry in multi_view(result.multi).entries:
+        outcome = entry.outcome
+        name = BATCH_WAITING_NAMES_HIDDEN if words is None else redact_text(entry.row.name, words)
+        if outcome is None:
+            counts = (NO_COUNT, NO_COUNT, NO_COUNT)
+            platform = ""
+            # 相手なしの行は差分として数える(overall_text と同じ。1 回だけ・エラーの出力の行は数えない)
+            has_diff = not entry.single and not entry.error
+        else:
+            counts = _count_texts(*_outcome_counts(outcome))
+            if outcome.kind != "config":
+                platform = ""
+            else:
+                platform = _auto_text(outcome) if auto else platform_label(result.job.platform)
+            has_diff = outcome.status == "difference"
+        rows.append(BatchCommandRow(name, entry.row.status, platform, *counts, has_diff))
+    return tuple(rows)
+
+
 def table_rows(
-    jobs: Iterable[Job], shown: Mapping[str, JobResult], running: str | None, excluded: Collection[str] = ()
+    jobs: Iterable[Job],
+    shown: Mapping[str, JobResult],
+    running: str | None,
+    excluded: Collection[str] = (),
+    *,
+    words: Sequence[str] | None = None,
 ) -> list[BatchTableRow]:
     """1 つの表の行(組の順)。shown は job の id ごとの表示する結果、running はいま実行中の job の id、excluded は外した組の id。
 
     外した組を先に見る(状態は「外した組」、数は —。結果は消さずに残し、戻すとまた出す)。次に実行中の組(2段目の AI の送信の間も
     「実行中」)。結果のある組は result_row の値、それ以外は「待機」と —。
+    words は秘密の語(まとめて比べた組のコマンドの名前を伏せる。ADR-0216 決定6)。省くと None と同じで、名前は出さない側に倒す。
     """
     rows = []
     for job in jobs:
@@ -518,6 +596,7 @@ def table_rows(
                 result.outcome.status == "difference",
                 **extra,
                 show_methods=job_show_methods(result),
+                commands=command_rows(result, words),
             )
         )
     return rows
@@ -757,10 +836,15 @@ def effective_base_url(settings: LlmSettings) -> str:
     return settings.base_url or smb_default_url(default_base_url(settings.api_format))
 
 
-def approval_view(preview: BatchLlmPreview, settings: LlmSettings) -> ApprovalView:
-    """差分が無い組・比較まで進まなかった組は出さない(preview.jobs は送る内容がある組だけ)。"""
+def approval_view(preview: BatchLlmPreview, settings: LlmSettings, *, edited: bool = False) -> ApprovalView:
+    """差分が無い組・比較まで進まなかった組は出さない(preview.jobs は送る内容がある組だけ)。
+
+    edited が真(この送信だけ指示文を直した確認。REQ-313)のときは、要約の先頭に直した印の 1 行を足す。偽なら今と同じ中身。
+    """
     # CLI の形式でモデルが無いときは「CLI の既定のモデル」(REQ-102)
     summary = batch_llm_preview_lines(preview, model=display_model(settings), base_url=effective_base_url(settings))
+    if edited:
+        summary = [BATCH_APPROVAL_EDITED_LINE, *summary]
     rows = [
         ApprovalRow(j.job_id, f"{j.job_id}  {j.label}" if j.label else j.job_id, j.sent_diffs, j.masked, j.unsent_lines)
         for j in preview.jobs

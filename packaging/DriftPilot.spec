@@ -78,6 +78,6 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="DriftPilot.app",
-        bundle_identifier=None,
+        bundle_identifier="io.github.yusaku-umemoto.driftpilot",
         icon=ICON_MAC,
     )

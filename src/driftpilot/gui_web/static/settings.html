@@ -413,6 +413,48 @@
             <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-replace-add" data-text="raw_options.replace.add"></button>
             <select id="rawopt-replace-example" class="pilot-input"><option value="" data-text="raw_options.example"></option></select>
           </div>
+          <!-- 「AI に式を頼む…」（ADR-0218 決定 8 / REQ-314）。押すと小さな窓（下の #rawopt-ai-dialog）。比較の窓と設定の窓で同じ id・同じ中身 -->
+          <div class="pilot-row">
+            <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai" data-text="raw_options.ai.button"></button>
+          </div>
+          <!-- 正規表現の書き方（ADR-0217 決定 6 / REQ-311）。閉じた折りたたみ（開いた状態は保存しない）。比較の窓と設定の窓で同じ id・同じ中身。
+               表の行は RAW_HELP_ROWS、箇条は RAW_HELP_NOTES の順（テストで確かめる）。文はすべて data-text -->
+          <details class="pilot-details" id="rawopt-help">
+            <summary data-text="raw_options.help"></summary>
+            <div class="pilot-details-body">
+              <table class="pilot-table" id="rawopt-help-table">
+                <thead><tr>
+                  <th scope="col" data-text="raw_options.help.col.syntax"></th>
+                  <th scope="col" data-text="raw_options.help.col.meaning"></th>
+                  <th scope="col" data-text="raw_options.help.col.example"></th>
+                </tr></thead>
+                <tbody>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.dot.syntax"></td><td data-text="raw_options.help.row.dot.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.dot.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.classes.syntax"></td><td data-text="raw_options.help.row.classes.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.classes.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.boundary.syntax"></td><td data-text="raw_options.help.row.boundary.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.boundary.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.anchors.syntax"></td><td data-text="raw_options.help.row.anchors.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.anchors.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.repeat.syntax"></td><td data-text="raw_options.help.row.repeat.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.repeat.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.count.syntax"></td><td data-text="raw_options.help.row.count.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.count.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.set.syntax"></td><td data-text="raw_options.help.row.set.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.set.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.group.syntax"></td><td data-text="raw_options.help.row.group.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.group.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.either.syntax"></td><td data-text="raw_options.help.row.either.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.either.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.plain_group.syntax"></td><td data-text="raw_options.help.row.plain_group.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.plain_group.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.around.syntax"></td><td data-text="raw_options.help.row.around.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.around.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.escape.syntax"></td><td data-text="raw_options.help.row.escape.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.escape.example"></td></tr>
+                  <tr><td class="pilot-mono" data-text="raw_options.help.row.ignore_case.syntax"></td><td data-text="raw_options.help.row.ignore_case.meaning"></td><td class="pilot-mono" data-text="raw_options.help.row.ignore_case.example"></td></tr>
+                </tbody>
+              </table>
+              <ul class="pilot-note-list" id="rawopt-help-notes">
+                <li data-text="raw_options.help.note.re"></li>
+                <li data-text="raw_options.help.note.replace"></li>
+                <li data-text="raw_options.help.note.compare_only"></li>
+                <li data-text="raw_options.help.note.same_line"></li>
+                <li data-text="raw_options.help.note.refused"></li>
+                <li data-text="raw_options.help.note.limits"></li>
+                <li data-text="raw_options.help.note.hides"></li>
+              </ul>
+            </div>
+          </details>
           <div class="pilot-row">
             <label for="rawopt-space" data-text="raw_options.space"></label>
             <select id="rawopt-space" class="pilot-input">
@@ -548,7 +590,7 @@
         <!-- 変更の内容（新しい版があるときだけ）。.pilot-answer の高さの上限（8 行）で、長ければ枠の中で縦に送る（pilot.css は変えない） -->
         <div class="pilot-answer pilot-lines" id="update-notes" tabindex="0" hidden></div>
         <!-- 「更新する」（REQ-253 §7）。新しい版があり、配った物（exe・アプリ）で動いているときだけ Python が出させる（can_update）。
-             準備の間は「やめる」と進み具合（取ってきています…・確かめています…・準備しています…）を出す。文は textContent だけで描く -->
+             準備の間は「やめる」と進み具合（ダウンロード中…・確かめています…・準備しています…）を出す。文は textContent だけで描く -->
         <div class="pilot-row">
           <button type="button" class="pilot-button pilot-button--secondary" id="start-update" data-text="settings.button.start_update" hidden></button>
           <button type="button" class="pilot-button pilot-button--secondary" id="cancel-update" data-text="settings.button.cancel_update" hidden></button>
@@ -581,5 +623,83 @@
     <button type="button" class="pilot-button pilot-button--secondary" id="close" data-text="settings.button.close"></button>
   </footer>
   <div class="pilot-statusbar" id="status" role="status"></div>
+  <!-- 「AI に式を頼む…」の小さな窓（ADR-0218 決定 8 / REQ-314）。比較の窓と設定の窓で同じ id・同じ中身。動きは js/raw_options.js。
+       欄（#rawopt-fields）の外に置く（中で打った文字の change を欄の外側に届かせないため）。段は 4 つ（入力・確認・待つ間・結果）で、
+       文はすべて data-text か Python が返した文（textContent）。式・置き換える文字・説明・貼った行も textContent だけで入れる -->
+  <dialog id="rawopt-ai-dialog" class="pilot-dialog pilot-dialog--wide" aria-labelledby="rawopt-ai-title">
+    <h2 class="pilot-dialog-title" id="rawopt-ai-title" data-text="raw_options.ai.title"></h2>
+    <div class="pilot-rawopt-ai-stage" id="rawopt-ai-input">
+      <div class="pilot-dialog-body">
+        <label for="rawopt-ai-lines" data-text="raw_options.ai.lines"></label>
+        <textarea id="rawopt-ai-lines" class="pilot-input pilot-mono pilot-wide" rows="8" spellcheck="false"></textarea>
+        <label for="rawopt-ai-description" data-text="raw_options.ai.description"></label>
+        <input id="rawopt-ai-description" class="pilot-input pilot-wide" type="text" autocomplete="off" spellcheck="false" aria-describedby="rawopt-ai-description-hint">
+        <p class="pilot-note" id="rawopt-ai-description-hint" data-text="raw_options.ai.description.hint"></p>
+        <fieldset class="pilot-radio-group">
+          <legend data-text="raw_options.ai.kind"></legend>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="rawopt-ai-kind" id="rawopt-ai-kind-replace" value="replace" checked><span data-text="raw_options.ai.kind.replace"></span></label>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="rawopt-ai-kind" id="rawopt-ai-kind-ignore" value="ignore"><span data-text="raw_options.ai.kind.ignore"></span></label>
+        </fieldset>
+        <p class="pilot-note" id="rawopt-ai-full" data-text="raw_options.ai.full" hidden></p>
+        <p class="pilot-band pilot-band--error pilot-lines" id="rawopt-ai-refused" role="alert" hidden></p>
+      </div>
+      <div class="pilot-dialog-buttons">
+        <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai-check" data-text="raw_options.ai.check"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai-input-close" data-text="raw_options.ai.close"></button>
+      </div>
+    </div>
+    <div class="pilot-rawopt-ai-stage" id="rawopt-ai-confirm" hidden>
+      <div class="pilot-dialog-body">
+        <span class="pilot-rawopt-label" id="rawopt-ai-prompt-title"></span>
+        <textarea id="rawopt-ai-prompt" class="pilot-input pilot-mono pilot-wide" readonly spellcheck="false" aria-labelledby="rawopt-ai-prompt-title"></textarea>
+        <p class="pilot-note" id="rawopt-ai-destination"></p>
+        <p class="pilot-note" id="rawopt-ai-omitted"></p>
+        <p class="pilot-note" id="rawopt-ai-note"></p>
+      </div>
+      <div class="pilot-dialog-buttons">
+        <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai-send"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai-dont-send"></button>
+      </div>
+    </div>
+    <div class="pilot-rawopt-ai-stage" id="rawopt-ai-waiting" hidden>
+      <div class="pilot-dialog-body">
+        <p class="pilot-note" id="rawopt-ai-asking" role="status" data-text="raw_options.ai.asking"></p>
+      </div>
+      <div class="pilot-dialog-buttons">
+        <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai-wait-close" data-text="raw_options.ai.close"></button>
+      </div>
+    </div>
+    <div class="pilot-rawopt-ai-stage" id="rawopt-ai-result" hidden>
+      <div class="pilot-dialog-body">
+        <p class="pilot-band pilot-band--error pilot-lines" id="rawopt-ai-failure" role="alert" hidden></p>
+        <div class="pilot-rawopt-ai-found" id="rawopt-ai-found" hidden>
+          <span class="pilot-rawopt-label" data-text="raw_options.ai.result.pattern"></span>
+          <code class="pilot-mono pilot-lines" id="rawopt-ai-pattern"></code>
+          <span class="pilot-rawopt-label" id="rawopt-ai-replacement-label" data-text="raw_options.ai.result.replacement"></span>
+          <code class="pilot-mono pilot-lines" id="rawopt-ai-replacement"></code>
+          <span class="pilot-rawopt-label" id="rawopt-ai-note-label" data-text="raw_options.ai.result.note"></span>
+          <span class="pilot-lines" id="rawopt-ai-result-note"></span>
+          <p id="rawopt-ai-count" role="status"></p>
+          <div class="pilot-table-wrap">
+            <table class="pilot-table" id="rawopt-ai-table">
+              <thead>
+                <tr>
+                  <th scope="col" data-text="raw_options.ai.result.before"></th>
+                  <th scope="col" data-text="raw_options.ai.result.after"></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="pilot-note" data-text="raw_options.ai.result.local"></p>
+        </div>
+      </div>
+      <div class="pilot-dialog-buttons">
+        <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai-add" data-text="raw_options.ai.add" hidden></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai-skip" data-text="raw_options.ai.skip" hidden></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai-result-close" data-text="raw_options.ai.close" hidden></button>
+      </div>
+    </div>
+  </dialog>
 </body>
 </html>

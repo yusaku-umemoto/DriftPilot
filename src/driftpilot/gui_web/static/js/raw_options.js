@@ -6,14 +6,27 @@
 // 「例から足す…」・置き換えの行を足す・外すは、この部品の中で欄を組み替える。外したときと例から足したときは、
 // 欄の外側（#rawopt-fields）へ change を送り、窓に知らせる（比較の窓は form_changed を呼ぶ。設定の窓は「保存」まで何もしない）。
 
-import { make } from "./dom.js";
+// 「AI に式を頼む…」（ADR-0218 決定8 / REQ-314）も、この部品の中で動く（小さな窓 #rawopt-ai-dialog。段は入力・確認・待つ間・結果）。
+// 送る・答えを読む・式を確かめるのは Python（ask_rule_ai・answer_rule_ai・close_rule_ai と rule_ai.done の知らせ）で、ここは描くだけ。
+// 「欄に入れる」（addRawRule）は欄に足して欄の外側へ change を送るだけで、保存も比較もしない。
+
+import { call, on } from "./bridge.js";
+import { make, text } from "./dom.js";
 
 const $ = (id) => document.getElementById(id);
 // 置き換えの組の数の上限（Python の MAX_PATTERNS と同じ。超えたら Python が形の誤りとして断る）
 const MAX_REPLACEMENTS = 20;
+// 無視する行の式の数の上限（Python の MAX_PATTERNS と同じ）
+const MAX_IGNORES = 20;
 
 let examples = { ignore: [], replace: [] }; // Python から受け取った例
 let bound = false;
+// 「AI に式を頼む…」: 今の確認・送信の番号（無ければ null）・「欄に入れる」に使う値（式・置き換える文字・種類だけ）・
+// 窓を開いた・閉じた回数（待っている間に閉じたとき、遅れて届いた答えを捨てるため）
+let aiId = null;
+let aiRule = null;
+let aiRound = 0;
+const AI_STAGES = ["input", "confirm", "waiting", "result"];
 
 // 置き換えの表の 1 行（式・置き換える文字・「外す」）。
 function replacementRow(pattern, replacement) {
@@ -81,11 +94,250 @@ function fillExamples(select, items) {
   select.selectedIndex = 0;
 }
 
+// 無視する行の欄の、空白でない行の数（Python は行の両端の空白を除いて空の行を捨てる）。
+function ignoreCount() {
+  return $("rawopt-ignore")
+    .value.split(/\r\n|\r|\n/)
+    .filter((line) => line.trim() !== "").length;
+}
+
+// 式を欄に足す（「欄に入れる」）。置き換えの表に 1 行足すか、無視する行の欄の最後に 1 行足し、欄の外側へ change を送る。
+// 同じ式が既に欄にあっても足す（判断は利用者）。欄が満ちていれば足さずに false。保存も比較もしない。
+function addRawRule(kind, pattern, replacement) {
+  if (kind === "replace") {
+    if (replaceBody().rows.length >= MAX_REPLACEMENTS) {
+      return false;
+    }
+    replaceBody().append(replacementRow(pattern, replacement));
+    updateAddable();
+  } else if (kind === "ignore") {
+    if (ignoreCount() >= MAX_IGNORES) {
+      return false;
+    }
+    const area = $("rawopt-ignore");
+    const current = area.value.replace(/\n+$/, "");
+    area.value = current === "" ? pattern : `${current}\n${pattern}`;
+  } else {
+    return false;
+  }
+  announce();
+  return true;
+}
+
+function aiDialog() {
+  return $("rawopt-ai-dialog");
+}
+
+function aiKind() {
+  return document.querySelector('input[name="rawopt-ai-kind"]:checked').value;
+}
+
+function showAiStage(name) {
+  for (const stage of AI_STAGES) {
+    $(`rawopt-ai-${stage}`).hidden = stage !== name;
+  }
+}
+
+// 満ちている種類（置き換えが 20 組・無視する行が 20 個）は選べない。両方満ちていれば「送る内容を確かめる…」も押せない。
+function updateAiKinds() {
+  const replaceFull = replaceBody().rows.length >= MAX_REPLACEMENTS;
+  const ignoreFull = ignoreCount() >= MAX_IGNORES;
+  const replace = $("rawopt-ai-kind-replace");
+  const ignore = $("rawopt-ai-kind-ignore");
+  replace.disabled = replaceFull;
+  ignore.disabled = ignoreFull;
+  if (replace.checked && replaceFull && !ignoreFull) {
+    ignore.checked = true;
+  } else if (ignore.checked && ignoreFull && !replaceFull) {
+    replace.checked = true;
+  }
+  $("rawopt-ai-full").hidden = !replaceFull && !ignoreFull;
+  $("rawopt-ai-check").disabled = replaceFull && ignoreFull;
+}
+
+function showAiRefused(message) {
+  const band = $("rawopt-ai-refused");
+  text(band, message);
+  band.hidden = message === null || message === undefined || message === "";
+}
+
+function openAi() {
+  aiRound += 1;
+  aiId = null;
+  aiRule = null;
+  showAiRefused(null);
+  showAiStage("input");
+  updateAiKinds();
+  aiDialog().showModal();
+  $("rawopt-ai-lines").focus();
+}
+
+// 小さな窓を閉じる（Esc・「閉じる」・欄に入れた後）。Python に待っている確認と送信を捨てさせてから閉じ、貼った文字は消す。
+async function closeAi() {
+  aiRound += 1;
+  const id = aiId;
+  aiId = null;
+  aiRule = null;
+  try {
+    await call("close_rule_ai", id);
+  } catch (error) {
+    // 呼べなくても窓は閉じる（Python は窓が閉じたときにも捨てる）
+  }
+  $("rawopt-ai-lines").value = "";
+  $("rawopt-ai-description").value = "";
+  $("rawopt-ai-prompt").value = "";
+  if (aiDialog().open) {
+    aiDialog().close();
+  }
+}
+
+async function askAi() {
+  const round = aiRound;
+  showAiRefused(null);
+  const result = await call("ask_rule_ai", $("rawopt-ai-lines").value, $("rawopt-ai-description").value, aiKind());
+  const info = result.ok ? result.rule_ai : null;
+  if (round !== aiRound) {
+    // 待っている間に窓を閉じた。出てきた確認は送らずに捨てる
+    if (info && info.confirm) {
+      await call("close_rule_ai", info.confirm.id);
+    }
+    return;
+  }
+  if (!result.ok) {
+    showAiRefused(result.message);
+    return;
+  }
+  if (info === null) {
+    return;
+  }
+  if (info.refused !== undefined) {
+    showAiRefused(info.refused);
+    return;
+  }
+  const confirm = info.confirm;
+  aiId = confirm.id;
+  text($("rawopt-ai-prompt-title"), confirm.prompt_title);
+  $("rawopt-ai-prompt").value = confirm.prompt;
+  text($("rawopt-ai-destination"), confirm.destination);
+  text($("rawopt-ai-omitted"), confirm.omitted_text);
+  text($("rawopt-ai-note"), confirm.note);
+  text($("rawopt-ai-send"), confirm.send);
+  text($("rawopt-ai-dont-send"), confirm.dont_send);
+  showAiStage("confirm");
+  $("rawopt-ai-dont-send").focus();
+}
+
+// 「送信する」。確認に出した文を 1 回だけ送る（答えは rule_ai.done の知らせで届く）。
+async function sendAi() {
+  const round = aiRound;
+  const id = aiId;
+  // 答えの知らせ（rule_ai.done）が返事より先に届いても受けられるよう、呼ぶ前に待つ間の段にする
+  showAiStage("waiting");
+  $("rawopt-ai-wait-close").focus();
+  const result = await call("answer_rule_ai", id, true);
+  if (round !== aiRound || $("rawopt-ai-waiting").hidden) {
+    return; // 閉じた、または知らせが先に届いて結果の段になっている
+  }
+  if (!result.ok) {
+    aiId = null;
+    showAiResult({ ok: false, message: result.message });
+    return;
+  }
+  if (result.rule_ai === null) {
+    // 待っていた確認が無かった（古い番号）。送っていないので、入力の段に戻る
+    aiId = null;
+    showAiStage("input");
+  }
+}
+
+// 「送信しない」。送らずに、入れた文字を残したまま入力の段に戻る。
+async function dontSendAi() {
+  const id = aiId;
+  aiId = null;
+  await call("answer_rule_ai", id, false);
+  showAiStage("input");
+  $("rawopt-ai-lines").focus();
+}
+
+// 答えの結果を描く。成功は式・置き換える文字・説明・当たった数・当たった行の前と後の表と「欄に入れる」「入れない」、
+// 失敗は理由の文と「閉じる」だけ（どれも textContent）。
+function showAiResult(result) {
+  const ok = result.ok === true;
+  const failure = $("rawopt-ai-failure");
+  text(failure, ok ? "" : result.message);
+  failure.hidden = ok;
+  $("rawopt-ai-found").hidden = !ok;
+  $("rawopt-ai-add").hidden = !ok;
+  $("rawopt-ai-skip").hidden = !ok;
+  $("rawopt-ai-result-close").hidden = ok;
+  aiRule = null;
+  if (ok) {
+    aiRule = result.rule;
+    text($("rawopt-ai-pattern"), result.pattern);
+    const replacing = result.kind === "replace";
+    $("rawopt-ai-replacement-label").hidden = !replacing;
+    $("rawopt-ai-replacement").hidden = !replacing;
+    text($("rawopt-ai-replacement"), replacing ? result.replacement : "");
+    const hasNote = typeof result.note === "string" && result.note !== "";
+    $("rawopt-ai-note-label").hidden = !hasNote;
+    $("rawopt-ai-result-note").hidden = !hasNote;
+    text($("rawopt-ai-result-note"), hasNote ? result.note : "");
+    text($("rawopt-ai-count"), result.count);
+    $("rawopt-ai-table").tBodies[0].replaceChildren(
+      ...result.rows.map(([before, after]) => {
+        const tr = document.createElement("tr");
+        tr.append(make("td", "pilot-mono", before), make("td", "pilot-mono", after));
+        return tr;
+      }),
+    );
+  }
+  showAiStage("result");
+  (ok ? $("rawopt-ai-skip") : $("rawopt-ai-result-close")).focus();
+}
+
+// 「欄に入れる」。欄に足してから閉じる（保存も比較もしない）。欄が満ちていて足せなければ、閉じずに理由を出す。
+async function addAiRule() {
+  const rule = aiRule;
+  if (rule === null) {
+    return;
+  }
+  if (addRawRule(rule.kind, rule.pattern, rule.replacement)) {
+    await closeAi();
+    return;
+  }
+  showAiResult({ ok: false, message: $("rawopt-ai-full").textContent });
+}
+
+function bindAiOnce() {
+  $("rawopt-ai").addEventListener("click", openAi);
+  $("rawopt-ai-check").addEventListener("click", askAi);
+  $("rawopt-ai-send").addEventListener("click", sendAi);
+  $("rawopt-ai-dont-send").addEventListener("click", dontSendAi);
+  $("rawopt-ai-add").addEventListener("click", addAiRule);
+  for (const id of ["rawopt-ai-input-close", "rawopt-ai-wait-close", "rawopt-ai-skip", "rawopt-ai-result-close"]) {
+    $(id).addEventListener("click", closeAi);
+  }
+  // Esc も、Python に捨てさせてから閉じる
+  aiDialog().addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeAi();
+  });
+  // Python が知らせた答え。今の送信の番号と合い、待っている間だけ描く（閉じた後・古い番号は捨てる）
+  on("rule_ai.done", (event) => {
+    if (!aiDialog().open || aiId === null || event.id !== aiId || $("rawopt-ai-waiting").hidden) {
+      return;
+    }
+    aiId = null;
+    showAiResult(event.result);
+  });
+}
+
 function bindOnce() {
   if (bound) {
     return;
   }
   bound = true;
+  bindAiOnce();
   $("rawopt-ignore-example").addEventListener("change", (event) => {
     const select = event.target;
     const item = examples.ignore[Number(select.value)];

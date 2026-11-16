@@ -43,8 +43,12 @@ class AiPaneApi(Api):
         return self._compare._call_as(PANE_AI, self._compare._ai_result)
 
     def send_llm(self, instruction: Any = "") -> dict[str, Any]:
-        """「AI で解析」(比較の窓の send_llm と同じ。確かめと送信前の確認も同じ)。"""
+        """「定型の質問で解析」(比較の窓の send_llm と同じ。確かめと送信前の確認も同じ。空でない文を渡すと送らない)。"""
         return self._with_form(self._compare._send_llm, instruction)
+
+    def ask_shown(self, question: Any) -> dict[str, Any]:
+        """「表示中の差分に質問」(比較の窓の ask_shown と同じ。今表示している差分は比較の窓の画面が知らせた値を使う。REQ-312)。"""
+        return self._with_form(self._compare._ask_shown, question)
 
     def ask_follow_up(self, question: Any, confirm: Any = None) -> dict[str, Any]:
         """「質問する」(比較の窓の ask_follow_up と同じ)。送り先が変わっていれば confirm を返し、「はい」で番号を付けて呼び直す。"""

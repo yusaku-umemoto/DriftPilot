@@ -734,6 +734,8 @@ body {
  * .pilot-ai-head: AI の面の見出しの行。見出しの右端に「↗」（.pilot-icon-button）を置く
  * .pilot-tabs-bar: 結果のタブの行。別の窓が開いている間だけ、右端に「↗」（別の窓を前に出す）を出す
  * .pilot-split--detached: 別の窓が開いている間の左右の面。右の面と境目は hidden にし、左の面を全幅にする
+ * .pilot-split--ai-hidden: AI の欄を隠している間（ADR-0216 決定5）の左右の面。detached と同じ見た目（右の面と境目は hidden）
+ * .pilot-ai-head の「»」（AI の欄を隠す）と、タブの行の「« AI」（出す。.pilot-icon-button--text）も同じ並びに乗る
  * .pilot-ai-window: AI の窓の中の AI の面（窓いっぱいに出す）
  */
 .pilot-ai-head {
@@ -770,8 +772,16 @@ body {
   border-bottom: none;
 }
 
+.pilot-split--ai-hidden > .pilot-split-pane:first-child,
 .pilot-split--detached > .pilot-split-pane:first-child {
   flex: 1 1 0;
+}
+
+/* 「« AI」（AI の欄を出す。ADR-0216 決定5）は文字が入るので、幅を中身に合わせて切らない */
+.pilot-icon-button--text {
+  width: auto;
+  padding: 0 var(--pilot-space-2);
+  white-space: nowrap;
 }
 
 .pilot-ai-window {
@@ -1009,6 +1019,17 @@ body {
 }
 
 /* 差分の行（単純比較の差分。今の wx の差分の行の背景色）。選んでいる行は選択の色のまま */
+/* 一括比較の表で、まとめて比べた組の下に出すコマンドの組の行（ADR-0216 決定6）。字を少し小さく、色は薄い文字の色。
+   変更前の列は左を詰めて「└ 名前」を組の名前より内側に見せる。選べない行（aria-selected は付けない） */
+.pilot-batch-command-row > td {
+  font-size: var(--pilot-font-size-small);
+  color: var(--pilot-color-text-muted);
+}
+
+.pilot-batch-command-row > td.pilot-batch-command-name {
+  padding-left: var(--pilot-space-4);
+}
+
 .pilot-table tbody tr[data-diff="true"] {
   background: var(--pilot-color-diff);
 }
@@ -1351,6 +1372,25 @@ body[data-pair-dragging="true"] [data-drop-blocked="true"] * {
  */
 .pilot-col-check {
   width: 36px;
+}
+
+/* 比較の窓のコマンドの組の一覧だけ、見出しのチェックと AI の印（.pilot-ai-mark）が入る幅にする（一括比較の窓の列は 36px のまま） */
+#multi-table > colgroup > col.pilot-col-check {
+  width: 60px;
+}
+
+/* AI の印（ADR-0216 決定5）。「AI に送る」の列の見出しのチェックの後ろに付ける小さな枠付きの文字 */
+.pilot-ai-mark {
+  display: inline-block;
+  margin-left: var(--pilot-space-1);
+  padding: 0 2px;
+  border: 1px solid currentColor;
+  border-radius: var(--pilot-radius);
+  color: var(--pilot-color-accent);
+  font-size: var(--pilot-font-size-small);
+  font-weight: 600;
+  line-height: 1.2;
+  vertical-align: middle;
 }
 
 .pilot-check-cell {
@@ -2206,6 +2246,46 @@ mark.pilot-mark {
 .pilot-rawopt-replace td:last-child {
   width: 1%;
   white-space: nowrap;
+}
+
+/*
+ * 「AI に式を頼む…」の小さな窓（REQ-314 / ADR-0218 決定8）。<dialog class="pilot-dialog pilot-dialog--wide"> の中に、段を 1 つだけ見せる
+ * （入力・確認・待つ間・結果。隠すのは [hidden] の決まり）。段は本文とボタンの行を縦に持ち、本文が残りの高さを使う。
+ * 結果の段は、式・置き換える文字・説明を縦に並べ、当たった行の前と後の表が残りの高さの中でスクロールする
+ */
+.pilot-rawopt-ai-stage {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pilot-rawopt-ai-stage > .pilot-dialog-buttons {
+  flex: none;
+}
+
+.pilot-rawopt-ai-found {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: var(--pilot-space-2);
+  min-height: 0;
+}
+
+/* 大きいダイアログの「本文の子は大きさを持たない」(.pilot-dialog--wide .pilot-dialog-body > *)より強くして、残りの高さを使う */
+.pilot-dialog--wide .pilot-dialog-body > .pilot-rawopt-ai-found {
+  flex: 1 1 0;
+}
+
+.pilot-rawopt-ai-found > * {
+  flex: none;
+  margin: 0;
+}
+
+.pilot-rawopt-ai-found > .pilot-table-wrap {
+  flex: 1 1 0;
+  min-height: calc(var(--pilot-control-height) * 3);
+  max-height: none;
 }
 
 /* 一括比較の「組の設定」の、単純比較の設定の読むだけの 1 行（REQ-228 §7.2） */

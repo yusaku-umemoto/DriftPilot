@@ -20,7 +20,8 @@
 // 見出しの「全部」のチェック: 組の表は見えている行を set_included_many で 1 回で渡し、候補の表は画面の中だけで付け外しする。
 // 「設定…」は open_settings を呼ぶだけ（設定の窓で保存したら、Python から batch.changed が届く）。
 // 「AI に案を聞く…」（REQ-219）: 押したら Python に渡すだけ。Python が返した確認（view.pair_ai_preview）を panel で開き、
-// 送る全文を読むだけの欄に出す。答えは番号と「送る」かだけを渡す（文は渡さない。既定のフォーカスと Esc は「送らない」）。
+// 送る全文を、指示の欄（直せる）とファイル名の欄（読むだけ）に分けて出す（REQ-313）。答えは番号と「送る」かに加え、「送る」のときだけ
+// 指示の欄の文を渡す（確かめるのは Python。既定のフォーカスと Esc は「送らない」）。
 
 import { call, on } from "./bridge.js";
 import { confirm, notice, panel } from "./dialog.js";
@@ -493,6 +494,7 @@ function drawTable(rows, state) {
   const fragment = document.createDocumentFragment();
   rows.forEach((row, index) => {
     const tr = document.createElement("tr");
+    tr.dataset.row = String(index); // 表の行の番号（tableRows の位置）。選択・タブ・クリックはこの番号で引く（子の行は data-parent）
     tr.append(includedCell(row, state.can_edit));
     for (const column of columns) {
       if (column.key === "platform") {
@@ -521,10 +523,49 @@ function drawTable(rows, state) {
     tr.dataset.included = String(row.included);
     tr.setAttribute("aria-selected", String(selection.has(index)));
     fragment.append(tr);
+    // まとめて比べた組は、組の行のすぐ後にコマンドの組の行を出す（ADR-0216 決定6）
+    for (const command of row.commands || []) {
+      fragment.append(commandRow(command, index));
+    }
   });
   table.tBodies[0].replaceChildren(fragment);
   applyTab();
   scheduleFit();
+}
+
+// コマンドの組の行の頭に付ける印（言語によらない記号）
+const COMMAND_MARK = "└ ";
+
+// まとめて比べた組の下に出す、コマンドの組の 1 行（親の組の番号 parent を data-parent に入れる）。
+// 先頭のチェックのセルは空。変更前の列に「└ 名前」、状態・3 つの数・機種の列に値、ほかの列は空。機種は選択にせず文字だけ。
+// 出している列（columns。名前の列が無ければ無いまま）に合わせる。文字は make と textContent だけで入れ、title に全文
+function commandRow(command, parent) {
+  const tr = document.createElement("tr");
+  tr.className = "pilot-batch-command-row";
+  tr.dataset.parent = String(parent);
+  tr.dataset.hasDiff = String(command.has_diff);
+  tr.append(make("td", "pilot-check-cell", null));
+  for (const column of columns) {
+    const td = make("td", column.numeric ? "pilot-num" : column.key === "before" ? "pilot-batch-command-name" : "", null);
+    if (column.key === "before") {
+      text(td, `${COMMAND_MARK}${command.name}`);
+    } else if (["platform", "status", "structured", "raw", "unparsed"].includes(column.key)) {
+      text(td, command[column.key]);
+    }
+    td.title = td.textContent; // 切れて見えないセルの全文は、指を置くと出る（文字のまま）
+    tr.append(td);
+  }
+  return tr;
+}
+
+// 表の行（tr）の組の番号（tableRows の位置）。組の行は data-row、コマンドの組の行は親の組の data-parent
+function rowNumber(tr) {
+  return Number(tr.dataset.row ?? tr.dataset.parent);
+}
+
+// 組の行だけ（data-row を持つ行。コマンドの組の行は除く。表の中の並びが組の番号の順）
+function groupRows() {
+  return Array.from(table.tBodies[0].rows).filter((tr) => tr.dataset.row !== undefined);
 }
 
 // 片方だけのファイル（チェック・ファイル名）を左右 2 つの表に分けて描く（REQ-233）。items は同じ並びの側・番号・チェック・全文のパス。
@@ -605,9 +646,9 @@ function drawAllCheck(box, total, on, enabled) {
 
 // 今のタブで見えている表の行（組の順。Python が返した行）
 function visibleRows() {
-  return Array.from(table.tBodies[0].rows)
-    .filter((tr) => !tr.hidden && tr.sectionRowIndex < tableRows.length)
-    .map((tr) => tableRows[tr.sectionRowIndex]);
+  return groupRows()
+    .filter((tr) => !tr.hidden && rowNumber(tr) < tableRows.length)
+    .map((tr) => tableRows[rowNumber(tr)]);
 }
 
 // 組の表の見出しのチェック。対象は今のタブで見えている行。組を直せない（view.can_edit が偽）ときは押せない
@@ -648,10 +689,10 @@ async function restoreSelection(saved) {
   }
 }
 
-// 選んでいる行に aria-selected="true"（色は今の選択の CSS のまま）
+// 選んでいる行に aria-selected="true"（色は今の選択の CSS のまま。組の行だけ。コマンドの組の行は選ばない）
 function paintSelection() {
-  for (const tr of table.tBodies[0].rows) {
-    tr.setAttribute("aria-selected", String(selection.has(tr.sectionRowIndex)));
+  for (const tr of groupRows()) {
+    tr.setAttribute("aria-selected", String(selection.has(rowNumber(tr))));
   }
 }
 
@@ -680,16 +721,16 @@ function onlyOneSelected() {
 // 今のタブで見えている、番号 from から to までの行の番号（両端を含む。組の順）
 function visibleBetween(from, to) {
   const [low, high] = from <= to ? [from, to] : [to, from];
-  return Array.from(table.tBodies[0].rows)
-    .filter((tr) => !tr.hidden && tr.sectionRowIndex >= low && tr.sectionRowIndex <= high)
-    .map((tr) => tr.sectionRowIndex);
+  return groupRows()
+    .filter((tr) => !tr.hidden && rowNumber(tr) >= low && rowNumber(tr) <= high)
+    .map((tr) => rowNumber(tr));
 }
 
 // 行のクリック。修飾キーなしはその行だけ、⌘（metaKey）か Ctrl（ctrlKey）はその行を足すか外す、
 // Shift（shiftKey）は anchor からその行までの見えている行。主の行が変わったときだけ select_result を呼ぶ
 async function clickRow(index, event) {
   const before = selected;
-  const isShown = (row) => row >= 0 && row < table.tBodies[0].rows.length && !table.tBodies[0].rows[row].hidden;
+  const isShown = (row) => row >= 0 && row < groupRows().length && !groupRows()[row].hidden;
   if (event.shiftKey && isShown(anchor)) {
     selection = new Set(visibleBetween(anchor, index));
     selected = index;
@@ -716,11 +757,18 @@ async function clickRow(index, event) {
 }
 
 // タブに合わせて行を隠す。選んでいる行のどれかが隠れたら選択を全部外す。
+// コマンドの組の行は親の組の行と同じ見せ方にする（親が見えていれば全部見せる。選択の判定は組の行だけ）。
 function applyTab() {
   let hidden = false;
+  let parentHidden = false;
   for (const tr of table.tBodies[0].rows) {
+    if (tr.dataset.row === undefined) {
+      tr.hidden = parentHidden;
+      continue;
+    }
     tr.hidden = tab === "diff" && tr.dataset.hasDiff !== "true";
-    if (tr.hidden && selection.has(tr.sectionRowIndex)) {
+    parentHidden = tr.hidden;
+    if (tr.hidden && selection.has(rowNumber(tr))) {
       hidden = true;
     }
   }
@@ -791,6 +839,69 @@ function area(value, className) {
   return el;
 }
 
+// 確認の下の、閉じた折りたたみ「指示文を直す（この送信だけ）」（REQ-313 / ADR-0218 決定6）。中身は Python が渡した文だけ。
+// 「元に戻す」は欄を使用中のひな形に戻すだけ（作り直さない）。「作り直す」は欄の文を Python に渡す（確かめるのは Python）。
+// 作り直して確認が捨てられた（確認が無くなった・番号が変わった）ら、印を立てて確認を閉じる。断られたときは Python の知らせが出る。
+function editFold(approval, state) {
+  const edit = approval.edit;
+  const fold = make("details", "pilot-details", null);
+  fold.append(make("summary", "", edit.title));
+  const body = make("div", "pilot-details-body", null);
+  const box = make("textarea", "pilot-input pilot-mono pilot-nowrap", null);
+  box.value = edit.template;
+  box.rows = 10;
+  box.spellcheck = false;
+  body.append(box, make("p", "pilot-strong", edit.diff_once));
+  const marks = make("details", "pilot-details", null);
+  marks.append(make("summary", "", edit.marks_title));
+  const marksBody = make("div", "pilot-details-body", null);
+  const table = make("table", "pilot-table", null);
+  const head = document.createElement("tr");
+  for (const column of edit.marks_columns) {
+    const th = make("th", "", column);
+    th.scope = "col";
+    head.append(th);
+  }
+  table.createTHead().append(head);
+  const rows = table.createTBody();
+  for (const [mark, meaning] of edit.marks) {
+    const tr = document.createElement("tr");
+    tr.append(make("td", "pilot-mono", mark), make("td", "", meaning));
+    rows.append(tr);
+  }
+  marksBody.append(table);
+  marks.append(marksBody);
+  body.append(marks);
+  const cautions = make("ul", "pilot-note-list", null);
+  for (const caution of edit.cautions) {
+    cautions.append(make("li", "", caution));
+  }
+  body.append(cautions);
+  const rebuild = make("button", "pilot-button pilot-button--secondary", edit.rebuild);
+  rebuild.type = "button";
+  rebuild.addEventListener("click", async () => {
+    const result = await call("rebuild_approval", box.value);
+    if (result.ok && (result.view.approval === null || result.view.approval.id !== approval.id)) {
+      state.rebuilt = true;
+      const dialog = rebuild.closest("dialog");
+      if (dialog !== null) {
+        dialog.close();
+      }
+    }
+    await handle(result);
+  });
+  const reset = make("button", "pilot-button pilot-button--secondary", edit.reset);
+  reset.type = "button";
+  reset.addEventListener("click", () => {
+    box.value = edit.original;
+  });
+  const row = make("div", "pilot-row", null);
+  row.append(rebuild, reset);
+  body.append(row);
+  fold.append(body);
+  return fold;
+}
+
 // 全部の組をまとめて1回だけ出す。チェックの既定は全部オン。既定のフォーカスと Esc は「送らない」（dialog.js の panel）。
 // 全文は画面に出さない（「内容をファイルに保存…」で書き出して見る）。答えを Python に渡すだけで、送るかは Python が決める。
 // 「内容を確かめる…」（check_only）はチェックの列を出さず、ボタンが 1 つのダイアログ（dialog.js の view）で開く。
@@ -848,25 +959,51 @@ async function showApproval(approval) {
   const tools = make("div", "pilot-row", null);
   tools.append(save, make("span", "pilot-note pilot-grow", approval.save_note));
   parts.push(wrap, tools);
+  // 「指示文を直す（この送信だけ）」（REQ-313）。作り直したら、この確認は送らずに閉じ、新しい確認は番号が変わったときの描き直しで開く
+  const state = { rebuilt: false };
+  if (approval.edit !== null) {
+    parts.push(editFold(approval, state));
+  }
   if (checkOnly) {
     await viewOnly(approval.title, parts, approval.close);
+    if (state.rebuilt) {
+      return;
+    }
     await handle(await call("answer_approval", [], false));
     return;
   }
   const yes = await panel(approval.title, parts, approval.send, approval.dont_send);
+  if (state.rebuilt) {
+    return; // Python が確認を捨てて作り直した。答えは送らない（新しい確認が出る）
+  }
   const checked = yes ? checks.filter((item) => item.check.checked).map((item) => item.jobId) : [];
   await handle(await call("answer_approval", checked, yes));
 }
 
-// 「AI に案を聞く…」の送信前の確認（REQ-219 / ADR-0159 決定4）。送り先・送る全文（読むだけの欄）・送らないファイル・注意の文。
+// 「AI に案を聞く…」の送信前の確認（REQ-219 / ADR-0159 決定4）。送り先・送る全文（指示の欄は直せる、ファイル名の欄は読むだけ。REQ-313）・送らないファイル・注意の文。
 // 送らないファイルの名前は JSON の文字列の形で 1 行ずつ出す（改行などを含む名前も 1 行に見える）。
-// 既定のフォーカスと Esc は「送らない」（dialog.js の panel）。答えは番号と「送る」かだけ。送る文は Python が持っている。
+// 既定のフォーカスと Esc は「送らない」（dialog.js の panel）。答えは番号と「送る」か、「送る」のときだけ指示の欄の文。
+// ファイル名の欄は渡さない。指示の文を確かめて送るかを決めるのは Python。
 async function showPairAi(preview) {
   // 全文の見出しは、送る直前に答えの書き方の決まり（固定の文）を足すことの知らせ（ADR-0150 決定2）
+  // 全文は、直せる指示の欄と読むだけのファイル名の欄に分けて出す（REQ-313 / ADR-0218 決定7）。つなぐと送る文と同じ
+  const instruction = make("textarea", "pilot-input pilot-mono pilot-nowrap", null);
+  instruction.value = preview.instruction;
+  instruction.spellcheck = false;
+  const reset = make("button", "pilot-button pilot-button--secondary", preview.reset);
+  reset.type = "button";
+  reset.addEventListener("click", () => {
+    instruction.value = preview.instruction;
+  });
   const parts = [
     make("p", "pilot-lines", preview.destination),
     make("p", "", preview.prompt_title),
-    area(preview.prompt, "pilot-input pilot-mono pilot-nowrap"),
+    make("p", "", preview.instruction_title),
+    instruction,
+    make("p", "", preview.file_names_title),
+    area(preview.file_names, "pilot-input pilot-mono pilot-nowrap"),
+    reset,
+    make("p", "pilot-note", preview.edit_note),
   ];
   if (preview.held_back.length > 0) {
     parts.push(make("p", "", preview.held_back_title));
@@ -874,7 +1011,8 @@ async function showPairAi(preview) {
   }
   parts.push(make("p", "pilot-note", preview.note));
   const yes = await panel(preview.title, parts, preview.send, preview.dont_send);
-  await handle(await call("answer_pair_ai", preview.id, yes));
+  // 「送る」のときだけ指示の欄の文を渡す（直さなければ Python が確認に出した文をそのまま送る）
+  await handle(await call("answer_pair_ai", preview.id, yes, yes ? instruction.value : null));
 }
 
 // --- 操作を Python に渡す ---
@@ -1152,7 +1290,7 @@ table.tBodies[0].addEventListener("click", async (event) => {
     if (event.detail <= 1) {
       clickStart = { selected, selection: new Set(selection), anchor };
     }
-    await clickRow(tr.sectionRowIndex, event);
+    await clickRow(rowNumber(tr), event); // コマンドの組の行は親の組の番号で選ぶ
   }
 });
 // Shift を押しながらの押し下げは、窓の文字が範囲で選ばれないよう既定の動きを止める（行の中のチェックと選択は除く）

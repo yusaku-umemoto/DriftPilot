@@ -20,6 +20,7 @@ from typing import Any
 
 from driftpilot import i18n
 from driftpilot.llm_analyzer.follow_up import check_question
+from driftpilot.llm_analyzer.prompt_parts import FILE_NAMES, INSTRUCTION, PromptParts
 
 # 1 回に送るファイル名の合計の上限(超えたら一部だけ送ることはせず、送らずに知らせる。決定2)
 MAX_PAIR_NAMES = 400
@@ -85,15 +86,19 @@ def _names_json(names: Sequence[str]) -> str:
     return json.dumps(list(names), ensure_ascii=False)
 
 
+def pair_prompt_parts(before_names: Sequence[str], after_names: Sequence[str]) -> PromptParts:
+    """AI に送る文を、直せる指示の部分と直せないファイル名の部分に区切った並び(REQ-313)。つなぐと build_pair_prompt と同じ。
+
+    区切りは文字を探さず、文を組み立てる位置で決める(指示は _PROMPT_HEAD の行、ファイル名は空行と名前の一覧の 2 行)。
+    """
+    instruction = "\n".join(_PROMPT_HEAD) + "\n"
+    names = f"\n{_BEFORE_LABEL} {_names_json(before_names)}\n{_AFTER_LABEL} {_names_json(after_names)}"
+    return PromptParts(((INSTRUCTION, instruction), (FILE_NAMES, names)))
+
+
 def build_pair_prompt(before_names: Sequence[str], after_names: Sequence[str]) -> str:
     """AI に送る文。名前(Path.name)だけを受け取り、JSON の文字列の並びで入れる(パスは扱わない)。"""
-    lines = [
-        *_PROMPT_HEAD,
-        "",
-        f"{_BEFORE_LABEL} {_names_json(before_names)}",
-        f"{_AFTER_LABEL} {_names_json(after_names)}",
-    ]
-    return "\n".join(lines)
+    return pair_prompt_parts(before_names, after_names).text
 
 
 class _DuplicateKey(Exception):
@@ -107,8 +112,8 @@ def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return dict(pairs)
 
 
-def _strip_think(text: str) -> str | None:
-    """<think>…</think> を外す(小文字の決まった形だけ)。閉じていない <think> は None。"""
+def strip_think(text: str) -> str | None:
+    """<think>…</think> を外す(小文字の決まった形だけ)。閉じていない <think> は None。組の案と式の案(rule_suggestion)で共用する。"""
     s = text.lstrip()
     if s.startswith(_THINK_OPEN):
         end = s.find(_THINK_CLOSE)
@@ -184,7 +189,7 @@ def _check_pairs(items: list[Any], before_names: Sequence[str], after_names: Seq
 def _read(answer: Any, before_names: Sequence[str], after_names: Sequence[str]) -> PairReading:
     if not isinstance(answer, str):
         return PairReading(reason=REASON_SHAPE)
-    text = _strip_think(answer)
+    text = strip_think(answer)
     if text is None:
         return PairReading(reason=REASON_NO_JSON)
     if len(text) > MAX_ANSWER_CHARS:

@@ -79,6 +79,7 @@ from typing import Any
 
 from driftpilot import __version__
 from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
+from driftpilot.gui_web.rule_ai import RuleAi
 from driftpilot.gui_web.theme import THEME_EVENT
 from driftpilot.llm_analyzer import LLMClient, ShapeNode, send_connection_check
 from driftpilot.llm_settings import CUSTOM_HTTP_JSON, ENV_KEY_PREFIX, LANGUAGES, THEMES, SettingsError
@@ -356,6 +357,8 @@ class SettingsApi(Api):
         self._start_applier = start_applier
         self._discard_update = discard_update
         self._window: Any = None
+        # 「単純比較」のタブの「AI に式を頼む…」(REQ-314)。確認と送信は専用の入れ物が持つ(この窓の状態・保存・ロックには触らない)
+        self._rule_ai = RuleAi(self._where, client_factory, self._notify_rule_ai)
         # 状態はここだけに持つ。pywebview は js_api の呼び出しを別々のスレッドで動かすので、触るのはロックの中だけ
         self._lock = threading.RLock()
         self._view: SettingsView | None = None
@@ -496,6 +499,21 @@ class SettingsApi(Api):
         """
         return self._call(self._save_raw_defaults, values)
 
+    def ask_rule_ai(self, lines: Any, description: Any, kind: Any) -> dict[str, Any]:
+        """「単純比較」のタブの「AI に式を頼む…」(REQ-314)。送らずに、送る全文の確認(rule_ai.confirm)か送れない理由(rule_ai.refused)を返す。
+
+        設定の窓の状態は読まない・変えない(保存もしない)。比較の窓の同じ名前の口と同じ動き。
+        """
+        return _guarded(self._rule_ai.ask, lines, description, kind)
+
+    def answer_rule_ai(self, number: Any, yes: Any) -> dict[str, Any]:
+        """式を頼む確認の答え。number は rule_ai.confirm.id。「送信する」(yes が True)のときだけ 1 回送る。答えは rule_ai.done の知らせで届く。"""
+        return _guarded(self._rule_ai.answer, number, yes)
+
+    def close_rule_ai(self, number: Any) -> dict[str, Any]:
+        """式を頼む小さな窓を閉じた。待っている確認を捨て、送っていれば届く答えを捨てる。"""
+        return _guarded(self._rule_ai.close, number)
+
     def migrate(self, form: Any) -> dict[str, Any]:
         """「保管庫に移す」。確かめを返す。"""
         return self._call(self._migrate, form)
@@ -633,6 +651,12 @@ class SettingsApi(Api):
         self._notify_saved()
         self._notify_theme()
         return result
+
+    def _notify_rule_ai(self, event: dict[str, Any]) -> None:
+        """「AI に式を頼む…」の答えを、この窓(設定の窓)だけへ知らせる。窓が閉じた後の失敗は呼ぶ側が握りつぶす。"""
+        window = self._window
+        if window is not None:
+            notify(window, event)
 
     def _notify_theme(self) -> None:
         """色が書けた印(_theme_pending)があれば消して、窓に当てる(ロックの外で。失敗は捨てる。ADR-0189)。
@@ -2125,6 +2149,7 @@ class SettingsApi(Api):
         窓の上の × で閉じたときは _close を通らないので、ここで「更新する」の準備を止め(準備のフォルダーは prepare_update が消す)、
         確かめを待っている準備を捨てる。閉じた後に準備ができても、_start_update が印を見て捨てる。
         """
+        self._rule_ai.closed()  # 「AI に式を頼む…」の確認と送信を捨てる(元の行も捨てる。REQ-314)
         with self._lock:
             self._window_closed = True
             self._pending = None
@@ -2135,6 +2160,7 @@ class SettingsApi(Api):
             self._discard_update(prepared)
 
     def _close(self) -> dict[str, Any]:
+        self._rule_ai.closed()
         with self._lock:
             self._clear_key += 1
             self._pending = None

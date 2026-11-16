@@ -49,7 +49,7 @@ let thinkingBox = null;
 let thinkingFolded = false;
 let thinkingLive = false;
 let thinkingRevision = null;
-let aiPending = false; // AI の面のボタンの呼び出しを待っている間（Enter の二度押しで重ねて呼ばない）
+let aiPending = false; // AI の面のボタンの呼び出しを待っている間（Shift+Enter の二度押しで重ねて呼ばない）
 // AI に送る間のクルクル（ADR-0164 決定5）。最後の view の ai_busy（{text} か null。出すかは Python が決める）
 let aiBusy = null;
 // キャラクターの絵を出すか（view.character。ADR-0174 決定1）。考え中の絵（スピナーの代わり）と警告の絵に使う
@@ -445,6 +445,8 @@ function renderAi(ai) {
   // まとめて比べたとき: 送る組の数と、1 つもチェックしていないときの押せない理由（REQ-265。文は Python が決める）
   note("ai-send-pairs", ai.send_pairs ?? null);
   note("ai-send-reason", ai.send_reason ?? null);
+  // 今の質問の対象の文（「質問の対象: …」。REQ-312 §4.1。文は Python が決める）
+  note("ai-target", ai.target ?? null);
   question.disabled = !ai.input_enabled;
   // 承認して送った答えが届いたら、解析の前に打った文を欄から消す（「送信しない」・中止・失敗では残す。REQ-206 §6）
   if (ai.clear !== shown.clear) {
@@ -470,25 +472,37 @@ function renderFullText(fullText) {
   note("send-full-text-note", fullText.note);
 }
 
-// 1つのボタンの名前と押せるか（ADR-0148 決定5）。「質問する」は can_ask が真で欄に文字があるときだけ。
-// ほかは「AI で解析」で、can_send_llm が真のときだけ押せる。判定の材料は Python が渡し、ここでは欄の文字の有無だけを見る。
+// 1つのボタンの名前と押せるか（ADR-0148 決定5・REQ-312 §4.1 / ADR-0218 決定3）。
+// 欄が空なら「定型の質問で解析」（send。can_send_llm が真のときだけ押せる）、
+// 文字があり can_follow_up が真なら「続けて質問」（ask。今の追加の質問）、そうでなければ「表示中の差分に質問」（shown。
+// can_ask_shown が真のときだけ押せ、押せないときは shown_reason を title に出す）。
+// 判定の材料は Python が渡し、ここでは欄の文字の有無だけを見る（ADR-0074 決定3）。
 function askMode() {
-  return view.ai.can_ask && question.value.trim() !== "" ? "ask" : "send";
+  if (question.value.trim() === "") {
+    return "send";
+  }
+  return view.ai.can_follow_up ? "ask" : "shown";
 }
 
 function renderAsk() {
   if (view === null) {
     return;
   }
-  const ask = askMode() === "ask";
-  text($("ai-ask"), ask ? view.ai.ask_label : view.ai.send_label);
-  $("ai-ask").disabled = aiPending || (ask ? false : !view.ai.can_send_llm);
-  // 「AI で解析」の形で押せない理由があるときだけ、ボタンの title にも出す（ADR-0175 の出し方と同じ）
-  const reason = view.ai.send_reason ?? null;
-  $("ai-ask").title = !ask && !view.ai.can_send_llm && reason !== null ? reason : "";
+  const mode = askMode();
+  const labels = { send: view.ai.send_label, ask: view.ai.ask_label, shown: view.ai.shown_label };
+  text($("ai-ask"), labels[mode]);
+  const ready = { send: view.ai.can_send_llm, ask: true, shown: view.ai.can_ask_shown };
+  $("ai-ask").disabled = aiPending || !ready[mode];
+  // 押せない理由があるときだけ、ボタンの title にも出す（ADR-0175 の出し方と同じ）
+  const reasons = { send: view.ai.send_reason ?? null, ask: null, shown: view.ai.shown_reason ?? null };
+  const reason = reasons[mode];
+  $("ai-ask").title = !ready[mode] && reason !== null ? reason : "";
+  // 表示が前の答えと違うとき、欄に文字があるときだけ注意を出す（新しい質問として送り、前のやり取りは消える）
+  note("ai-target-note", question.value.trim() !== "" ? (view.ai.target_note ?? null) : null);
 }
 
-// ボタン（と Enter）の動き。「質問する」は ask_follow_up、「AI で解析」は send_llm に欄の文を渡す（確かめと送るかは Python が決める）。
+// ボタン（と Shift+Enter）の動き。「続けて質問」は ask_follow_up、「表示中の差分に質問」は ask_shown に欄の文を渡し、
+// 「定型の質問で解析」は文を渡さずに send_llm を呼ぶ（確かめと送るかは Python が決める）。
 async function aiAction() {
   if (view === null || $("ai-ask").disabled) {
     return;
@@ -496,10 +510,13 @@ async function aiAction() {
   aiPending = true;
   renderAsk();
   try {
-    if (askMode() === "ask") {
+    const mode = askMode();
+    if (mode === "ask") {
       await askFollowUp(question.value, null);
+    } else if (mode === "shown") {
+      await act("ask_shown", question.value);
     } else {
-      await act("send_llm", question.value);
+      await act("send_llm", "");
     }
   } finally {
     aiPending = false;
@@ -631,13 +648,22 @@ export function createAiView(options) {
   // 「差分＋全文を送る」を変えたら Python に渡す（入れられるかは Python が決め、返した値で描き直す）
   $("send-full-text").addEventListener("change", () => act("set_full_text", $("send-full-text").checked));
   question.addEventListener("input", () => renderAsk());
-  // Enter はボタンが押せるときだけボタンと同じ動き。日本語の変換を確定する Enter（isComposing・229）と Shift+Enter（改行）では送らない
+  // Shift+Enter（Ctrl・Alt・⌘ なし）は、ボタンが押せるときだけボタンと同じ動き。押せないときは何もしない（改行も入れない）。
+  // Enter だけは改行（ブラウザーの既定）。日本語の変換を確定する Enter（isComposing・229）では、Shift を押していても送らない（ADR-0216 決定5）
   question.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) {
+    if (
+      event.key !== "Enter" ||
+      !event.shiftKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey ||
+      event.isComposing ||
+      event.keyCode === 229
+    ) {
       return;
     }
+    event.preventDefault();
     if (!$("ai-ask").disabled) {
-      event.preventDefault();
       aiAction();
     }
   });

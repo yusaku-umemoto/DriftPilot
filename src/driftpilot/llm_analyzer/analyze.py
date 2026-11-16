@@ -5,6 +5,7 @@
 プロバイダの例外の文面は残さない(認証エラーの文面にキーの一部が載ることがあるため)。残すのは種類と状態コードだけ。
 """
 
+import dataclasses
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 
@@ -16,8 +17,18 @@ from driftpilot.llm_analyzer.client import LLMConnectionError, LLMResponseError,
 from driftpilot.llm_analyzer.mask_patterns import masking_fingerprint
 from driftpilot.llm_analyzer.masking import Masker, normalize_words
 from driftpilot.llm_analyzer.follow_up import check_question, prompt_too_long
-from driftpilot.llm_analyzer.payload import MAX_FULL_TEXT_CHARS, WholeSection, build_payload, whole_body
+from driftpilot.llm_analyzer.payload import (
+    MAX_FULL_TEXT_CHARS,
+    WHOLE_NAME_OMITTED,
+    WholeSection,
+    build_payload,
+    whole_body,
+)
 from driftpilot.llm_analyzer.prompt import (
+    PROMPT_VERSION,
+    QUESTION_PROMPT_TEMPLATE,
+    QUESTION_TARGET_NAMES,
+    QUESTION_VERSION_SUFFIX,
     WHOLE_VERSION_SUFFIX,
     after_text_section,
     build_prompt_span,
@@ -28,6 +39,7 @@ from driftpilot.llm_analyzer.prompt import (
     with_after_text,
     with_extra_instruction,
     with_premise,
+    with_question,
     with_whole_rules,
 )
 from driftpilot.llm_analyzer.prompt_parts import DIFF, FULL, InstructionEdit, PromptParts
@@ -75,12 +87,23 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
     # 使用中が既定で show の比較なら「状態の確認」の本文で送る(ADR-0146 決定6)。送らないときの版も同じ決まりで決める。
     # 送る差分の種類は payload.source_of と同じ条件(構造化比較が無く、show の構造化の比較がある)で先に見る
     show_compare = structured is None and show is not None and show.method in ("structured", "both")
-    template = template_for(request.prompt_template, "show" if show_compare else None)
+    question = request.question
+    if question is not None:
+        # 表示中の差分への質問(REQ-312)。使用中のプロンプトと「状態の確認」への入れ替えは使わず、質問のひな形で送る
+        template = QUESTION_PROMPT_TEMPLATE
+        version = PROMPT_VERSION + QUESTION_VERSION_SUFFIX
+        if request.category is not None and structured is not None:
+            # 構造化差分をそのカテゴリだけにする(diff_total も絞った後の数になる。正規化した行は呼ぶ側が今と同じ入力で渡す)
+            kept = [d for d in structured.diffs if d["category"] == request.category]
+            structured = dataclasses.replace(structured, diffs=kept)
+    else:
+        template = template_for(request.prompt_template, "show" if show_compare else None)
+        version = prompt_version_of(template)
     common = {
         "max_diffs": request.max_diffs,
         "masking_fingerprint": masking_fingerprint().digest,
         "secret_words": list(words),
-        "prompt_version": prompt_version_of(template),
+        "prompt_version": version,
     }
     payload = build_payload(
         structured=structured,
@@ -94,11 +117,14 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
         max_diffs=request.max_diffs,
         include_after_text=request.include_after_text,
         show_command=show_command,
+        prefer=request.prefer_source,
     )
     reason: LlmReason
     if payload is None:
-        # 行の差分はあるが、構造化比較が動いて 0 件(順番の違いなど)なら送らない(ADR-0080 決定3)
-        reason = "no_structured_diff" if raw is not None and raw.diffs else "no_diff"
+        # 行の差分はあるが、構造化比較が動いて 0 件(順番の違いなど)なら送らない(ADR-0080 決定3)。
+        # 行の差分を選んで聞いたとき(prefer が raw)は、行の差分が無いだけなので no_diff
+        found_raw = raw is not None and raw.diffs and request.prefer_source != "raw"
+        reason = "no_structured_diff" if found_raw else "no_diff"
         return LlmAnalysis(status="skipped", reason=reason, diff_total=0, sent_diffs=0, **common)
     built = {
         "source": payload.source,
@@ -139,7 +165,20 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
         return LlmAnalysis(status="skipped", reason="full_text_too_long", **built)
     # 利用者が解析の前に打った文(REQ-206)。前提の後ろに置く。送らない1回目にも入るので、送信前の確認の全文と送る直前の照合に同じ文が出る
     prompt = with_extra_instruction(prompt, request.extra_instruction)
+    # 表示中の差分への質問の節(REQ-312)。前提の後ろ。extra_instruction とは同時に持たない。後ろに足すだけなので直せる指示の部分に入る
+    if question is not None:
+        prompt = with_question(prompt, question, _question_target_name(request, masker))
     return _send(request, prompt, built, clock, spans)
+
+
+def _question_target_name(request: LlmRequest, masker: Masker) -> str:
+    """質問の節の「対象」の名前(ADR-0218 決定4)。カテゴリの名前は判定(masker.judge)を通し、送れなければ省略の文にする。"""
+    kind = request.question_target
+    if kind == "structured" and request.category is not None:
+        judged = masker.judge(request.category, ())
+        name = judged.text if judged.text is not None else WHOLE_NAME_OMITTED
+        return QUESTION_TARGET_NAMES["structured_category"].format(name=name)
+    return QUESTION_TARGET_NAMES[kind]
 
 
 def _premise_refusal(request: LlmRequest, words: Sequence[str], built: dict) -> LlmAnalysis | None:
@@ -289,12 +328,18 @@ def _analyze_whole(request, sections, max_total_diffs, unchanged, clock) -> tupl
     # 使用中が既定で、本文に入れた組の種類が全部 show なら「状態の確認」の本文(ADR-0152 決定5・ADR-0146 決定6)。
     # 種類は組の種類で見る(テンプレートが無く単純比較に戻った show の組も show。差分の形式 sources では見ない)
     all_show = bool(whole.kinds) and all(kind == "show" for kind in whole.kinds)
-    template = template_for(request.prompt_template, "show" if all_show else None)
+    if request.question is not None:
+        # 表示中の差分への質問(REQ-312)。質問のひな形で送る(全部 show でも「状態の確認」にしない)
+        template = QUESTION_PROMPT_TEMPLATE
+        version = PROMPT_VERSION + QUESTION_VERSION_SUFFIX
+    else:
+        template = template_for(request.prompt_template, "show" if all_show else None)
+        version = prompt_version_of(template)
     common = {
         "max_diffs": request.max_diffs,
         "masking_fingerprint": masking_fingerprint().digest,
         "secret_words": list(words),
-        "prompt_version": prompt_version_of(template) + WHOLE_VERSION_SUFFIX,
+        "prompt_version": version + WHOLE_VERSION_SUFFIX,
     }
     built = {
         "source": "whole",
@@ -332,6 +377,8 @@ def _analyze_whole(request, sections, max_total_diffs, unchanged, clock) -> tupl
     # 前提の文(ADR-0172 決定2)は WHOLE_RULES の後ろ、打った文の前
     spans = [(*diff_region(prompt, diff_start, diff_end), DIFF)]  # 直せない範囲。以降は後ろに足すだけ(REQ-266)
     prompt = with_extra_instruction(with_premise(with_whole_rules(prompt), request.premise), request.extra_instruction)
+    if request.question is not None:
+        prompt = with_question(prompt, request.question, _question_target_name(request, masker))
     return _send(request, prompt, built, clock, spans), whole.sent
 
 

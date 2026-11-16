@@ -32,6 +32,7 @@ _SERVICE_SECRET_WORDS = frozenset({"password", "secret", "key"})
 # 認証サーバーのブロック(tacacs server・radius server で共通)とグループのブロックの中の行の scope(REQ-81)
 _AAA_SERVER_SCOPE = "aaa server"
 _AAA_GROUP_SCOPE = "aaa group server"
+_AAA_DYNAMIC_AUTHOR_SCOPE = "aaa dynamic-author"
 _SECRET_NOTE = "語のどれかが password・secret・key か、語の中に鍵が埋まった(key, や password= などの)"
 # SNMPv3 の利用者の行で、auth・priv の直後に残す方式の名前(ADR-0102 決定2 の一覧と、Arista・NX-OS の書き方)と、
 # aes の後ろの鍵の長さ(REQ-83 §3-2)。大文字小文字は区別しない。「sha・aes で始まる語」にしないのは、
@@ -425,6 +426,26 @@ def _aaa_server_host(m: re.Match[str], result: Global) -> bool:
     return True
 
 
+def _aaa_dynamic_author(m: re.Match[str], result: Global) -> bool:
+    _new_aaa_server(result, "radius", "dynamic-author")
+    return True
+
+
+def _aaa_dynamic_author_setting(m: re.Match[str], ctx: _AaaBlock) -> bool:
+    if ctx.has_children:
+        return False
+    words = m.string.split(" ")
+    # 最初の server-key の語までを残し、後ろの語(鍵の種類と値)を捨てる(鍵の値を IR に入れない)
+    at = next((i for i, word in enumerate(words) if word.lower() == "server-key"), len(words) - 1)
+    rest = " ".join(words[: at + 1])
+    if has_secret(rest):
+        return False
+    if at + 1 < len(words):
+        ctx.item["key_configured"] = True
+    _add(ctx.item["settings"], rest)
+    return True
+
+
 def _aaa_group(m: re.Match[str], result: Global) -> bool:
     result["aaa_servers"]["groups"].setdefault(f"{m['kind']} {m['name']}", {"settings": []})
     return True
@@ -699,6 +720,27 @@ PATTERNS: tuple[Pattern, ...] = (
         note=f"手続き。子を持たない行の原文を settings の集合に足す(重ねない。昇順)。子を持つ行と、{_SECRET_NOTE}行は未解釈",
     ),
     Pattern(
+        "global.aaa_dynamic_author", "top", r"aaa server radius dynamic-author", "aaa_servers.servers",
+        "aaa server radius dynamic-author", _aaa_dynamic_author,
+        note=(
+            "手続き。子を持つ見出しだけ読み、servers[\"radius dynamic-author\"] を作って中の行を読む(今の "
+            "global.aaa_server と同じ作り方。aaa.lines には入れない)。子の無い見出しは今までどおり aaa.line で "
+            "aaa.lines に入る。global.aaa.no_line・global.aaa.line より前に置く(ADR-0217 決定3、REQ-310)"
+        ),
+    ),
+    Pattern(
+        "global.aaa_dynamic_author_setting", _AAA_DYNAMIC_AUTHOR_SCOPE, r".+", "aaa_servers.servers.*.settings",
+        "client 192.0.2.10 server-key 0 EXAMPLEONLY", _aaa_dynamic_author_setting,
+        note=(
+            "手続き。子を持つ行は子も含めて未解釈。語(空白で区切る。大文字小文字は区別しない)に server-key があれば、"
+            "最初の server-key の語までを残して後ろの語(鍵の種類と値)を捨て、捨てた語が1つ以上あれば key_configured を "
+            f"True にする(`ignore server-key` のように後ろの語が無ければ変えない)。残りに{_SECRET_NOTE}語があれば、"
+            "行は未解釈(key_configured も変えない)。残り(空白は1つ)を settings の集合に足す(重ねない。昇順)。"
+            "鍵の値は IR のどこにも入れない。XR の入れ子の `client … vrf …` > `server-key …` は読まない"
+            "(ADR-0217 決定3、REQ-310)"
+        ),
+    ),
+    Pattern(
         "global.aaa_option", "top", r"(?:no )?(?:ip radius|ip tacacs|radius-server|tacacs-server) \S.*",
         "aaa_servers.options", "ip radius vrf MGMT source-interface Management1", _aaa_option,
         note=f"手続き。子を持たない行の原文を options の集合に足す(重ねない。昇順)。{_SECRET_NOTE}行は未解釈",
@@ -828,7 +870,7 @@ _LEAF_ONLY = frozenset(
     }
 )
 # 子を持つ行だけ読む書式(REQ-81 §3)。子の無い行は、表の後ろの書式(aaa.line など)に通すか未解釈
-_BLOCK_ONLY = frozenset({"global.aaa_server", "global.aaa_group"})
+_BLOCK_ONLY = frozenset({"global.aaa_server", "global.aaa_group", "global.aaa_dynamic_author"})
 _BLOCK_PATTERNS = tuple(pattern for pattern in PATTERNS if pattern.id not in _LEAF_ONLY)
 _LEAF_PATTERNS = tuple(pattern for pattern in PATTERNS if pattern.id not in _BLOCK_ONLY)
 
@@ -838,6 +880,8 @@ def _aaa_block_item(heading: str, text: str, result: Global) -> tuple[str, AaaSe
     words = text.split(" ")
     if heading == "global.aaa_server":  # <種類> server <名前>
         return _AAA_SERVER_SCOPE, result["aaa_servers"]["servers"][f"{words[0]} {words[2]}"]
+    if heading == "global.aaa_dynamic_author":  # aaa server radius dynamic-author
+        return _AAA_DYNAMIC_AUTHOR_SCOPE, result["aaa_servers"]["servers"][f"{words[2]} {words[3]}"]
     # aaa group server <種類> <名前>
     return _AAA_GROUP_SCOPE, result["aaa_servers"]["groups"][f"{words[3]} {words[4]}"]
 

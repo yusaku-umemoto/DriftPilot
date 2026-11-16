@@ -289,6 +289,23 @@ DEFAULT_PROMPT_TEMPLATE = i18n.choose(DEFAULT_PROMPT_TEMPLATE_JA, DEFAULT_PROMPT
 INCIDENT_PROMPT_TEMPLATE = i18n.choose(INCIDENT_PROMPT_TEMPLATE_JA, INCIDENT_PROMPT_TEMPLATE_EN)
 # 状態の確認(show の比較で、使用中が既定のときもこれで送る。ADR-0146 決定6)
 STATUS_PROMPT_TEMPLATE = i18n.choose(STATUS_PROMPT_TEMPLATE_JA, STATUS_PROMPT_TEMPLATE_EN)
+# 表示中の差分への質問のひな形(REQ-312 / ADR-0218 決定4)。最初から入っている 3 つと同じ頭・「前提:」の節・差分の節で、
+# 答え方の 3 行だけが質問向け。プロンプトの選択肢(BUILTIN_PROMPT_VERSIONS・prompt-profiles.json)には入れない。
+# 版は PROMPT_VERSION + QUESTION_VERSION_SUFFIX(全部の組をまとめて送るときはさらに WHOLE_VERSION_SUFFIX)
+_QUESTION_BODY_JA = (
+    "最後の「利用者の質問」に、差分から言えることで答えてください。",
+    "- 質問に関係する差分だけを使う。関係する差分が無ければ、そのことを 1 文で書く。",
+    "- 差分から確かに言えないことは書かないか、推測と分かるように書く。",
+)
+_QUESTION_BODY_EN = (
+    'Answer the final "Question from the user" with what the differences show.',
+    "- Use only the differences that relate to the question. If no difference relates to it, write that in one sentence.",
+    "- Do not write what the differences do not clearly show, or write it so that it is clearly a guess.",
+)
+QUESTION_PROMPT_TEMPLATE_JA = _builtin_template(_PROMPT_HEAD_JA, _PROMPT_TAIL_JA, *_QUESTION_BODY_JA)
+QUESTION_PROMPT_TEMPLATE_EN = _builtin_template(_PROMPT_HEAD_EN, _PROMPT_TAIL_EN, *_QUESTION_BODY_EN)
+QUESTION_PROMPT_TEMPLATE = i18n.choose(QUESTION_PROMPT_TEMPLATE_JA, QUESTION_PROMPT_TEMPLATE_EN)
+QUESTION_VERSION_SUFFIX = "-question"
 # 最初から入っている本文の prompt_version(ADR-0079。本文を変えたら版を上げる)。今の言語の 3 つだけを持つ
 BUILTIN_PROMPT_VERSIONS: dict[str, str] = {
     DEFAULT_PROMPT_TEMPLATE: PROMPT_VERSION,
@@ -404,6 +421,40 @@ def with_premise(prompt: str, text: str | None) -> str:
         return prompt
     separator = "\n" if prompt.endswith("\n") else "\n\n"
     return f"{prompt}{separator}" + "\n".join([PREMISE_HEADER, PREMISE_NOTE, text, PREMISE_FOOTER])
+
+
+# 質問の節(REQ-312 / ADR-0218 決定4)。前提の節の後ろ(送る文の最後。client が足す LOOK_RULES の前)に、空行1つを挟んで足す
+QUESTION_HEADER = i18n.choose("=== 利用者の質問 ===", "=== Question from the user ===")
+QUESTION_TARGET_LABEL = i18n.choose("質問の対象: ", "Target: ")
+QUESTION_FOOTER = i18n.choose("=== 質問ここまで ===", "=== End of question ===")
+# 質問の節の「対象」の名前(ADR-0218 決定4 の 5 つ)。structured_category だけ {name} にカテゴリの名前(判定を通した後)を入れる
+QUESTION_TARGET_NAMES_JA = {
+    "structured": "構造化比較の差分",
+    "structured_category": "構造化比較の差分（カテゴリ: {name}）",
+    "show": "show の表の差分",
+    "raw": "単純比較の差分",
+    "whole": "全コマンド比較結果（選んだ組の差分）",
+}
+QUESTION_TARGET_NAMES_EN = {
+    "structured": "Structured compare differences",
+    "structured_category": "Structured compare differences (category: {name})",
+    "show": "Differences of the show table",
+    "raw": "Simple compare differences",
+    "whole": "All command results (differences of the selected pairs)",
+}
+QUESTION_TARGET_NAMES = i18n.choose(QUESTION_TARGET_NAMES_JA, QUESTION_TARGET_NAMES_EN)
+
+
+def with_question(prompt: str, text: str | None, target_name: str) -> str:
+    """送る文の後ろに、質問の節(見出し・対象の行・質問の文・終わりの行)を足した文。text が None なら prompt のまま。
+
+    区切りは with_premise と同じ空行1つ。質問の文は入口が check_question で確かめた後の文をそのまま入れ(伏せる処理は通さない)、
+    target_name は判定を通した後の名前。
+    """
+    if text is None:
+        return prompt
+    separator = "\n" if prompt.endswith("\n") else "\n\n"
+    return f"{prompt}{separator}" + "\n".join([QUESTION_HEADER, f"{QUESTION_TARGET_LABEL}{target_name}", text, QUESTION_FOOTER])
 
 
 # 変更後の全文の節(ADR-0158 決定4)。指示文(ひな形)の後ろに、空行1つを挟んで足す。ひな形と PROMPT_VERSION は変えない

@@ -70,6 +70,9 @@ UnavailableReason = Literal[
 # whole は比較の窓で全部の組をまとめて1回で送った解析(ADR-0152 決定3)
 LlmSource = Literal["structured", "raw", "show", "whole"]
 UnsentKind = Literal["line", "pem_block"]
+# 質問の節の「対象」の種類(REQ-312。名前は prompt.QUESTION_TARGET_NAMES)
+QuestionTarget = Literal["structured", "show", "raw", "whole"]
+_QUESTION_TARGETS = ("structured", "show", "raw", "whole")
 
 
 # 利用者に見える誤りの文(日本語・英語。REQ-258)。鍵の組と差し込みの名前は両方で同じ。{value!r} は値の repr
@@ -80,6 +83,11 @@ _TEXTS_JA = {
     "premise_invalid": "premise は空でない {max_chars} 文字以下の文字列にしてください",
     "no_client_reason": "client が無いときは unavailable に理由を入れてください",
     "instruction_edit_invalid": "instruction_edit は InstructionEdit にしてください",
+    "question_invalid": "question は空でない文字列にしてください",
+    "question_with_extra": "question と extra_instruction は同時に指定できません",
+    "question_target_invalid": "question があるときは question_target を structured・show・raw・whole のどれかにしてください",
+    "prefer_source_invalid": "prefer_source は structured か raw にしてください",
+    "category_invalid": "category は空でない文字列にしてください",
 }
 _TEXTS_EN = {
     "max_diffs_invalid": "max_diffs must be an integer of 1 or more: {value!r}",
@@ -88,6 +96,11 @@ _TEXTS_EN = {
     "premise_invalid": "premise must be a non-empty string of at most {max_chars} characters",
     "no_client_reason": "When there is no client, give the reason in unavailable",
     "instruction_edit_invalid": "instruction_edit must be an InstructionEdit",
+    "question_invalid": "question must be a non-empty string",
+    "question_with_extra": "question and extra_instruction cannot be given together",
+    "question_target_invalid": "When question is given, question_target must be one of structured, show, raw and whole",
+    "prefer_source_invalid": "prefer_source must be structured or raw",
+    "category_invalid": "category must be a non-empty string",
 }
 _T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
@@ -132,8 +145,31 @@ class LlmRequest:
     # 送信前の確認で直した指示(この1回の送信だけ。REQ-266)。None なら承認した文をそのまま送る(今と同じ)。
     # 表示しない(中身を repr に出さない)
     instruction_edit: InstructionEdit | None = field(default=None, repr=False)
+    # 表示中の差分への質問(比較の窓・AI の窓。REQ-312 / ADR-0218 決定1〜4)。None なら今と同じ文。
+    # question は利用者の質問の文(入口が check_question で確かめてから入れる。表示しない)。あれば最初から入っている
+    # 「質問」のひな形で送り(prompt_template は使わない)、extra_instruction とは同時に持てない
+    question: str | None = field(default=None, repr=False)
+    # 送る差分の種類(payload.source_of の prefer)。None なら今の決まり
+    prefer_source: Literal["structured", "raw"] | None = None
+    # 構造化差分をこのカテゴリだけにして送る(構造化比較のタブでカテゴリを絞っているとき)
+    category: str | None = field(default=None, repr=False)
+    # 質問の節の「対象」の名前の種類(prompt.QUESTION_TARGET_NAMES の鍵)
+    question_target: QuestionTarget | None = None
 
     def __post_init__(self) -> None:
+        if self.question is not None:
+            if not isinstance(self.question, str) or not self.question.strip():
+                raise ValueError(_T["question_invalid"])  # 文に中身を入れない
+            if self.extra_instruction is not None:
+                raise ValueError(_T["question_with_extra"])
+            if self.question_target not in _QUESTION_TARGETS:
+                raise ValueError(_T["question_target_invalid"])
+        elif self.question_target is not None and self.question_target not in _QUESTION_TARGETS:
+            raise ValueError(_T["question_target_invalid"])
+        if self.prefer_source is not None and self.prefer_source not in ("structured", "raw"):
+            raise ValueError(_T["prefer_source_invalid"])
+        if self.category is not None and (not isinstance(self.category, str) or not self.category):
+            raise ValueError(_T["category_invalid"])
         if self.instruction_edit is not None and not isinstance(self.instruction_edit, InstructionEdit):
             # 文に中身を入れない
             raise ValueError(_T["instruction_edit_invalid"])

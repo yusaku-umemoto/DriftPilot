@@ -666,13 +666,35 @@ def raw_options_line(record: RawOptionsRecord) -> str:
     return line
 
 
+def _raw_result_of(raw: RawCompareResult | None, show: ShowCompareResult | None) -> RawCompareResult | None:
+    """行の差分の結果。raw があればそれ、無ければ show の中の行の差分(REQ-312 の prefer="raw")。"""
+    if raw is not None:
+        return raw
+    return show.raw if show is not None else None
+
+
 def source_of(
-    structured: CompareResult | None, raw: RawCompareResult | None, show: ShowCompareResult | None
+    structured: CompareResult | None,
+    raw: RawCompareResult | None,
+    show: ShowCompareResult | None,
+    prefer: Literal["structured", "raw"] | None = None,
 ) -> tuple[LlmSource, list[Any]] | None:
     """送る差分の種類と一覧。送るものが無ければ None。
 
     構造化比較(または show の構造化)が動いたときは、その差分だけを見る(0 件なら行の差分があっても送らない。ADR-0080 決定3)。
+    prefer は表示中の差分への質問だけが渡す(REQ-312 / ADR-0218 決定2)。None なら上の決まりのまま。
+    "raw" は行の差分(raw、無ければ show.raw)だけ。"structured" は構造化比較、無ければ show の表の差分だけ
+    (show が both でも、表に出ない行の差分は入れない)。どちらも 0 件なら None。
     """
+    if prefer == "raw":
+        lines = _raw_result_of(raw, show)
+        return ("raw", list(lines.diffs)) if lines is not None and lines.diffs else None
+    if prefer == "structured":
+        if structured is not None:
+            return ("structured", list(structured.diffs)) if structured.diffs else None
+        if show is not None and show.method in ("structured", "both"):
+            return ("show", list(show.diffs)) if show.diffs else None
+        return None
     if structured is not None:
         return ("structured", list(structured.diffs)) if structured.diffs else None
     if show is not None and show.method == "both":
@@ -699,13 +721,16 @@ def build_payload(
     after_source: Sequence[str] | None = None,
     include_after_text: bool = False,
     show_command: str | None = None,
+    prefer: Literal["structured", "raw"] | None = None,
 ) -> Payload | None:
     """送る内容を組み立てる。差分が無ければ None。打ち切りは伏せる前の件数で決める。
+
+    prefer は source_of と同じ(表示中の差分への質問だけ。REQ-312)。None なら今と同じ結果。
 
     include_after_text が真なら、差分の本文を作った後に変更後の全文も作る(ADR-0158。show の比較でも作る。ADR-0182 決定2)。
     偽なら今と同じ結果。
     """
-    found = source_of(structured, raw, show)
+    found = source_of(structured, raw, show, prefer)
     if found is None:
         return None
     source, diffs = found
@@ -728,7 +753,8 @@ def build_payload(
     elif source == "show":
         table_count = len(show.diffs)
         lines, sent = _show_body(selected[:table_count], masker, rec)
-        if show.method == "both":
+        if show.method == "both" and prefer != "structured":
+            # prefer が structured のときは表の差分だけ(表に出ない行の差分と単純比較の設定の 1 行は入れない。REQ-312)
             raw_selected = selected[table_count:]
             if secret is not None:
                 for _ in raw_selected:
@@ -741,9 +767,10 @@ def build_payload(
                 sent += raw_sent
     else:
         lines, sent = _raw_body(selected, diffs, masker, sides, rec)
-        if raw is not None and raw.options is not None:
+        options_of = _raw_result_of(raw, show) if prefer == "raw" else raw
+        if options_of is not None and options_of.options is not None:
             # 単純比較の設定の 1 行(ADR-0166)。件数だけで、利用者の式と置き換える文字は入れない。送った数には数えない
-            lines = [raw_options_line(raw.options), *lines]
+            lines = [raw_options_line(options_of.options), *lines]
     # 全文は差分の後に、同じ masker・sides・rec で作る(同じ値は差分と同じ <secret:N>。数は全文の後で取る)
     after_text = None
     if include_after_text:

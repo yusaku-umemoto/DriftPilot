@@ -209,6 +209,18 @@ def _walk_set(
 
 def _walk_acl_entries(category: str, name: str | None, before: list, after: list, out: list[Diff]) -> None:
     path = ("entries",)
+    if before and after:
+        # 片側が全部 seq なし(古い IOS-XE の番号なし・`access-list <番号> …`)、もう片側が全部 seq あり
+        # (新しい IOS-XE の `10 permit …`)のときは、番号の書き方の違いだけを差分にしない。text の列を位置で比べる
+        # (ADR-0217 決定4、REQ-310)
+        before_plain = all(e["seq"] is None for e in before)
+        after_plain = all(e["seq"] is None for e in after)
+        before_keyed = all(e["seq"] is not None for e in before)
+        after_keyed = all(e["seq"] is not None for e in after)
+        if (before_plain and after_keyed) or (before_keyed and after_plain):
+            if [e["text"] for e in before] != [e["text"] for e in after]:
+                out.append(_diff("changed", category, name, path, before, after))
+            return
     keyed = all(e["seq"] is not None for e in [*before, *after])
     seqs_unique = len({e["seq"] for e in before}) == len(before) and len({e["seq"] for e in after}) == len(after)
     if not (keyed and seqs_unique):

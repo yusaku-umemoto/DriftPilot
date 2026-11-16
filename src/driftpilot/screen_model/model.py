@@ -1429,6 +1429,19 @@ def with_instruction(plan: LlmPlan, text: str) -> LlmPlan:
     return LlmPlan(first=replace(plan.first, extra_instruction=text), send=send)
 
 
+def with_question(
+    plan: LlmPlan, question: str, prefer: Literal["structured", "raw"] | None, category: str | None, target: str
+) -> LlmPlan:
+    """表示中の差分への質問(確かめた後の文)と、送る差分の種類・カテゴリ・対象を、送らない1回目と送る2回目の両方に入れた計画
+    (REQ-312 / ADR-0218 決定2〜4)。
+
+    両方に同じ値を入れるので、送信前の確認の全文と、承認した内容の照合(approve)が一致する。
+    """
+    fields = {"question": question, "prefer_source": prefer, "category": category, "question_target": target}
+    send = None if plan.send is None else replace(plan.send, **fields)
+    return LlmPlan(first=replace(plan.first, **fields), send=send)
+
+
 def with_full_text(plan: LlmPlan) -> LlmPlan:
     """変更後の全文も送る計画(ADR-0158 決定6)。送らない1回目と送る2回目の両方に付ける。
 
@@ -1721,6 +1734,32 @@ def analyze_screen(
         analyzed = analyze_compared(request, outcome, llm)
     _enter("done", on_progress, should_cancel)
     return analyzed
+
+
+def analyze_pair_screen(
+    request: CompareRequest,
+    *,
+    outcome: MultiCompareOutcome,
+    llm: LlmRequest | None,
+    position: int,
+    on_progress: ProgressSink | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> MultiCompareOutcome:
+    """まとめての比較の1組だけを AI に送る(組を選んで構造化・単純のタブで聞くとき。REQ-312 §4.3)。
+
+    その組の結果を1つのコマンドの結果と同じ判断で解析し(analyze_compared。機種の判定の食い違い・失敗の組は今と同じく送らない)、
+    pairs[position] の llm だけを入れ替える。全体の答え(outcome.llm・llm_pairs)は外す(この答えは組の行に入る)。
+    request は使わない(組ごとの要求は PairResult.request)。llm が無ければ結果をそのまま返す。工程の境目で中止の印を見る。
+    """
+    if llm is None:
+        return outcome
+    _enter("llm", on_progress, should_cancel)
+    pair = outcome.pairs[position]
+    analyzed = analyze_compared(pair.request, pair.outcome, llm)
+    pairs = [replace(p, outcome=analyzed) if k == position else p for k, p in enumerate(outcome.pairs)]
+    result = replace(outcome, pairs=pairs, llm=None, llm_pairs=())
+    _enter("done", on_progress, should_cancel)
+    return result
 
 
 def _enter(stage: str, on_progress: ProgressSink | None, should_cancel: Callable[[], bool] | None) -> None:
@@ -2027,16 +2066,21 @@ def pair_records(
     *,
     saved_at: datetime | None = None,
     conversation: Conversation | None = None,
+    holder: int | None = None,
 ) -> list[dict[str, Any]]:
     """組ごとの保存の行(JSON Lines の1行が1組)。相手なしは入れない。どの行も同じ saved_at にする。
 
     全体を AI に送ったときの答えは whole_pair_results のとおり(最初の組の行に全体の答え、ほかは in_whole。ADR-0152 決定7)。
     conversation(比較の窓での AI とのやり取り。ADR-0179 決定2)は全体の答えを入れた行(whole_holder)にだけ入れる。
+    holder は1組に聞いた答えを入れた組の位置(REQ-312 §4.3。そのときは全体の答えが無い)。渡したときはその行にやり取りを入れる。
     """
     if saved_at is None:
         saved_at = datetime.now(timezone.utc).astimezone()
     paths = source_paths(inp)
-    holder = whole_holder(outcome) if conversation is not None else None
+    if holder is None:
+        holder = whole_holder(outcome) if conversation is not None else None
+    elif conversation is None:
+        holder = None
     pairs = whole_pair_results(outcome)
     if holder is not None:
         pairs = [
@@ -2251,6 +2295,19 @@ def opened_answer_index(records: Sequence[StoredRecord]) -> int | None:
     index = opened_whole_index(records)
     if index is None and len(records) == 1:
         return 0
+    if index is None and len(records) > 1:
+        # 1組に聞いた答え(REQ-312 §4.3)。in_whole の行が無く、送って届いた答えと保存したやり取りを持つ行がちょうど1つならその行。
+        # 一括比較の .jsonl にはやり取りが無いので、ここでは見つからない(今までどおり None)
+        held = [
+            k
+            for k, r in enumerate(records)
+            if r.outcome.conversation is not None
+            and r.outcome.llm is not None
+            and r.outcome.llm.status == "done"
+            and r.outcome.llm.transmitted
+        ]
+        if len(held) == 1:
+            return held[0]
     return index
 
 

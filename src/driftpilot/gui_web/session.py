@@ -32,6 +32,7 @@
 """
 
 import threading
+import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -285,6 +286,7 @@ class WebSession:
     def attach_compare(self, api: Any, window: Any) -> None:
         """比較の窓をつなぐ(app.run が create_window の後に呼ぶ)。窓を閉じたら、設定の窓と一括比較の窓も閉じる。"""
         api._attach(window)
+        _watch_window_state(window)
         with self.lock:
             self._compare = (window, api)
         window.events.closed += self._on_compare_closed
@@ -315,7 +317,8 @@ class WebSession:
             _destroy(batch[0])
 
     def handoff(self, handoff: Any, answer: Any = None) -> bool:
-        """一括比較の「比較画面で開く」。比較の窓の入力欄と設定を埋め、比較の窓を前に出す。比較の窓が無ければ False。
+        """一括比較の「比較画面で開く」。比較の窓の入力欄と設定を埋めて比べ(答えの有無によらず。ADR-0216 決定3)、比較の窓を前に出す。
+        比較の窓が無ければ False。
 
         answer はその組の AI の答え(batch_model.HandedAnswer。無ければ None)。比較の窓が比べ直して、差分が同じときだけ使う(ADR-0170)。
         """
@@ -361,6 +364,7 @@ class WebSession:
                 SETTINGS_TITLE, js_api=api, **theme_module.themed_window(self._settings_window, self._current_theme())
             )
             api._attach(window)  # 「閉じる」・接続テストの知らせ・ファイルのダイアログに使う
+            _watch_window_state(window)
             # 保存できたら、開いている比較の窓と一括比較の窓へ知らせる(ADR-0176 決定4。テストの偽物に口が無くても動く)
             set_on_saved = getattr(api, "_set_on_saved", None)
             if set_on_saved is not None:
@@ -463,6 +467,7 @@ class WebSession:
                 AI_PANE_TITLE, js_api=api, **theme_module.themed_window(self._ai_window, self._current_theme())
             )
             api._attach(window)  # 「閉じる」・ファイルのダイアログに使う
+            _watch_window_state(window)
             window.events.closed += lambda: self._on_ai_closed(window)
             with self.lock:
                 closed = self._compare_closed
@@ -514,6 +519,7 @@ class WebSession:
                 BATCH_TITLE, js_api=api, **theme_module.themed_window(self._batch_window, self._current_theme())
             )
             api._attach(window)  # 知らせ・閉じる・ファイルのダイアログに使う
+            _watch_window_state(window)
             watch_drop = self._watch_drop
             if watch_drop is not None:
                 # フォルダとマニフェストのドロップは、読み込みの後に Python の側で受ける(REQ-115)
@@ -555,11 +561,57 @@ class WebSession:
         batch[1]._closed()  # 実行中なら中止を頼む。待っている確認は送らずに門を返す
 
 
+# 窓が最小化しているか(窓を鍵にした弱い参照の表。値は最小化していれば True)。窓を作った後に _watch_window_state が
+# 事象(minimized・maximized・restored)を受ける形で入れる。表に無い窓(事象を受けられない窓)は「分からない」(ADR-0216 決定4)
+_MINIMIZED: "weakref.WeakKeyDictionary[Any, bool]" = weakref.WeakKeyDictionary()
+_MINIMIZED_LOCK = threading.Lock()
+
+
+def _watch_window_state(window: Any) -> None:
+    """窓の最小化・最大化・元に戻したの事象を受け、最小化しているかを覚える(ADR-0216 決定4。_bring_to_front が読む)。
+
+    events に minimized・maximized・restored の 3 つがそろっているときだけ登録し、最小化していない状態から始める。
+    受け手は窓を弱い参照で持つ(窓との循環参照を作らない)。事象を受けられない窓(events が無い・テストの偽の窓・弱い参照にできない窓)は
+    何も入れない(最小化か分からないものとして扱う)。
+    """
+    try:
+        events = window.events
+        minimized, maximized, restored = events.minimized, events.maximized, events.restored
+        ref = weakref.ref(window)
+
+        def remember(value: bool) -> Callable[[], None]:
+            def handler() -> None:
+                target = ref()
+                if target is not None:
+                    with _MINIMIZED_LOCK:
+                        _MINIMIZED[target] = value
+
+            return handler
+
+        events.minimized += remember(True)
+        events.maximized += remember(False)
+        events.restored += remember(False)
+        with _MINIMIZED_LOCK:
+            _MINIMIZED[window] = False
+    except Exception:  # noqa: BLE001 - 事象を受けられない窓は「分からない」のまま(今のまま show と restore)
+        pass
+
+
 def _bring_to_front(window: Any) -> None:
-    """pywebview に「前に出す」の口は無いので show と restore。"""
+    """窓を前に出す。pywebview に「前に出す」の口は無いので show し、最小化しているときだけ restore する(ADR-0216 決定4)。
+
+    restore は最大化も解くので、最小化していない窓には呼ばない。最小化か分からない窓(事象を受けられない窓)は
+    今まで通り show と restore を両方呼ぶ。
+    """
     try:
         window.show()
-        window.restore()
+        try:
+            with _MINIMIZED_LOCK:
+                minimized = _MINIMIZED.get(window)
+        except TypeError:  # 弱い参照にできない窓は表に無い
+            minimized = None
+        if minimized is not False:
+            window.restore()
     except Exception:  # noqa: BLE001 - 閉じかけの窓は前に出せなくてよい
         pass
 

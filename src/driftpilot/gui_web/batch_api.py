@@ -54,12 +54,16 @@ JavaScript(static/js/batch.js)は返した JSON を描くことと、操作を�
 - 「HTML・CSV で出力…」(export_result。ADR-0156 / REQ-216): 押せるのは実行中でも確認の待ち中でもなく結果があるとき(can_export)。
   組の順と外した組の扱いは「結果を保存…」と同じ。差分の行・組の名前・ファイル名は AI に送るときと同じ判定で伏せ
   (batch_model.batch_report)、新しいファイルに書く(上書きしない)。設定の秘密の語を読めなければ出さない
+- 一括比較の確認の「指示文を直す（この送信だけ）」(rebuild_approval。REQ-313 / ADR-0218 決定6): 欄の文を確かめ、通ったら確認を捨てて
+  門を持ったまま 1 段目をその文でやり直し、新しい確認を出す。直した文は保存せず、送り終わる・送らない・中止・窓を閉じると捨てる。
 - 「AI に案を聞く…」(ask_pair_ai。REQ-219 / ADR-0159)。片方だけのファイルの名前(Path.name)だけを、毎回の送信前の確認
   (view.pair_ai_preview に送る全文・送り先・送らないファイル)の後に 1 回だけ送る。自動送信の設定は読まない。
   hostname の候補は作らず(出ている候補の行は消さない)、候補のファイルも含めて片方だけのファイルを全部送る(ADR-0177)。
   送らないのは、同じ側で名前が重なるファイル・秘密語の確かめで断った名前(制御文字を含む)だけ。
   この送信だけ、答えの見え方の決まり(ADR-0150)を足さない(送るのは確認に出した文だけ)。
-  確認の間と送っている間は門を持つ(組を直す操作と切り替えは止まる)。送るのは確認に出した文そのもの(画面から文を受け取らない)。
+  確認の間と送っている間は門を持つ(組を直す操作と切り替えは止まる)。送る文は、直さなければ確認に出した文そのもの。
+  画面は指示の欄の文(instruction。REQ-313)だけを渡す(ファイル名の欄は渡さず、直せない)。直した指示は check_question を通し、
+  ファイル名の欄とつないだ文の長さを見てから送る(断ったら送らずに門を返す)。
   答えは決まった形のときだけ候補(source が ai。チェックの既定はオフ)に足し、組にするのは「選んだ候補を組にする」だけ。
   hostname の候補と同じ組は AI の行にしない。選んだ候補に同じファイルが 2 回あれば何も組にせず知らせる。
   答えの文は view・知らせ・ログに出さない。案と答えは保存しない。中止・窓を閉じた・一覧が変わった後に届いた答えは捨てる
@@ -69,7 +73,7 @@ webview は読まない(窓は WebSession.open_batch が開いて _attach で渡
 
 import threading
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -95,14 +99,21 @@ from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.gui_web.drop_order import dropped_paths, order_pair
 from driftpilot.gui_web.session import WebSession
 from driftpilot.llm_analyzer import (
+    DEFAULT_PROMPT_TEMPLATE,
+    FILE_NAMES,
     MAX_PAIR_NAMES,
+    PROMPT_MARKS,
+    PROMPT_TEMPLATE_MAX_CHARS,
     LLMClient,
     LLMConnectionError,
     LLMResponseError,
-    build_pair_prompt,
+    PromptParts,
+    check_prompt_template,
+    normalize_newlines,
+    pair_prompt_parts,
     read_pair_answer,
 )
-from driftpilot.llm_analyzer.follow_up import MAX_PROMPT_CHARS, prompt_too_long
+from driftpilot.llm_analyzer.follow_up import MAX_PROMPT_CHARS, check_question, prompt_too_long
 from driftpilot.llm_analyzer.masking import normalize_words
 from driftpilot.llm_analyzer.payload import source_of
 from driftpilot.llm_settings import (
@@ -142,7 +153,14 @@ from driftpilot.messages import (
     BATCH_FAILED_TITLE,
     BATCH_LLM_SETTINGS_TITLE,
     BATCH_NOT_SENT_TITLE,
+    BATCH_EDIT_NOT_SAVED,
+    BATCH_EDIT_REBUILD,
+    BATCH_EDIT_REFUSED_TITLE,
+    BATCH_EDIT_SHOW_TOO,
+    BATCH_EDIT_TITLE,
     BATCH_PAIR_AI_ASKING,
+    BATCH_PAIR_AI_EDIT_NOTE,
+    BATCH_PAIR_AI_FILE_NAMES_TITLE,
     BATCH_PAIR_AI_HELD_BACK,
     BATCH_PAIR_AI_HINT,
     BATCH_PAIR_AI_NO_FILES,
@@ -177,6 +195,7 @@ from driftpilot.messages import (
     batch_hostname_none,
     batch_llm_gave_up,
     batch_manifest_saved_with,
+    batch_edit_template_invalid,
     batch_pair_ai_destination,
     batch_pair_ai_failed,
     batch_pair_ai_partial,
@@ -195,6 +214,15 @@ from driftpilot.messages import (
     export_saved,
     export_settings_unreadable,
     batch_handoff_note,
+    LLM_PREVIEW_INSTRUCTIONS,
+    LLM_PREVIEW_RESET,
+    PROMPT_DIFF_ONCE_NOTE,
+    PROMPT_MARK_MEANINGS,
+    PROMPT_MARKS_COL_MARK,
+    PROMPT_MARKS_COL_MEANING,
+    PROMPT_MARKS_TITLE,
+    PROMPT_NOTE_PLAIN,
+    follow_up_refused,
     gui_web_call_failed,
     llm_column,
     unpaired_side_line,
@@ -411,9 +439,9 @@ class BatchApi(Api):
         }
         self._fold_unpaired = 0
         self._fold_suggestion_ids: set[str] = set()
-        # AI に組の案を聞く(REQ-219)。待っている確認: (番号, 送る文, (変更前の 名前→パス, 変更後の 名前→パス), 計画, 組の一覧の番号)。
-        # 確認の画面(view.pair_ai_preview)と、送っている間のスレッド
-        self._pair_ai: tuple[int, str, tuple[dict[str, Path], dict[str, Path]], LlmPlan, int] | None = None
+        # AI に組の案を聞く(REQ-219)。待っている確認: (番号, 送る文, (変更前の 名前→パス, 変更後の 名前→パス), 計画, 組の一覧の番号,
+        # 送る文を指示とファイル名に区切った部分の並び。REQ-313)。確認の画面(view.pair_ai_preview)と、送っている間のスレッド
+        self._pair_ai: tuple[int, str, tuple[dict[str, Path], dict[str, Path]], LlmPlan, int, PromptParts] | None = None
         self._pair_ai_view: dict[str, Any] | None = None
         self._pair_asking: _PairAsking | None = None
         self._worker: BatchWorker | None = None
@@ -424,6 +452,8 @@ class BatchApi(Api):
         self._second: list[JobResult] = []
         self._first_summary: BatchSummary | None = None
         self._plan: LlmPlan | None = None
+        # 送信前の確認で、この送信だけ直した指示文(REQ-313)。無ければ None。2 段目が終わる・送らない・中止・窓を閉じると捨てる
+        self._edited_template: str | None = None
         self._settings: LlmSettings | None = None
         self._approved: dict[str, str] = {}
         # 一括比較の答えの送り先(ADR-0170 / REQ-232 §2): 2 段目で送っている送り先 (AI プロファイル (id, 名前), プロンプトの名前)と、
@@ -511,6 +541,14 @@ class BatchApi(Api):
         """
         return self._call(self._answer_approval, checked, yes)
 
+    def rebuild_approval(self, template: Any) -> dict[str, Any]:
+        """送信前の確認の「直した指示文で作り直す」(REQ-313)。template は欄の文。
+
+        使用中のひな形(直した後なら直した文)と同じなら何もしない。違えば確かめ、通ったら今の確認を捨てて(送らない)、
+        門を持ったまま 1 段目をその文でやり直し、新しい確認を出す。断ったときは確認はそのままで、理由の種類だけを知らせる。
+        """
+        return self._call(self._rebuild_approval, template)
+
     def save_approval_payloads(self) -> dict[str, Any]:
         """送信前の確認の「内容をファイルに保存…」。確認は閉じない。"""
         return self._call(self._save_approval_payloads)
@@ -588,9 +626,13 @@ class BatchApi(Api):
         """「AI に案を聞く…」(REQ-219)。送らずに、送る全文の確認(view.pair_ai_preview)を出すだけ。"""
         return self._call(self._ask_pair_ai)
 
-    def answer_pair_ai(self, number: Any, yes: Any) -> dict[str, Any]:
-        """AI に案を聞く確認の答え。number は view.pair_ai_preview.id。「送る」(yes が True)のときだけ、確認に出した文を送る。"""
-        return self._call(self._answer_pair_ai, number, yes)
+    def answer_pair_ai(self, number: Any, yes: Any, instruction: Any = None) -> dict[str, Any]:
+        """AI に案を聞く確認の答え。number は view.pair_ai_preview.id。「送る」(yes が True)のときだけ送る。
+
+        instruction は指示の欄の文(REQ-313)。None か直す前と同じなら、確認に出した文をそのまま送る。違えば確かめて、
+        直した指示＋ファイル名の欄をつないだ文を送る(断ったら送らず門を返す)。
+        """
+        return self._call(self._answer_pair_ai, number, yes, instruction)
 
     def result(self) -> dict[str, Any]:
         """1 つの表の行(組の順)と、対にならなかったファイルの行。"""
@@ -704,10 +746,17 @@ class BatchApi(Api):
         """実行中でなく、門を持っていない(送信前の確認を待っている間は門を持っている)。"""
         return self._worker is None and self._session.owner is not self
 
-    def _table(self) -> list[BatchTableRow]:
-        """ロックの中で呼ぶ。1 つの表の行(組の順)。"""
+    def _table(self, *, names: bool = True) -> list[BatchTableRow]:
+        """ロックの中で呼ぶ。1 つの表の行(組の順)。
+
+        まとめて比べた組の下のコマンドの組の行(ADR-0216 決定6)の名前は、秘密の語の判定に通す。語の設定は、表示する結果に
+        まとめて比べた組があるときだけ読む。names が偽なら読まない(タブの件数だけ使う呼び出し。コマンドの組の行の名前は隠す側)。
+        """
         jobs = self._prepared.jobs if self._prepared is not None else ()
-        return table_rows(jobs, self._shown, self._running, self._excluded())
+        words = None
+        if names and any(result.multi is not None for result in self._shown.values()):
+            words = self._secret_words()
+        return table_rows(jobs, self._shown, self._running, self._excluded(), words=words)
 
     def _excluded(self) -> frozenset[str]:
         return self._edit.excluded if self._edit is not None else frozenset()
@@ -741,6 +790,30 @@ class BatchApi(Api):
             and self._session.free_for(self)
         )
 
+    def _in_use_template(self) -> str:
+        """ロックの中で呼ぶ。使用中のプロンプトのひな形(既定なら今の言語の既定の文)。確認の待ち中だけ呼ぶ。"""
+        assert self._settings is not None
+        template = self._settings.prompt_template
+        return DEFAULT_PROMPT_TEMPLATE if template is None else template
+
+    def _approval_edit_view(self) -> dict[str, Any] | None:
+        """ロックの中で呼ぶ。確認の「指示文を直す（この送信だけ）」の中身(REQ-313)。設定が無ければ None(折りたたみを出さない)。"""
+        if self._settings is None:
+            return None
+        original = self._in_use_template()
+        return {
+            "title": BATCH_EDIT_TITLE,
+            "template": original if self._edited_template is None else self._edited_template,
+            "original": original,
+            "diff_once": PROMPT_DIFF_ONCE_NOTE,
+            "marks_title": PROMPT_MARKS_TITLE,
+            "marks_columns": [PROMPT_MARKS_COL_MARK, PROMPT_MARKS_COL_MEANING],
+            "marks": [["{{" + name + "}}", PROMPT_MARK_MEANINGS[name]] for name in PROMPT_MARKS],
+            "cautions": [PROMPT_NOTE_PLAIN, BATCH_EDIT_NOT_SAVED, BATCH_EDIT_SHOW_TOO],
+            "rebuild": BATCH_EDIT_REBUILD,
+            "reset": LLM_PREVIEW_RESET,
+        }
+
     def _render(self) -> dict[str, Any]:
         """画面に描く状態。表の行は入れない(result() で渡す)。押せるかは wx の _refresh_controls と同じ条件。"""
         self._revision += 1
@@ -770,6 +843,7 @@ class BatchApi(Api):
                 "send": None if check_only else BATCH_APPROVAL_SEND,
                 "dont_send": None if check_only else BATCH_APPROVAL_DONT_SEND,
                 "close": BATCH_APPROVAL_CLOSE if check_only else None,
+                "edit": self._approval_edit_view(),
             }
         return {
             "revision": self._revision,
@@ -816,7 +890,7 @@ class BatchApi(Api):
             # 窓の下の行に出す、単純比較の設定の要約と組ごとの設定の数(REQ-228 §7.2)。全部既定なら null
             "raw_settings_line": batch_edit.raw_settings_line(self._edit),
             # タブ(すべて・差分がある組)と片方だけのファイルの見出し。0 件でも出す(ADR-0020「必ず報告する」)
-            "pairs_titles": table_titles(self._table(), len(prepared.unpaired_rows) if prepared is not None else 0),
+            "pairs_titles": table_titles(self._table(names=False), len(prepared.unpaired_rows) if prepared is not None else 0),
             # 片方だけのファイルの左右 2 列の見出し(「変更前にしかない: N 件」の形。0 件でも出す。REQ-233 / ADR-0171 決定1)
             "unpaired_titles": {side: unpaired_side_line(side, len(self._only(side))) for side in SIDES},
             "pairs_revision": self._pairs_revision,
@@ -989,9 +1063,10 @@ class BatchApi(Api):
         return {"blocks": [], "plain": "", "text": llm_column(llm)}
 
     def _secret_words(self) -> list[str] | None:
-        """選択待ちの理由に出す名前を通す秘密の語(設定の extra_secret_words。ADR-0178「秘密の語の判定」)。
+        """区間のコマンドの名前を通す秘密の語(設定の extra_secret_words。ADR-0178「秘密の語の判定」)。
 
-        読めなければ None(名前は出さない。伏せられないなら出さない側に倒す)。選択待ちの組を選んだときだけ読む。
+        読めなければ None(名前は出さない。伏せられないなら出さない側に倒す)。選択待ちの組を選んだときと、表にまとめて比べた
+        組のコマンドの組の行を出すとき(ADR-0216 決定6)だけ読む。
         """
         try:
             return list(load_settings(**self._where, read_prompt=False).extra_secret_words)
@@ -1221,6 +1296,7 @@ class BatchApi(Api):
                 return self._ok()
             # 比較だけを走らせる。AI の設定は読まない(読めなくても比較は動く。AI へは「AI で解析」で送る。REQ-213 §2)
             self._plan, self._settings, self._notes, self._ai_action = None, None, [], None
+            self._edited_template = None
             self._first, self._second, self._approved, self._results = [], [], {}, {}
             self._answer_sources = {}  # 結果を置き換えるので、答えの送り先の記録も消す(REQ-232 §2)
             self._first_summary = None
@@ -1289,6 +1365,7 @@ class BatchApi(Api):
         毎回付ける前提の文(ADR-0172)が送れないときも計画を作らず、premise_refused_text() を返す(送信前の確認の 1 段目を出さない)。
         """
         self._plan, self._settings = None, None
+        self._edited_template = None  # 押すたび・自動送信のたびに、前の送信で直した文は捨てて使用中のひな形から始める(REQ-313)
         try:
             settings = load_settings(**self._where)
         except SettingsError as exc:
@@ -1325,6 +1402,62 @@ class BatchApi(Api):
         if not started:
             self._ai_action = None
         return started
+
+    def _rebuild_approval(self, template: Any) -> dict[str, Any]:
+        """「直した指示文で作り直す」(REQ-313 / ADR-0218 決定6)。送るかどうかの判断ではない(この中では送らない)。
+
+        待っている確認が無い・閉じている途中・比べている途中・門がこの窓のものでない・欄の文が文字列でない・
+        欄の文が今の確認を作った文と同じときは何もしない。
+        欄の文が使用中のひな形に戻っていれば(直した後の「元に戻す」)、確かめずに直す前の計画に戻して作り直す。
+        それ以外は、ひな形の決まりと秘密の確かめを通す。断ったら確認はそのままで、理由の種類だけを知らせる(文の中身は出さない)。
+        通ったら今の確認を捨て、門を持ったまま 1 段目をその文でやり直す。比較の「実行」と表の結果は触らない。
+        """
+        with self._lock:
+            if (
+                self._approval is None
+                or self._closing
+                or self._worker is not None
+                or self._session.owner is not self
+                or self._plan is None
+                or self._settings is None
+                or self._plan.send is None
+                or not isinstance(template, str)
+            ):
+                return self._ok()
+            text = normalize_newlines(template)
+            in_use = self._in_use_template()
+            current = in_use if self._edited_template is None else self._edited_template
+            if text == current:
+                return self._ok()  # 直していない(今の確認のまま)
+            restore = text == in_use
+            if not restore:
+                kind = check_prompt_template(text)
+                if kind is not None:
+                    return self._ok(self._notice(batch_edit_template_invalid(kind), BATCH_EDIT_REFUSED_TITLE))
+                words = normalize_words(self._plan.first.extra_secret_words)
+                refused = check_question(text, words, max_chars=PROMPT_TEMPLATE_MAX_CHARS)
+                if refused is not None:
+                    return self._ok(self._notice(follow_up_refused(refused, PROMPT_TEMPLATE_MAX_CHARS), BATCH_EDIT_REFUSED_TITLE))
+            if not self._ai_targets():
+                return self._ok()
+            # 直す前の文に戻すときは、設定の値(既定なら None。show の組はまた「状態の確認」になる)に戻す
+            new_template = self._settings.prompt_template if restore else text
+            self._plan = LlmPlan(
+                first=replace(self._plan.first, prompt_template=new_template),
+                send=replace(self._plan.send, prompt_template=new_template),
+            )
+            self._edited_template = None if restore else text
+            self._approval = None  # 今の確認は送らずに捨てる。門は持ったまま
+            action = self._ai_action or AI_SEND
+            if not self._start_ai(action):
+                self._end_check()  # 1 段目を始められなかった(起きないはずの形)。送らずに門を返す
+                released = True
+            else:
+                released = False
+            result = self._ok()
+        if released:
+            self._session.gate_changed(self)
+        return result
 
     def _auto_send(self) -> None:
         """ロックの中で呼ぶ。実行の結果を出して門を返した後の自動送信(REQ-213 §6)。
@@ -1452,7 +1585,8 @@ class BatchApi(Api):
             return True
         # 送信前の確認は全部の組をまとめて1回だけ(ADR-0031 決定2)。この間も門は持ったまま(比較の画面は走らせない)
         assert decision.preview is not None and self._plan.send is not None
-        self._approval = (self._next_serial(), decision.preview, approval_view(decision.preview, self._settings), summary)
+        shown = approval_view(decision.preview, self._settings, edited=self._edited_template is not None)
+        self._approval = (self._next_serial(), decision.preview, shown, summary)
         return False
 
     def _remember_sources(self) -> None:
@@ -1471,6 +1605,7 @@ class BatchApi(Api):
         """ロックの中で呼ぶ。「内容を確かめる…」の終わり。1 段目の結果を捨て、前の結果と行に戻して門を返す(送らない)。"""
         self._session.release(self)
         self._ai_action = None
+        self._edited_template = None
         self._shown, self._running = dict(self._results), None
         self._progress_text = ""
         self._result_revision += 1
@@ -1506,6 +1641,7 @@ class BatchApi(Api):
             self._results = self._merged(final)
             counts = combined_summary(summary, list(self._results.values())).counts
         self._ai_action = None
+        self._edited_template = None
         self._session.release(self)
         assert self._prepared is not None
         self._shown, self._running = dict(self._results), None
@@ -1538,6 +1674,7 @@ class BatchApi(Api):
             if self._ai_action is not None:
                 # AI の段で止まった。結果は始めたときのまま(前の結果と行に戻す)
                 self._ai_action = None
+                self._edited_template = None
                 self._shown = dict(self._results)
                 self._result_revision += 1
             if self._running is not None:
@@ -2073,14 +2210,15 @@ class BatchApi(Api):
             total = len(targets.before) + len(targets.after)
             if total > MAX_PAIR_NAMES:
                 return self._pair_ai_notice(batch_pair_ai_too_many(total, MAX_PAIR_NAMES))  # 一部だけ送ることはしない
-            prompt = build_pair_prompt(list(targets.before), list(targets.after))
+            parts = pair_prompt_parts(list(targets.before), list(targets.after))
+            prompt = parts.text
             if prompt_too_long(prompt):
                 return self._pair_ai_notice(batch_pair_ai_too_long(MAX_PROMPT_CHARS))
             # 確認の間は門を持つ(比較の画面は走らせない。欄・切り替え・組を直す操作も止まる)
             if not self._session.acquire(self):
                 return self._ok()
             number = self._next_serial()
-            self._pair_ai = (number, prompt, (targets.before, targets.after), plan, self._pairs_revision)
+            self._pair_ai = (number, prompt, (targets.before, targets.after), plan, self._pairs_revision, parts)
             name = destination_of(settings)[1]
             # 送る全文・送り先・送らないファイル。キー・CLI の場所は入れない。
             # この送信は見え方の決まりを足さないので、client に渡る文はこの prompt と 1 文字も違わない(ADR-0177 決定4)
@@ -2089,6 +2227,13 @@ class BatchApi(Api):
                 "title": BATCH_PAIR_AI_TITLE,
                 "prompt_title": BATCH_PAIR_AI_PROMPT_TITLE,
                 "prompt": prompt,
+                # 全文を、直せる指示の欄と直せないファイル名の欄に分けて出す(つなぐと prompt と同じ。REQ-313)
+                "instruction_title": LLM_PREVIEW_INSTRUCTIONS,
+                "instruction": parts.instructions[0],
+                "file_names_title": BATCH_PAIR_AI_FILE_NAMES_TITLE,
+                "file_names": "".join(text for kind, text in parts.pieces if kind == FILE_NAMES),
+                "reset": LLM_PREVIEW_RESET,
+                "edit_note": BATCH_PAIR_AI_EDIT_NOTE,
                 "destination": batch_pair_ai_destination(name, display_model(settings), effective_base_url(settings)),
                 "held_back_title": BATCH_PAIR_AI_HELD_BACK,
                 "held_back": list(targets.held_back),
@@ -2101,11 +2246,16 @@ class BatchApi(Api):
         self._session.gate_changed(self)
         return result
 
-    def _answer_pair_ai(self, number: Any, yes: Any) -> dict[str, Any]:
+    def _answer_pair_ai(self, number: Any, yes: Any, instruction: Any = None) -> dict[str, Any]:
         """確認の答え。待っている確認と同じ番号のときだけ受け、1 回答えたら消す。
 
         yes が True のときだけ、確認に出した文をワーカーのスレッドで 1 回送る(門は持ったまま。答えが届いたら返す)。
         「送らない」・Esc(yes が偽)と形の違う yes は送らずに門を返す。番号が違う・整数でないときは何もしない。
+
+        instruction(REQ-313 / ADR-0218 決定7)は指示の欄の文。None か直す前と同じなら、確認に出した文と 1 字も変わらない文を送る。
+        違えば check_question(送る文全体の上限)を通し、断ったら送らずに門を返して理由の種類だけを知らせる(文の中身は出さない)。
+        通ったら直した指示とファイル名の欄をつないだ文を、長すぎないか見てから 1 回送る(見え方の決まりは足さない。ADR-0177 決定4)。
+        文字列でも None でもない instruction は不正な呼び出しとして、送らずに門を返す。
         """
         with self._lock:
             pending = self._pair_ai
@@ -2119,11 +2269,27 @@ class BatchApi(Api):
                 result = self._ok() if isinstance(yes, bool) else _failure(gui_web_call_failed())
                 released = True
             else:
-                sent_number, prompt, (before, after), plan, revision = pending
+                sent_number, prompt, (before, after), plan, revision, parts = pending
                 assert plan.send is not None and plan.send.client is not None
-                self._start_pair_asking(plan.send.client, prompt, before, after, revision, sent_number)
-                result = self._ok()
-                released = False
+                refusal: str | None = None
+                bad_call = instruction is not None and not isinstance(instruction, str)
+                if isinstance(instruction, str) and instruction != parts.instructions[0]:
+                    words = normalize_words(plan.send.extra_secret_words)
+                    kind = check_question(instruction, words, max_chars=MAX_PROMPT_CHARS)
+                    if kind is not None:
+                        refusal = follow_up_refused(kind, MAX_PROMPT_CHARS)
+                    else:
+                        prompt = parts.compose([instruction])
+                        if prompt_too_long(prompt):
+                            refusal = batch_pair_ai_too_long(MAX_PROMPT_CHARS)
+                if bad_call or refusal is not None:
+                    self._session.release(self)
+                    result = _failure(gui_web_call_failed()) if bad_call else self._pair_ai_notice(refusal or "")
+                    released = True
+                else:
+                    self._start_pair_asking(plan.send.client, prompt, before, after, revision, sent_number)
+                    result = self._ok()
+                    released = False
         if released:
             self._session.gate_changed(self)
             if not result["ok"]:
@@ -2254,6 +2420,7 @@ class BatchApi(Api):
             # 送信前の確認(AI で解析)か、AI に案を聞く確認を待っていたら、送らずに門を返す
             waiting = (self._approval is not None and self._worker is None) or self._pair_ai is not None
             self._approval = None
+            self._edited_template = None  # この送信だけ直した文は窓を閉じたら捨てる(REQ-313)
             self._pair_ai, self._pair_ai_view = None, None
             if waiting:
                 self._session.release(self)

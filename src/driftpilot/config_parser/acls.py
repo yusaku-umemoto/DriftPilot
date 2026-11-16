@@ -52,10 +52,18 @@ def _open(acls: dict[str, Acl], name: str, type_: AclType, ctx: _Ctx) -> bool:
 
 
 def _named(m: re.Match[str], ctx: _Ctx) -> bool:
-    """名前付き ACL を作る。種類の語が無い見出しは extended(ADR-0101 決定1)。"""
-    if not _open(ctx.acls, m["name"], m.groupdict().get("type") or "extended", ctx):
+    """名前付き ACL を作る。種類の語が無い見出しは extended(ADR-0101 決定1)。
+
+    見出しの種類が standard・extended で、名前が ASCII の数字だけ、その数の番号帯の種類が見出しの種類と同じなら
+    numbered を真にする(`ip access-list standard 10` は `access-list 10 …` と同じ ACL。ADR-0217 決定4、REQ-310)。
+    """
+    written = m.groupdict().get("type")
+    if not _open(ctx.acls, m["name"], written or "extended", ctx):
         return False
-    ctx.named.add(m["name"])
+    name = m["name"]
+    if written in ("standard", "extended") and name.isascii() and name.isdigit() and _numbered_type(int(name)) == written:
+        ctx.current["numbered"] = True
+    ctx.named.add(name)
     return True
 
 
@@ -151,7 +159,12 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         "acls.named", "top", r"ip access-list (?P<type>standard|extended|role-based) (?P<name>\S+)", "acls[name]",
         "ip access-list extended OUTSIDE_IN", _named,
-        note="手続き。同じ名前がすでにあれば読まない(その行と子行は未解釈)",
+        note=(
+            "手続き。同じ名前がすでにあれば読まない(その行と子行は未解釈)。"
+            "numbered は、見出しの種類が standard か extended で、名前が ASCII の数字だけで、その数の番号帯の種類"
+            "(標準 1-99, 1300-1999 / 拡張 100-199, 2000-2699)が見出しの種類と同じときだけ真、それ以外は偽"
+            "(`ip access-list standard 10` は真、`ip access-list extended 10`・`role-based 10` は偽。ADR-0217 決定4、REQ-310)"
+        ),
     ),
     Pattern(
         "acls.named_untyped", "top", r"ip access-list (?!(?:standard|extended|role-based)$)(?P<name>\S+)",

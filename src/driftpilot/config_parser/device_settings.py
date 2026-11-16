@@ -36,6 +36,8 @@ Cisco の WAN と NX-OS の `sdm …`・`ip source binding …`・`dialer-list �
 `parameter-map type inspect[-global] [<残り>]`・`vpc domain <数>`・`controller T1|E1|T3|E3 <残り>`・`voice service <語>`・
 `voice class <残り>`・`dial-peer voice <残り>`・`sip-ua` のブロックも、同じ読み方で読む(ADR-0136 決定1、REQ-182)。
 `parameter-map type` の `inspect` 以外(`umbrella` など)と `controller Cellular …` は読まない(ADR-0136 決定4)。
+最上位の `ap <残り>` の1行と `ap <残り>` のブロック(`ap profile <名前>` など)も、同じ読み方で読む。`ap` の行だけは、
+has_secret に加えて伏せる表の秘密語(psk など)がある行も読まない(ADR-0217 決定2、REQ-310)。
 """
 
 import re
@@ -146,9 +148,20 @@ def _add(values: list[str], text: str) -> None:
         insort(values, text)
 
 
+def _is_ap_line(text: str) -> bool:
+    """最上位の行が `ap …`・`no ap …` なら True(語の並びで見る。`app-hosting …` は当たらない)。"""
+    words = text.split()
+    return words[:1] == ["ap"] or words[:2] == ["no", "ap"]
+
+
+def _secret_line(text: str) -> bool:
+    """最上位の行を秘密の行として読まないか。`ap` の行だけ、伏せる表の秘密語も見る(ADR-0217 決定2、REQ-310)。"""
+    return has_mask_word(text) if _is_ap_line(text) else has_secret(text)
+
+
 def _setting_line(m: re.Match[str], ctx: _Ctx) -> bool:
     """子を持たない行だけ、原文を集合に足す。子を持つ行は子も含めて未解釈。"""
-    if ctx.has_children or has_secret(m.string):
+    if ctx.has_children or _secret_line(m.string):
         return False
     _add(ctx.values, m.string)
     return True
@@ -156,7 +169,7 @@ def _setting_line(m: re.Match[str], ctx: _Ctx) -> bool:
 
 def _block(m: re.Match[str], ctx: _Ctx) -> bool:
     """子を持つ見出しだけ読む。見出しは文字列にしない。子の無い見出しと、QoS が読む見出しは未解釈。"""
-    if not ctx.has_children or has_secret(m.string):
+    if not ctx.has_children or _secret_line(m.string):
         return False
     if apply_first(_QOS_HEADINGS, "top", m.string, None) is not None:
         return False
@@ -167,6 +180,8 @@ def _block(m: re.Match[str], ctx: _Ctx) -> bool:
 def _block_setting(m: re.Match[str], ctx: _Ctx) -> bool:
     """子を持たない行は見出しからの道すじを集合に足す。子を持つ行は解釈済みにだけする。"""
     if has_secret(*ctx.path):
+        return False
+    if _is_ap_line(ctx.path[0]) and any(has_mask_word(text) for text in ctx.path):
         return False
     if not ctx.has_children:
         _add(ctx.values, _SEPARATOR.join(ctx.path))
@@ -209,7 +224,7 @@ PATTERNS: tuple[Pattern, ...] = (
         r"|ip verify drop-rate |isis display |power inline |boot auto-copy-sw|boot config|eap |dot1x |ipv6 rip "
         r"|login password-reuse-interval|track |fhrp |(?:gnmi-yang|gnxi|iox)(?: |$)|vlan filter "
         r"|monitor session \S+ |ip nat |wireless "
-        r"|udld |switch \d+ priority |privilege "
+        r"|udld |switch \d+ priority |privilege |ap "
         r"|sdm |ip source binding |dialer-list |dialer watch-list |nv overlay |fabric forwarding |ipv6 general-prefix "
         r"|zone security |zone-pair security |parameter-map type inspect |vpc domain ).*"
         r"|(?:no )?(?:vlan dot1Q tag native|redundancy|ip prefix-list sequence-number|ipv6 prefix-list sequence-number"
@@ -244,7 +259,9 @@ PATTERNS: tuple[Pattern, ...] = (
             "Cisco の WAN と NX-OS の sdm・ip source binding・dialer-list・dialer watch-list・nv overlay・fabric forwarding・"
             "ipv6 general-prefix・zone security・zone-pair security・parameter-map type inspect・vpc domain(後ろの語が要る)と、"
             "行全体が parameter-map type inspect-global の行(no 付きも。後ろに語がある子の無い行は当てない)は "
-            "ADR-0136 決定1、REQ-182"
+            "ADR-0136 決定1、REQ-182。"
+            "ap(Cisco の無線の `ap hyperlocation …`・`ap group …`・`no ap dot11 …` など。後ろの語が要る。`app-hosting` は当てない)は "
+            "ADR-0217 決定2、REQ-310。ap の行だけは、has_secret に加えて伏せる表の秘密語(psk など)がある行も読まない"
         ),
     ),
     Pattern(
@@ -258,7 +275,7 @@ PATTERNS: tuple[Pattern, ...] = (
         r"|router lisp(?: .+)?|gnmi-yang .+|gnxi .+|wireless .+|ip nat profile \S+"
         r"|ip sla \d+|track \d+ .+|object-group (?:network|service) \S+|time-range \S+"
         r"|zone security \S+|zone-pair security .+|parameter-map type inspect(?:-global)?(?: .+)?|vpc domain \d+"
-        r"|controller (?:T1|E1|T3|E3) .+|voice service \S+|voice class .+|dial-peer voice .+|sip-ua",
+        r"|controller (?:T1|E1|T3|E3) .+|voice service \S+|voice class .+|dial-peer voice .+|sip-ua|ap .+",
         "global.device_settings", "redundancy", _block,
         note=(
             "手続き。子を持つ見出しだけ読み、中の行を device_settings に写す。見出しは文字列にしないが解釈済みにする。"
@@ -282,7 +299,10 @@ PATTERNS: tuple[Pattern, ...] = (
             "controller T1|E1|T3|E3 <残り>・voice service <語>・voice class <残り>・dial-peer voice <残り>・sip-ua は "
             "ADR-0136 決定1、REQ-182(子を持たない zone security …・zone-pair security …・parameter-map type inspect …・"
             "vpc domain … は global.device_setting が読む)。parameter-map type の inspect 以外(umbrella など)と "
-            "controller Cellular … は読まない(ADR-0136 決定4)"
+            "controller Cellular … は読まない(ADR-0136 決定4)。"
+            "ap <残り>(`ap profile <名前>` など)は ADR-0217 決定2、REQ-310(子を持たない ap … は "
+            "global.device_setting が読む)。ap の見出しは、has_secret に加えて伏せる表の秘密語(psk など)がある行も"
+            "見出しも中も読まない"
         ),
     ),
     Pattern(
@@ -290,7 +310,8 @@ PATTERNS: tuple[Pattern, ...] = (
         note=(
             "手続き。ブロックの中の子を持たない行を、見出しからの道すじを ` > ` でつないだ文字列にして集合に足す"
             "(見出しを含める。同じ文字列は重ねず、文字列の昇順)。子を持つ行は文字列にしないが解釈済みにする。"
-            f"道すじのどの段かが、{_SECRET_NOTE}行なら、その行も子孫も未解釈(同じブロックのほかの行は読む)"
+            f"道すじのどの段かが、{_SECRET_NOTE}行なら、その行も子孫も未解釈(同じブロックのほかの行は読む)。"
+            "見出しが ap の塊だけは、伏せる表の秘密語(psk など)がある行も同じく読まない(ADR-0217 決定2、REQ-310)"
         ),
     ),
 )

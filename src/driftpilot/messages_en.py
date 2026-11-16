@@ -2115,6 +2115,8 @@ COMPARE_BUTTON_PASTE = "Paste…"
 COMPARE_BUTTON_PREV = "Previous difference"
 COMPARE_BUTTON_NEXT = "Next difference"
 COMPARE_BUTTON_RUN = "Compare"
+# Notice under the compare window when "Open in compare window" could not start comparing because Batch compare is running (ADR-0216 decision 3)
+HANDOFF_NOT_STARTED = f'Not compared yet because Batch compare is running. Press "{COMPARE_BUTTON_RUN}" when it finishes.'
 COMPARE_BUTTON_SAVE = "Save result…"
 COMPARE_BUTTON_CANCEL = "Cancel"
 COMPARE_BUTTON_BATCH = "Batch compare…"
@@ -2219,6 +2221,7 @@ COMPARE_MULTI_COL_COMMAND = "Command"
 COMPARE_MULTI_COL_STATUS = "Status"
 COMPARE_MULTI_COL_DIFFS = "Differences"
 COMPARE_MULTI_COL_SEND = "Send to AI"
+COMPARE_MULTI_SEND_MARK = "AI"  # Mark on the "Send to AI" column heading of the command pairs (ADR-0216 decision 5)
 COMPARE_MULTI_SEND_ALL = "Select or clear all"
 # Status of a list row for a command section present in only one log (ADR-0164 decision 3). Names the missing side
 MULTI_NO_AFTER = "No After"  # section only in Before
@@ -2418,12 +2421,41 @@ COMPARE_SPLIT_LABEL = "Divider between the compare table and the AI area"
 COMPARE_MULTI_SPLIT_LABEL = "Divider between the command pairs and the compare table"
 # Note when the answer is stopped at what has arrived (ADR-0157 decision 7). Shown below the partial answer bubble
 COMPARE_PARTIAL_STOPPED = "Stopped. This is a partial answer. Not saved."
-COMPARE_AI_EMPTY = 'After comparing, click "Analyze with AI" and the AI answer appears here.'
-COMPARE_AI_INPUT = "Question or instruction for the AI"
-COMPARE_AI_INPUT_HINT = "Enter to send, Shift+Enter for a new line"
+COMPARE_AI_EMPTY = (
+    'After comparing, click "Analyze with preset question" and the AI explains the differences with the selected prompt (the preset question). '
+    "Type a question in the box below and send it, and the AI examines only the differences shown now."
+)
+COMPARE_AI_INPUT = "Question for the AI (asks about the differences shown now)"
+COMPARE_AI_INPUT_HINT = "Shift+Enter to send, Enter for a new line"
 COMPARE_AI_PROFILE = "AI profile"
 COMPARE_AI_PROMPT = "Prompt"
-COMPARE_AI_ANALYZE = "Analyze with AI"
+COMPARE_AI_ANALYZE = "Analyze with preset question"
+# Button names when a question is typed, and texts for when it cannot be pressed or the target differs (REQ-312 / ADR-0218 decision 3). No question content
+COMPARE_AI_ASK_SHOWN = "Ask about the shown differences"
+COMPARE_AI_ASK_FOLLOW_UP = "Ask a follow-up"
+COMPARE_AI_ASK_TARGET_NOTE = "The display differs from the previous answer, so this is sent as a new question (the previous conversation is cleared)."
+COMPARE_AI_SHOWN_UNREAD = "The shown content could not be read. Select the tab again."
+COMPARE_AI_SHOWN_UNPARSED = "Lines not structured are not differences, so they cannot be asked about."
+COMPARE_AI_SHOWN_ROW = "This row (a pair not sent to AI, a segment with no partner, or a one-time command) cannot be asked about."
+COMPARE_AI_SHOWN_NO_RAW = "There is no simple compare result."
+COMPARE_AI_SHOWN_NO_DIFF = "There are no differences shown."
+COMPARE_AI_TARGET_STRUCTURED = "Structured compare"
+COMPARE_AI_TARGET_RAW = "Simple compare"
+COMPARE_AI_TARGET_WHOLE = "All command results (selected pairs)"
+
+
+def compare_ai_target(kind: str, category: str | None = None, command: str | None = None) -> str:
+    """Shown in the AI pane as "Question target: ..." (screen only; not included in the sent text). kind is structured, raw or whole."""
+    if kind == "whole":
+        name = COMPARE_AI_TARGET_WHOLE
+    else:
+        name = COMPARE_AI_TARGET_STRUCTURED if kind == "structured" else COMPARE_AI_TARGET_RAW
+        if kind == "structured" and category is not None:
+            name = f"{name}, category {category}"
+        if command:
+            name = f"{name} ({command})"
+    return f"Question target: {name}"
+
 # Choose which command pairs to send to AI in a multi-command compare (REQ-265, ADR-0193 decision 3)
 COMPARE_AI_NO_PAIRS = "Select at least one command pair to send to AI."
 
@@ -2437,8 +2469,11 @@ def compare_send_pairs(on: int, total: int) -> str:
 # Shown in the window only. Not included in saves, HTML, CSV, copies or sent text (decision 3)
 CHARACTER_NAME = "Mirarin"
 CHARACTER_AVATAR_TITLE = "The answer is written by the model of the selected AI profile"
-COMPARE_AI_ANALYZE_CHARACTER = "Analyze with AI (Mirarin)"
-COMPARE_AI_EMPTY_CHARACTER = 'After comparing, click "Analyze with AI (Mirarin)" and Mirarin answers here.'
+COMPARE_AI_ANALYZE_CHARACTER = "Ask Mirarin the preset question"
+COMPARE_AI_EMPTY_CHARACTER = (
+    'After comparing, click "Ask Mirarin the preset question" and Mirarin explains the differences with the selected prompt (the preset question). '
+    "Type a question in the box below and send it, and Mirarin examines only the differences shown now."
+)
 COMPARE_COPY = "Copy"
 COMPARE_AI_PROFILE_FAILED_TITLE = "Cannot switch the AI profile"
 COMPARE_PROMPT_FAILED_TITLE = "Cannot switch the prompt"
@@ -2469,7 +2504,7 @@ def follow_up_destination_changed(before: str, now: str) -> str:
 # Keep the first request in the chat / continue asking from a saved conversation (ADR-0179 / REQ-242). pywebview compare window and AI window only.
 # Typed text goes only into the view, not into these texts (names are only prompt and profile names)
 def COMPARE_FIRST_REQUEST_PROMPT(name: str) -> str:  # noqa: N802 (name as in REQ-242 section 2)
-    """Text of the first request bubble when sent with "Analyze with AI" without typing (decision 1). name is the prompt name used."""
+    """Text of the first request bubble when sent with "Analyze with preset question" without typing (decision 1). name is the prompt name used."""
     return f'Analyzed with prompt "{name}"'
 
 
@@ -2531,7 +2566,7 @@ def COMPARE_FULL_TEXT_PAIR(name: str) -> str:  # noqa: N802 (name fixed by REQ-2
 COMPARE_HANDED_ANSWER_TITLE = "Batch compare answer"
 # The re-compared differences differ from what batch compare sent, so the answer was not attached
 COMPARE_HANDED_ANSWER_UNUSED = (
-    "The differences are different from what batch compare sent, so the batch compare answer was not used. Send again with \"Analyze with AI\"."
+    "The differences are different from what batch compare sent, so the batch compare answer was not used. Send again with \"Analyze with preset question\"."
 )
 
 
@@ -2608,6 +2643,7 @@ GUI_WEB_TEXTS.update(
         "compare.multi.col.status": COMPARE_MULTI_COL_STATUS,
         "compare.multi.col.diffs": COMPARE_MULTI_COL_DIFFS,
         "compare.multi.col.send": COMPARE_MULTI_COL_SEND,
+        "compare.multi.send_mark": COMPARE_MULTI_SEND_MARK,
         "compare.multi.send_all": COMPARE_MULTI_SEND_ALL,
         "compare.multi.choose_partner": COMPARE_MULTI_CHOOSE_PARTNER,
         "compare.multi.unpair": COMPARE_MULTI_UNPAIR,
@@ -2699,9 +2735,23 @@ BATCH_SAVED_TITLE = "Saved"
 # No sentence includes the connection URL, key or CLI location.
 BATCH_AI_CHECK = "Review contents…"
 BATCH_APPROVAL_CLOSE = "Close"  # Button of the "Review contents…" confirmation (nothing is sent)
+# "Edit the instructions (this send only)" of the confirmation before sending (REQ-313 / ADR-0218 decision 6). No sentence includes the template, instructions or secret values
+BATCH_APPROVAL_EDITED_LINE = "Instructions: edited for this send only"
+BATCH_EDIT_TITLE = "Edit the instructions (this send only)"
+BATCH_EDIT_REBUILD = "Rebuild with the edited instructions"
+BATCH_EDIT_NOT_SAVED = "The edited text is used only for this send and is not saved."
+BATCH_EDIT_SHOW_TOO = "Once edited, the same text is also used for the show pairs (they are not replaced with the status check)."
+BATCH_EDIT_REFUSED_TITLE = "Cannot edit the instructions"
+
+
+def batch_edit_template_invalid(kind: str) -> str:
+    """The edited instructions do not follow the rules of the template (not rebuilt). Only the kind of problem; never the text."""
+    return f"The edited text {PROMPT_TEMPLATE_PROBLEM[kind]}. Not rebuilt."
+
+
 BATCH_AI_FOLLOW_UP_NOTE = "To ask a question, double-click to open it in the compare window."
 BATCH_AUTO_SEND_ON = "Send to AI automatically: On (after a run, a list of what will be sent is shown. Nothing is sent until you press \"Send\".)"
-# Reasons "Analyze with AI" and "Review contents…" cannot be pressed (note under the AI row and button title; ADR-0175)
+# Reasons "Analyze with preset question" and "Review contents…" cannot be pressed (note under the AI row and button title; ADR-0175)
 BATCH_AI_REASON_NOT_RUN = "Available after a run."
 BATCH_AI_REASON_RUNNING = "Available after the run finishes."
 BATCH_AI_REASON_APPROVAL = "Available after the pre-send confirmation and sending finish."
@@ -2711,7 +2761,7 @@ BATCH_AI_REASON_NO_TARGET = "No pairs have differences that can be sent."
 
 def batch_ai_title(pairs: int, diffs: int) -> str:
     """Title of the AI area: pairs not unchecked that have a result, did not fail and have differences to send, and the total differences."""
-    return f"Pairs to analyze with AI: {pairs}, {_plural(diffs, 'difference', 'differences')}: {diffs}"
+    return f"Pairs to analyze with the preset question: {pairs}, {_plural(diffs, 'difference', 'differences')}: {diffs}"
 
 
 def batch_run_label(count: int) -> str:
@@ -2798,12 +2848,12 @@ GUI_WEB_TEXTS.update(
         "batch.drop_guide": BATCH_DROP_GUIDE,
         "batch.button.swap": COMPARE_BUTTON_SWAP,
         "batch.button.swap_icon": COMPARE_BUTTON_SWAP_ICON,
-        # AI area (REQ-213). Profile and prompt names, "Analyze with AI" and copy use the same texts as the compare window
+        # AI area (REQ-213). Profile and prompt names, "Analyze with preset question" and copy use the same texts as the compare window
         "batch.ai.profile": COMPARE_AI_PROFILE,
         "batch.ai.prompt": COMPARE_AI_PROMPT,
         "batch.button.ai_check": BATCH_AI_CHECK,
         "batch.button.ai_send": COMPARE_AI_ANALYZE,
-        # "Analyze with AI" when the character is on (ADR-0181; batch.js swaps it by the view character)
+        # "Analyze with preset question" when the character is on (ADR-0181; batch.js swaps it by the view character)
         "batch.button.ai_send.character": COMPARE_AI_ANALYZE_CHARACTER,
         "batch.button.copy": COMPARE_COPY,
         "batch.ai.follow_up_note": BATCH_AI_FOLLOW_UP_NOTE,
@@ -2814,8 +2864,10 @@ GUI_WEB_TEXTS.update(
 # In the batch compare window (pywebview): fix pairs, exclude them, make pairs, pick the device type automatically (REQ-212 / ADR-0153 decisions 4-8)
 BATCH_JOB_EXCLUDED = "Excluded pair"  # status column of the table
 BATCH_PLATFORM_UNDETECTED_ROW = "Auto: could not detect"  # device type column of an auto pair with no detection or a mismatch
-# Device type column when the commands in a config split across device types in a batch-compared pair (ADR-0178 decision 2)
-BATCH_AUTO_PLATFORM_MIXED = "Auto (multiple)"
+# Device type column when the commands in a config split across device types in a batch-compared pair (ADR-0178 decision 2 / ADR-0216 decision 2)
+BATCH_AUTO_PLATFORM_MIXED = f"{AUTO_PLATFORM_LABEL}: multiple"
+# Device type column of an auto pair whose result has no config (batch-compared with no config command pair, or a single-section pair that is show) (ADR-0216 decision 2)
+BATCH_AUTO_PLATFORM_NO_CONFIG = f"{AUTO_PLATFORM_LABEL}: no config"
 # Reason shown in the answer field when a "Needs selection" pair is chosen (ADR-0178 decision 5). {count} is the number of sections, {commands} is the list of section command names
 BATCH_WAITING_SEGMENT = (
     "This file has {count} section(s), and the section setting did not match exactly one of them. "
@@ -2958,6 +3010,9 @@ BATCH_PAIR_AI_NOTE = "Check that the file names do not contain host names."
 BATCH_PAIR_AI_HELD_BACK = "Files not sent"
 # Heading of the full-text box to send. The request for pair suggestions does not add the answer-look rules (LOOK_RULES), so only this text is sent (ADR-0177 decision 4)
 BATCH_PAIR_AI_PROMPT_TITLE = "Text to send (only this text is sent):"
+# Headings and a note for the full text split into the editable instructions box and the read-only file names box (REQ-313 / ADR-0218 decision 7)
+BATCH_PAIR_AI_FILE_NAMES_TITLE = "File names (read only)"
+BATCH_PAIR_AI_EDIT_NOTE = "If you delete the line for the answer format (JSON), the answer cannot be read."
 BATCH_PAIR_AI_NO_FILES = "There are no files to send."
 BATCH_PAIR_AI_UNREADABLE = "Could not read the AI suggestions. No pairs were made."
 BATCH_PAIR_AI_NONE = "The AI had no suggestions."
@@ -3243,12 +3298,21 @@ AI_PANE_TITLE = "DriftPilot — AI analysis"
 COMPARE_AI_DETACH = "Open in a separate window"  # title and aria-label of the arrow icon at the right end of the AI pane heading
 COMPARE_AI_FRONT = "Bring the separate window to front"  # title and aria-label of the arrow icon at the right end of the result tab row while the separate window is open
 COMPARE_AI_DETACH_ICON = "↗"  # Both icons use the same character (set via data-text because the HTML holds no text)
+# Hide and show the AI area (ADR-0216 decision 5). Compare window only. The hidden state is kept only while the window is open
+COMPARE_AI_HIDE = "Hide the AI area"  # title and aria-label of the "»" icon in the AI pane heading
+COMPARE_AI_HIDE_ICON = "»"
+COMPARE_AI_SHOW = "Show the AI area"  # title and aria-label of the "« AI" button at the right end of the result tab row
+COMPARE_AI_SHOW_TEXT = "« AI"
 
 GUI_WEB_TEXTS.update(
     {
         "compare.ai.detach": COMPARE_AI_DETACH,
         "compare.ai.front": COMPARE_AI_FRONT,
         "compare.ai.detach_icon": COMPARE_AI_DETACH_ICON,
+        "compare.ai.hide": COMPARE_AI_HIDE,
+        "compare.ai.hide_icon": COMPARE_AI_HIDE_ICON,
+        "compare.ai.show": COMPARE_AI_SHOW,
+        "compare.ai.show_text": COMPARE_AI_SHOW_TEXT,
     }
 )
 
@@ -3314,11 +3378,94 @@ RAW_IGNORE_EXAMPLES: tuple[tuple[str, str], ...] = (
     ("Uptime lines", r"\buptime is "),
     ('FortiGate lines with "#config-version="', r"^#config-version="),
 )
-# Examples (description, pattern, replacement text)
+# Examples (description, pattern, replacement text). REQ-311 / ADR-0217 decision 5.
+# Patterns are identical to the Japanese ones. Examples 1-4 also match the surrounding spaces and tabs, and their replacement text
+# has one space on each side (so a table column whose width changes with the value still gives the same key).
+# Examples 1 and 2 share one replacement text (so 23:59:59 and 1d00h give the same key)
 RAW_REPLACE_EXAMPLES: tuple[tuple[str, str, str], ...] = (
-    ("Replace times (12:34:56) with <time>", r"\b\d{1,2}:\d{2}:\d{2}(\.\d+)?\b", "<time>"),
-    ("Replace uptime values with <uptime>", r"(uptime is ).*", r"\1<uptime>"),
+    (
+        "Replace times (12:34:56, 00:14:55 in Si-R routes) with <time> (also hides key lifetimes in configs)",
+        r"[ \t]*(?<![\w:.])(?:\d+:)?\d+:[0-5]\d:[0-5]\d(?:\.\d+)?(?![\w:])[ \t]*",
+        " <time> ",
+    ),
+    (
+        "Replace short durations (1w5d16h, 6d23h45m in Si-R routes, 2d03h) with <time> (route flaps are no longer visible)",
+        r"[ \t]*(?<![\w.:])(?=\d+[ywdhms]\d)(?:\d+y)?(?:\d+w)?(?:\d+d)?(?:\d+h)?(?:\d+m)?(?:\d+s)?(?![\w.:])[ \t]*",
+        " <time> ",
+    ),
+    (
+        "Replace dates (2026-11-16, 2026/11/16, 11/16/2026) with <date> (also hides schedule and expiry dates in configs)",
+        r"[ \t]*(?<![\w/.:-])(?:(?:19|20)\d\d([-/])(?:0?[1-9]|1[0-2])\1(?:0?[1-9]|[12]\d|3[01])"
+        r"|(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12]\d|3[01])/(?:19|20)\d\d)(?![\d/-])[ \t]*",
+        " <date> ",
+    ),
+    (
+        "Replace month-name dates (Mon Nov 16, Nov 16 2026) with <date>",
+        r"[ \t]*\b(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) +)?"
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d{1,2}(?![\d:])(?:,? +(?:19|20)\d\d)?(?!\w)[ \t]*",
+        " <date> ",
+    ),
+    ("Replace uptime values (uptime is …, Uptime: …) with <uptime>", r"(?i)(\buptime\s*(?:is|:|=)\s*).*", r"\1<uptime>"),
     ("Replace numbers (counters, etc.) with <number> (matches every number)", r"\b\d+\b", "<number>"),
+)
+
+# Regular expression help (REQ-311 / ADR-0217 decision 6): the collapsed section #rawopt-help in the compare window and the
+# "Simple comparison" tab of the settings window. The same keys as the Japanese file, in the same order.
+# The numbers (200, 20, 1,000) are written in the text; tests check them against raw_keys constants.
+RAW_HELP_TITLE = "How to write regular expressions"
+RAW_HELP_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("syntax", "Syntax"),
+    ("meaning", "Meaning"),
+    ("example", "Example"),
+)
+# (name, syntax, meaning, example). Order of the table rows
+RAW_HELP_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    ("dot", r".", "Any one character", r"a.c"),
+    ("classes", r"\d, \w, \s", "One digit; one letter, digit or _; one whitespace character", r"\d\d"),
+    ("boundary", r"\b", "A word boundary", r"\bvlan\b"),
+    ("anchors", r"^, $", "Start of the line; end of the line", r"^interface "),
+    ("repeat", r"*, +, ?", "The previous item 0 or more times; 1 or more times; 0 or 1 time", r"\d+"),
+    ("count", r"{2,4}", "The previous item 2 to 4 times", r"\d{1,3}"),
+    ("set", r"[0-9a-f], [^ ]", "Any one character inside; any one character not inside", r"[0-9a-f]{4}"),
+    ("group", r"(…)", r"A group. Use its content as \1 in the replacement text", r"(uptime is ).*"),
+    ("either", r"a|b", "Either one", r"(?:permit|deny) "),
+    ("plain_group", r"(?:…)", "A group without a number", r"(?:\d+\.){3}\d+"),
+    ("around", r"(?<!…), (?!…)", "Matches only when what comes before / after is not …", r"(?<![\w:])\d+:\d\d"),
+    ("escape", r"\., \(", "The symbol itself", r"192\.0\.2\.1"),
+    ("ignore_case", r"(?i)", "At the start of a pattern, ignores upper and lower case", r"(?i)uptime"),
+)
+# (name, text). Order of the notes
+RAW_HELP_NOTES: tuple[tuple[str, str], ...] = (
+    (
+        "re",
+        "This is Python re syntax. A pattern may match anywhere in a line (add ^ and $ to match the whole line)",
+    ),
+    (
+        "replace",
+        r"Every match is replaced. \1 in the replacement text is the content of the first (…). Write a backslash itself as \\",
+    ),
+    (
+        "compare_only",
+        "Replaced text is used only for comparing. The screen, the lines sent to AI and what is saved keep the original lines",
+    ),
+    (
+        "same_line",
+        "Lines that become the same text on both sides are treated as the same line. The time and duration examples use the same <time>. "
+        "The time, duration and date examples also fold the surrounding spaces into one, so they give the same result "
+        "when a table column changes width",
+    ),
+    (
+        "refused",
+        "Patterns you cannot use: a repeat or | inside a repeat ((a+)+, (a|b)*, etc.) and, in ignored lines, a pattern that matches empty text (.*, ^$, etc.)",
+    ),
+    (
+        "limits",
+        "A pattern is at most 200 characters; at most 20 ignored lines and 20 replacements. Matching covers the first 1,000 characters of a line",
+    ),
+    (
+        "hides",
+        "Ignoring and replacing can also hide real changes. The settings in use are shown below the result",
+    ),
 )
 
 
@@ -3498,6 +3645,130 @@ GUI_WEB_TEXTS.update(
         "raw_options.algorithm.patience": RAW_ALGORITHM_LABEL["patience"],
         "raw_options.algorithm.note": "Minimal falls back to standard when there are more than 1,000 changed lines",
         "batch.note.raw_options": BATCH_NOTE_RAW_OPTIONS,
+        # REQ-311: regular expression help (collapsed section #rawopt-help)
+        "raw_options.help": RAW_HELP_TITLE,
+        **{f"raw_options.help.col.{name}": text for name, text in RAW_HELP_COLUMNS},
+        **{
+            f"raw_options.help.row.{name}.{part}": value
+            for name, syntax, meaning, example in RAW_HELP_ROWS
+            for part, value in (("syntax", syntax), ("meaning", meaning), ("example", example))
+        },
+        **{f"raw_options.help.note.{name}": text for name, text in RAW_HELP_NOTES},
+    }
+)
+
+
+# --- "Ask AI for a rule…" in the simple comparison settings (REQ-314 / ADR-0218 decision 8) ---
+# No text includes the pasted lines, the description, the text of the answer, the pattern, or the re.error text (kinds only)
+RULE_AI_TITLE = "Ask AI for a rule"  # title of the pre-send confirmation
+RULE_AI_PROMPT_TITLE = "Text to send (only this text is sent; read only):"
+RULE_AI_NOTE = "Check that the pasted lines and the description do not contain host names or similar."
+RULE_AI_SEND = "Send"
+RULE_AI_DONT_SEND = "Don't send"
+RULE_AI_NO_LINES = "No lines were pasted. Nothing was sent."
+RULE_AI_NO_SENDABLE = "There are no lines that can be sent."
+RULE_AI_UNSEEN = "The pasted lines contain invisible characters, so nothing was sent."
+# Kinds of refusal of the description (REFUSE_* in llm_analyzer/follow_up.py)
+RULE_AI_DESCRIPTION_REFUSED = {
+    "blank": "Write what you want to normalize. Nothing was sent.",
+    "too_long": "Keep the description of what to normalize within 500 characters. Nothing was sent.",
+    "mask": "The description contains text that would be masked. Please rewrite it. Nothing was sent.",
+    "unsent": "The description contains a line that cannot be sent. Please rewrite it. Nothing was sent.",
+    "pem": "The description contains a certificate or key line. Please rewrite it. Nothing was sent.",
+}
+# Reasons the answer could not be read (REASON_* in llm_analyzer/rule_suggestion.py)
+RULE_AI_REASON_TEXT = {
+    "no_pattern": "there is no PATTERN: line",
+    "many_patterns": "there are 2 or more PATTERN: lines",
+    "no_replacement": "there is no REPLACEMENT: line",
+    "too_long": "the answer is too long",
+    "shape": "the answer has the wrong form",
+}
+# Reasons the pattern was not accepted by the check (PROBLEM_* in rule_suggestion)
+RULE_AI_PROBLEM_TEXT = {
+    "too_long": "the pattern or the replacement text is too long",
+    "bad_pattern": "the pattern cannot be read as a regular expression",
+    "nested_repeat": "a pattern with a nested repeat cannot be used",
+    "matches_empty": "a pattern that matches an empty string cannot be used",
+    "bad_replacement": "the replacement text is not written correctly",
+    "no_match": "the pattern matches none of the pasted lines",
+}
+RULE_AI_NOT_COMPARED = "(not compared)"  # the "After" column of the table for "Ignore the whole line"
+RULE_AI_ASKING = "Asking the AI for a rule…"
+
+
+def rule_ai_destination(name: str, model: str | None, base_url: str | None) -> str:
+    """Destination in the pre-send confirmation (shown the same way as for pair suggestions). No key."""
+    return batch_pair_ai_destination(name, model, base_url)
+
+
+def rule_ai_unavailable(reason: str | None) -> str:
+    """When the connection for asking for a rule cannot be used (no key, etc.). Nothing was sent."""
+    return f"Cannot ask the AI for a rule: {_LLM_REASON.get(reason or '', f'Reason: {reason}')}"
+
+
+def rule_ai_too_many_lines(count: int, limit: int) -> str:
+    """When the pasted lines exceed the limit (never send only part of them)."""
+    return f"{count:,} lines were pasted, over the limit of {limit:,} lines. No lines were sent."
+
+
+def rule_ai_too_many_chars(count: int, limit: int) -> str:
+    """When the pasted characters exceed the limit (never send only part of them)."""
+    return f"{count:,} characters were pasted, over the limit of {limit:,} characters. Nothing was sent."
+
+
+def rule_ai_prompt_too_long(limit: int) -> str:
+    return f"The text to send is over {limit:,} characters, so nothing was sent."
+
+
+def rule_ai_omitted(count: int) -> str:
+    """Number of lines left out in the pre-send confirmation because they could not be judged."""
+    return f"Lines not sent because they could not be judged: {count}"
+
+
+def rule_ai_failed(reason: str, error_type: str, status_code: int | None) -> str:
+    """Send failure (only the reason text, the exception type name, and the HTTP status code; no exception text)."""
+    detail = f"type: {error_type}" + (f", HTTP {status_code}" if status_code is not None else "")
+    return f"Could not ask the AI for a rule: {_LLM_REASON.get(reason, f'Reason: {reason}')} ({detail})"
+
+
+def rule_ai_unreadable(reason: str) -> str:
+    """When the AI's answer could not be read. The kind of reason only (no text of the answer)."""
+    return f"Could not read the AI's answer ({RULE_AI_REASON_TEXT.get(reason, reason)}). Nothing was put in the fields."
+
+
+def rule_ai_problem(kind: str) -> str:
+    """When the pattern cannot be put in the fields. The kind of error only (no re.error text)."""
+    return f"The AI's pattern cannot be put in the fields: {RULE_AI_PROBLEM_TEXT.get(kind, kind)}"
+
+
+def rule_ai_match_count(matched: int, total: int) -> str:
+    """For example "12 of the 12 pasted lines match"."""
+    return f"{matched} of the {total} pasted {_plural(total, 'line', 'lines')} {_plural(matched, 'matches', 'match')}"
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "raw_options.ai.button": "Ask AI for a rule…",
+        "raw_options.ai.title": RULE_AI_TITLE,
+        "raw_options.ai.lines": "Lines to normalize (paste; up to 100 lines)",
+        "raw_options.ai.description": "What to normalize",
+        "raw_options.ai.description.hint": "Example: the time at the start of a line",
+        "raw_options.ai.kind": "Rule to create",
+        "raw_options.ai.kind.replace": "Replace",
+        "raw_options.ai.kind.ignore": "Ignore the whole line",
+        "raw_options.ai.full": "A kind whose fields are full cannot be chosen (up to 20 replacements and 20 lines to ignore)",
+        "raw_options.ai.check": "Review what will be sent…",
+        "raw_options.ai.close": "Close",
+        "raw_options.ai.asking": RULE_AI_ASKING,
+        "raw_options.ai.result.pattern": "Pattern",
+        "raw_options.ai.result.replacement": "Replacement text",
+        "raw_options.ai.result.note": "Note",
+        "raw_options.ai.result.before": "Pasted line (before)",
+        "raw_options.ai.result.after": "After normalizing (after)",
+        "raw_options.ai.result.local": "This table shows the rule applied on this computer to the original pasted lines (the table itself is not sent)",
+        "raw_options.ai.add": "Put in the fields",
+        "raw_options.ai.skip": "Don't put in",
     }
 )
 
@@ -4554,18 +4825,16 @@ def device_notice_text(before: Sequence[str], after: Sequence[str]) -> str:
 
 
 def device_split_confirm_body() -> str:
-    """Body of the dialog before writing (with the note to treat the files like the original config)."""
-    return (
-        f"The files split by device: {save_caution()} "
-        "Choose the folder to write to. A new folder is created under it (the original files are not changed)."
-    )
+    """Body of the dialog before writing (one sentence choosing the folder. The confidentiality caution comes with the notice after writing; ADR-0216 decision 1)."""
+    return "Choose the folder for the split files."
 
 
 def device_split_done(folder: Path, before_count: int, after_count: int) -> str:
     """Text under the window when writing finished."""
     return (
         f"Split by device: {folder} (Before: {before_count} {_plural(before_count, 'device', 'devices')}"
-        f" / After: {after_count} {_plural(after_count, 'device', 'devices')})"
+        f" / After: {after_count} {_plural(after_count, 'device', 'devices')}). "
+        f"The split files: {save_caution()}"
     )
 
 
@@ -4574,14 +4843,15 @@ def device_split_failed(reason: str, folder: Path | None) -> str:
     base = f"Could not write the files for each device: {reason}"
     if folder is None:
         return base
-    return f"{base}. What was written so far is left in {folder} (nothing was deleted)"
+    return f"{base}. What was written so far is left in {folder} (nothing was deleted). The split files: {save_caution()}"
 
 
 def device_split_not_opened(folder: Path) -> str:
     """When the files were written but could not be put into the Batch compare window."""
     return (
         f"Wrote the files for each device to {folder}. "
-        "The folders were not put into Batch compare because its pairs are being edited or a comparison is running"
+        "The folders were not put into Batch compare because its pairs are being edited or a comparison is running. "
+        f"The split files: {save_caution()}"
     )
 
 

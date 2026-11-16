@@ -139,6 +139,11 @@ Get-ChildItem -Recurse -File | Unblock-File
 
 Download the file for your OS as described in [Download](#download).
 
+Recommended location (the common layout of the Pilot series, so other Pilot tools can find DriftPilot without extra settings):
+
+- **Windows:** extract the zip into one folder such as `PilotSeries\`, so that you get `PilotSeries\DriftPilot\DriftPilot.exe`.
+- **macOS:** move `DriftPilot.app` to `/Applications`. Settings are kept in `~/Library/Application Support/DriftPilot/`.
+
 The apps are not code-signed, so your OS will warn you the first time:
 
 - **Windows:** "Windows protected your PC" → "More info" → "Run anyway"
@@ -189,7 +194,7 @@ Run `driftpilot --help` to see all commands, or read the [command-line guide](do
 
 ## Status
 
-Version 0.2.5 (preview). The UI and output formats may still change. Bug reports and sample configs that DriftPilot reads badly are welcome in [Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) — please replace real addresses, hostnames and secrets with example values first.
+Version 0.2.6 (preview). The UI and output formats may still change. Bug reports and sample configs that DriftPilot reads badly are welcome in [Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) — please replace real addresses, hostnames and secrets with example values first.
 
 ## License
 

@@ -1723,7 +1723,7 @@ PATTERNS: tuple[Pattern, ...] = (
         r"|port-channel lacp|lacp|link tracking|link-debounce|mac security|mop|counter|keepalive|fair-queue)(?: .+)?"
         r"|(?:no )?(?:stackwise-virtual|switchport trunk encapsulation|flowcontrol|small-frame|l2 mtu|l2 mru"
         r"|node-segment|channel-protocol|dialer|dialer-group|pppoe|pppoe-client|clock rate|zone-member|pulse-time"
-        r"|fabric forwarding|crypto map) .+"
+        r"|fabric forwarding|crypto map|logging event) .+"
         r"|(?:no )?(?:ppp (?!(?:chap hostname|pap sent-username|eap identity)(?: |$))"
         r"|glbp (?!(?:.* )?authentication(?: |$))|vpc (?!\d+$)).+"
         r"|(?:no )?clns route-cache"
@@ -1752,6 +1752,9 @@ PATTERNS: tuple[Pattern, ...] = (
         "語の途中では切らない(`cdpx` は当たらない)。今の項目と同じ設定の行"
         "(`switchport mode bogus` など)は当たらず未解釈(`channel-group auto` は "
         "interfaces.channel_group_auto が読む)。"
+        "Cisco の `logging event …`(`logging event trunk-status`・`no logging event link-status` など。"
+        "後ろの語が要る)も読む(ADR-0217 決定1、REQ-310)。字下げ1つの ` logging event link-status`・"
+        "` logging event subif-link-status` はライブラリが木にする前に消すので、ここには来ない。"
         "インターフェースのほかのパターンすべての後ろに置く。秘密の語がある行と子を持つ行は、子も含めて未解釈"
         "(`cts manual` は interfaces.cts_manual が読む)",
     ),

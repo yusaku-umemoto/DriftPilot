@@ -52,6 +52,7 @@ from driftpilot.llm_analyzer.pair_suggestion import (
     PairReading,
     build_pair_prompt,
     file_name_refused,
+    pair_prompt_parts,
     read_pair_answer,
 )
 from driftpilot.llm_analyzer.prompt import (
@@ -67,7 +68,7 @@ from driftpilot.llm_analyzer.prompt import (
     prompt_version_of,
     template_for,
 )
-from driftpilot.llm_analyzer.prompt_parts import InstructionEdit, PromptParts
+from driftpilot.llm_analyzer.prompt_parts import FILE_NAMES, InstructionEdit, PromptParts
 from driftpilot.llm_analyzer.thinking import THINKING_CUT_NOTE, THINKING_MAX_CHARS, ThinkingBuffer
 from driftpilot.llm_analyzer.types import (
     DEFAULT_MAX_DIFFS,
@@ -113,6 +114,7 @@ __all__ = [
     "DEFAULT_PROMPT_TEMPLATE",
     "DEFAULT_WIRE",
     "DISABLED",
+    "FILE_NAMES",
     "INCIDENT_PROMPT_TEMPLATE",
     "MASK_PATTERNS",
     "MAX_PAIR_NAMES",
@@ -169,6 +171,7 @@ __all__ = [
     "json_text",
     "masking_fingerprint",
     "normalize_newlines",
+    "pair_prompt_parts",
     "parse_json_text",
     "prompt_version_of",
     "read_pair_answer",

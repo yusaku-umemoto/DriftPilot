@@ -109,6 +109,8 @@ _INTERFACE_WORDS = frozenset(
         "hsrp",
         # NEC IX の IPsec・IKEv2(ADR-0209 決定6、REQ-292)
         "ikev2", "ipsec",
+        # Cisco のインターフェースの `logging event …`(ADR-0217 決定1、REQ-310)
+        "logging",
     }
 )
 # 項目に写す設定の頭の語(`vxlan ` を外した後)。`no ` の付いた形は options に入れない

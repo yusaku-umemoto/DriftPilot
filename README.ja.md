@@ -139,6 +139,11 @@ Get-ChildItem -Recurse -File | Unblock-File
 
 「[ダウンロード方法](#ダウンロード方法)」のとおりに、使う OS の分を取ってください。
 
+おすすめの置き場所（Pilot シリーズで共通の形です。ほかの Pilot のソフトが、設定しなくても DriftPilot を見つけられます）:
+
+- **Windows:** zip を `PilotSeries\` のような 1 つのフォルダーに展開して、`PilotSeries\DriftPilot\DriftPilot.exe` になるようにします
+- **Mac:** `DriftPilot.app` を `/Applications` に移します。設定は `~/Library/Application Support/DriftPilot/` に置かれます
+
 署名をしていないので、初めて開くときに OS の警告が出ます。
 
 - **Windows:** 「Windows によって PC が保護されました」→「詳細情報」→「実行」
@@ -189,7 +194,7 @@ driftpilot batch --pair-by-name before_dir after_dir --confirm
 
 ## 状態
 
-0.2.5（試用版）です。画面と出力の形は、これから変わることがあります。不具合や、うまく読めない config の例は [Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) へどうぞ。実在のアドレス・ホスト名・秘密は、例の値に置き換えてから貼ってください。
+0.2.6（試用版）です。画面と出力の形は、これから変わることがあります。不具合や、うまく読めない config の例は [Issues](https://github.com/yusaku-umemoto/DriftPilot/issues) へどうぞ。実在のアドレス・ホスト名・秘密は、例の値に置き換えてから貼ってください。
 
 ## ライセンス
 

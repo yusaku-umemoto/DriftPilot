@@ -11,6 +11,7 @@
 // 画面だけで決めるのは、設定の欄の開閉・左右の面の幅（保存しない）・1つのボタンの名前（Python が渡す材料と、欄の文字の有無だけで決める）。
 // AI の面（右の面）を描くのは js/ai_view.js（AI の窓と同じ部品。ADR-0160 決定2）。AI の面を別の窓で出している間（view.ai_detached）は
 // 右の面と境目を隠して左を全幅にし、結果のタブの行の右端に「↗」（別の窓を前に出す）を出す。
+// AI の欄を隠している間（view.ai_hidden。ADR-0216 決定5）も同じ形で、タブの行に「« AI」（出す）を出す。
 
 import { call, on } from "./bridge.js";
 import { notice, panel } from "./dialog.js";
@@ -54,6 +55,7 @@ const COLUMN_TABLES = [
 // AI の面から呼ぶメソッドのうち、form（比較の設定の欄の値）を足すもの。AI の窓では Python が持つ form を使う
 const AI_FORM_METHODS = new Set([
   "send_llm",
+  "ask_shown",
   "ask_follow_up",
   "answer_preview",
   "set_full_text",
@@ -331,12 +333,14 @@ function render(next) {
     }
   }
   renderDetached(next.ai_detached);
+  renderAiHidden(!next.ai_detached && next.ai_hidden === true);
   renderMulti(next.multi);
   if (next.result_revision !== shown.result) {
     loadResult();
   }
   // AI の面（やり取り・途中の答え・操作・確認のダイアログ）。別の窓が開いている間、確認は Python が別の窓の view にだけ入れる
   aiView.render(next);
+  reportShown();
   if (next.notice !== null && next.notice.id !== shown.notice) {
     shown.notice = next.notice.id;
     notice(next.notice.title, next.notice.body, next.notice.ok);
@@ -392,6 +396,26 @@ function renderDetached(detached) {
   $("split-handle").hidden = detached;
   split.classList.toggle("pilot-split--detached", detached);
   $("ai-front").hidden = !detached;
+}
+
+// AI の欄を隠している間（ADR-0216 決定5。別の窓で出しているときは renderDetached の決めのまま）は、右の面と境目を隠して左を全幅にし、
+// 結果のタブの行に「« AI」（AI の欄を出す）を出す。隠したときに「»」にフォーカスがあれば「« AI」へ、出したときに「« AI」にあれば「»」へ移す
+// （キーボードだけで戻れるように）。隠した状態は Python の ai_hidden が持つ（ここでは覚えない）。
+function renderAiHidden(hidden) {
+  const active = document.activeElement;
+  const hadHide = active === $("ai-hide");
+  const hadShow = active === $("ai-show");
+  if (hidden) {
+    $("ai-pane").hidden = true;
+    $("split-handle").hidden = true;
+  }
+  split.classList.toggle("pilot-split--ai-hidden", hidden);
+  $("ai-show").hidden = !hidden;
+  if (hidden && hadHide) {
+    $("ai-show").focus();
+  } else if (!hidden && hadShow) {
+    $("ai-hide").focus();
+  }
 }
 
 // まとめての比較の一覧（REQ-122）。行は番号が変わったときだけ作り直し、選んでいる行は aria-selected で表す。
@@ -473,6 +497,7 @@ function sendCell(row) {
   const check = make("input", "pilot-check", null);
   check.type = "checkbox";
   check.setAttribute("aria-label", `${texts["compare.multi.col.send"]}: ${row.name}`);
+  check.title = texts["compare.multi.col.send"];
   check.addEventListener("change", () => {
     const tr = check.closest("tr");
     act("set_send_pair", tr.sectionRowIndex, check.checked);
@@ -652,6 +677,7 @@ function applyCategory() {
   for (let index = 0; index < rows.length; index += 1) {
     rows[index].hidden = structuredCategory !== null && structuredRows[index].category !== structuredCategory;
   }
+  reportShown();
 }
 
 // --- 単純比較の表と「差分のみ表示」（ADR-0155 決定2〜5） ---
@@ -887,19 +913,30 @@ async function jump(step) {
 const split = $("split");
 // 名前は handle にしない（後ろの関数 handle と同じ名前になり、モジュールが読み込めなくなるため）
 const splitHandle = $("split-handle");
-let leftWidth = null; // 動かした後の左の面の幅（px）。動かす前は CSS の初めの幅（58%）
+// 利用者が動かした後の左の面の幅の割合（決めた幅 ÷ 全体の幅。ADR-0216 決定4）。動かす前は null で、CSS の初めの幅（58%）のまま。
+// 窓の大きさが変わっても同じ割合で決め直す。最小の幅に詰めた値では上書きしない
+let leftRatio = null;
 let dragging = null;
 
-// 左の面の幅を px で決める。両側とも PANE_MIN より狭くしない。境目が隠れている（縦に積んでいる）ときは何もしない。
+// 左の面の幅を px で決める。両側とも PANE_MIN より狭くしない。境目が隠れている（縦に積んでいる）ときは何もしない（null を返す）。
+// 決めた幅 ÷ 全体の幅を返す。覚えるのは利用者が動かしたときだけ（moveLeftWidth）。
 function setLeftWidth(px) {
   const total = split.clientWidth - splitHandle.offsetWidth;
   if (splitHandle.offsetParent === null || total <= 0) {
-    return;
+    return null;
   }
   const width = Math.round(Math.min(Math.max(px, PANE_MIN), Math.max(PANE_MIN, total - PANE_MIN)));
-  leftWidth = width;
   split.style.setProperty("--pilot-split-left", `${width}px`);
   splitHandle.setAttribute("aria-valuenow", String(Math.round((width / total) * 100)));
+  return width / total;
+}
+
+// 利用者がドラッグ・矢印のキーで動かした幅を決め、割合を覚える（境目が隠れているときは今の割合のまま）
+function moveLeftWidth(px) {
+  const ratio = setLeftWidth(px);
+  if (ratio !== null) {
+    leftRatio = ratio;
+  }
 }
 
 function currentLeftWidth() {
@@ -916,7 +953,7 @@ splitHandle.addEventListener("pointerdown", (event) => {
 });
 splitHandle.addEventListener("pointermove", (event) => {
   if (dragging !== null) {
-    setLeftWidth(dragging.width + event.clientX - dragging.x);
+    moveLeftWidth(dragging.width + event.clientX - dragging.x);
   }
 });
 for (const name of ["pointerup", "pointercancel"]) {
@@ -931,13 +968,13 @@ for (const name of ["pointerup", "pointercancel"]) {
 splitHandle.addEventListener("keydown", (event) => {
   if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
     event.preventDefault();
-    setLeftWidth(currentLeftWidth() + (event.key === "ArrowLeft" ? -SPLIT_STEP : SPLIT_STEP));
+    moveLeftWidth(currentLeftWidth() + (event.key === "ArrowLeft" ? -SPLIT_STEP : SPLIT_STEP));
   }
 });
-// 窓の大きさが変わったら、動かした幅を最小の幅の中に詰め直す
+// 窓の大きさが変わったら、覚えた割合から今の全体の幅で幅を決め直し、最小の幅の中に詰める（割合は書き換えない）
 window.addEventListener("resize", () => {
-  if (leftWidth !== null) {
-    setLeftWidth(leftWidth);
+  if (leftRatio !== null) {
+    setLeftWidth(leftRatio * (split.clientWidth - splitHandle.offsetWidth));
   }
 });
 
@@ -945,20 +982,29 @@ window.addEventListener("resize", () => {
 
 const resultPane = $("result-pane");
 const multiHandle = $("multi-handle");
-let multiWidth = null; // 動かした後の一覧の幅（px）。動かす前は CSS の初めの幅（--pilot-split-width）
+// 利用者が動かした後の一覧の幅の割合（決めた幅 ÷ 全体の幅。ADR-0216 決定4）。動かす前は null で、CSS の初めの幅（--pilot-split-width）のまま
+let multiRatio = null;
 let multiDragging = null;
 
 // 一覧の幅を px で決める。一覧は MULTI_MIN、表の側は PANE_MIN より狭くしない（合計が足りなければ MULTI_MIN）。
-// 境目が隠れている（まとめて比べていない・縦に積んでいる）ときは何もしない。
+// 境目が隠れている（まとめて比べていない・縦に積んでいる）ときは何もしない（null を返す）。決めた幅 ÷ 全体の幅を返す。
 function setMultiWidth(px) {
   const total = resultPane.clientWidth - multiHandle.offsetWidth;
   if (multiHandle.offsetParent === null || total <= 0) {
-    return;
+    return null;
   }
   const width = Math.round(Math.min(Math.max(px, MULTI_MIN), Math.max(MULTI_MIN, total - PANE_MIN)));
-  multiWidth = width;
   $("multi").style.setProperty("--pilot-split-width", `${width}px`);
   multiHandle.setAttribute("aria-valuenow", String(Math.round((width / total) * 100)));
+  return width / total;
+}
+
+// 利用者がドラッグ・矢印のキーで動かした幅を決め、割合を覚える（境目が隠れているときは今の割合のまま）
+function moveMultiWidth(px) {
+  const ratio = setMultiWidth(px);
+  if (ratio !== null) {
+    multiRatio = ratio;
+  }
 }
 
 function currentMultiWidth() {
@@ -975,7 +1021,7 @@ multiHandle.addEventListener("pointerdown", (event) => {
 });
 multiHandle.addEventListener("pointermove", (event) => {
   if (multiDragging !== null) {
-    setMultiWidth(multiDragging.width + event.clientX - multiDragging.x);
+    moveMultiWidth(multiDragging.width + event.clientX - multiDragging.x);
   }
 });
 for (const name of ["pointerup", "pointercancel"]) {
@@ -990,12 +1036,13 @@ for (const name of ["pointerup", "pointercancel"]) {
 multiHandle.addEventListener("keydown", (event) => {
   if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
     event.preventDefault();
-    setMultiWidth(currentMultiWidth() + (event.key === "ArrowLeft" ? -SPLIT_STEP : SPLIT_STEP));
+    moveMultiWidth(currentMultiWidth() + (event.key === "ArrowLeft" ? -SPLIT_STEP : SPLIT_STEP));
   }
 });
-// 窓の大きさが変わったら、動かした幅を最小の幅の中に詰め直す
+// 窓の大きさが変わったら、覚えた割合から今の全体の幅で幅を決め直し、最小の幅の中に詰める（割合は書き換えない）
 window.addEventListener("resize", () => {
-  if (multiWidth !== null) {
+  if (multiRatio !== null) {
+    const multiWidth = multiRatio * (resultPane.clientWidth - multiHandle.offsetWidth);
     setMultiWidth(multiWidth);
   }
 });
@@ -1211,6 +1258,39 @@ function selectTab(name) {
     $(`tab-${tab}`).setAttribute("aria-selected", String(tab === name));
     $(`panel-${tab}`).hidden = tab !== name;
   }
+  reportShown();
+}
+
+// 今表示している差分（タブと構造化比較の表のカテゴリの絞り込み）を Python に知らせる（REQ-312 §7 / ADR-0218 決定2）。
+// 状態は Python が持つ。Python が最後に受けた値（view.ai.shown）と今の画面が違うときだけ shown_changed を呼ぶ。
+// タブの押し下げ・チップの選択・チップが消えて「すべて」に戻る・Python がタブを移す・比べ直したのどれでも、
+// 描いた後にここを通るので 1 回だけ届く。カテゴリは構造化比較のタブのときだけ送る。
+// 同じ view のうちは同じ値を重ねて呼ばない（reportedShown に、送った値とその時の view の番号を持つ）
+let reportedShown = null;
+
+function currentShown() {
+  const tab = TABS.find((name) => $(`tab-${name}`).getAttribute("aria-selected") === "true");
+  if (tab === undefined) {
+    return null;
+  }
+  return { tab, category: tab === "structured" ? structuredCategory : null };
+}
+
+function reportShown() {
+  const now = currentShown();
+  if (view === null || now === null) {
+    return;
+  }
+  const known = view.ai.shown;
+  if (known.tab === now.tab && known.category === now.category) {
+    return;
+  }
+  const key = `${view.revision}:${now.tab}:${now.category}`;
+  if (reportedShown === key) {
+    return;
+  }
+  reportedShown = key;
+  act("shown_changed", now.tab, now.category);
 }
 
 // 押せないタブ（ADR-0164 決定1・2）。構造化比較が動いていない組では、構造化比較と構造化不可の行のタブを押せなくする。
@@ -1347,6 +1427,9 @@ bind("split-devices", () => splitDevices());
 // AI の面を別の窓で開く「↗」と、別の窓が開いている間の「↗」（前に出す）。どちらも同じメソッド（開くか前に出すかは Python が決める）
 bind("ai-detach", async () => handle(await call("open_ai_pane")));
 bind("ai-front", async () => handle(await call("open_ai_pane")));
+// AI の欄を隠す「»」と出す「« AI」（ADR-0216 決定5）。隠した状態は Python が持ち、返した view で描き直す
+bind("ai-hide", () => act("set_ai_hidden", true));
+bind("ai-show", () => act("set_ai_hidden", false));
 bind("cancel", async () => handle(await call("cancel")));
 bind("open-batch", async () => handle(await call("open_batch")));
 bind("open-settings", async () => handle(await call("open_settings")));
