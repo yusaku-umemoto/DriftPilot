@@ -109,12 +109,21 @@ PATTERNS: tuple[Pattern, ...] = (
         note="手続き。同じ名前が二度目に現れたら読まない。中身が読めない証明書があってもチェーン自体は読む",
     ),
     Pattern(
+        "certificates.ca_chain", "top", r"crypto ca certificate chain (?P<name>\S+)", "global.certificate_chains[name]",
+        "crypto ca certificate chain TP-1", _chain,
+        note=(
+            "手続きは certificates.chain と同じ(ASA の書き方。ADR-0214 決定 5、REQ-304)。"
+            "同じ名前が crypto pki と crypto ca の両方にあれば、二度目は読まない"
+        ),
+    ),
+    Pattern(
         "certificates.certificate", "crypto pki certificate chain",
         r"certificate (?:(?P<kind>self-signed|ca) )?(?P<serial>\S+)", "certificate_chains[name].certificates",
         "certificate self-signed 01", _certificate,
         note=(
             "手続き。本文(certificates.body)がすべて16進数の行(最後の quit は除く)のときだけ読む。"
-            "本文が読めない証明書は、その行も本文も未解釈にする"
+            "本文が読めない証明書は、その行も本文も未解釈にする。"
+            "`crypto ca certificate chain` の塊の中も、同じこの行で読む"
         ),
     ),
     Pattern(

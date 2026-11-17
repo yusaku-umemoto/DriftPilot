@@ -205,6 +205,10 @@ def save_caution() -> str:
     return "入力の設定値をそのまま含みます。元の config と同じ扱い(社外秘)にしてください"
 
 
+# duplicate_line の detail["item"] の表示名(AOS-Switch のポートの食い違い。REQ-334)
+_CONFLICT_ITEM = {"untagged_vlan": "untagged の VLAN", "channel_group": "束ねる先（trunk）"}
+
+
 def warning_message(w: SafetyWarning) -> str:
     if w.kind == "empty_category":
         return (
@@ -214,6 +218,14 @@ def warning_message(w: SafetyWarning) -> str:
     if w.kind == "duplicate_line":
         # 値は含めない(detail にはスコープと行番号しか無い)
         scope = w.detail["scope"] or "トップレベル"
+        if w.detail.get("item") is not None:
+            # AOS-Switch のポートの VLAN の所属・trunk の食い違い(ADR-0228 の追記、REQ-334)。値は含めない
+            item = _CONFLICT_ITEM.get(w.detail["item"], w.detail["item"])
+            return (
+                f"{_SIDE_LABEL[w.side or 'before']}の {scope} で、同じ項目（{item}）に違う値が "
+                f"{w.detail.get('count', 2)} か所に書かれています(この読み方では行番号は取れません)。"
+                "IR は後の行の値を使います。"
+            )
         if not w.detail["lines"]:
             # A型の木は元の行番号を持たない(ADR-0030 決定5)
             return (
@@ -260,7 +272,9 @@ def warning_message(w: SafetyWarning) -> str:
 
 
 # 機種の表示名(ADR-0151 決定7)。None は指定なし(Cisco 系の読み方)。判定の a も同じ名前で出す
-PLATFORM_LABEL: dict[str | None, str] = {"fortinet": "FortiGate", "fujitsu_sir": "Si-R", None: "Cisco 系・Arista"}
+PLATFORM_LABEL: dict[str | None, str] = {
+    "fortinet": "FortiGate", "fujitsu_sir": "Si-R", "juniper_junos": "Juniper Junos", "paloalto_panos": "Palo Alto PAN-OS", "yamaha": "ヤマハ RTX", None: "Cisco 系・Arista",
+}
 AUTO_PLATFORM_LABEL = "自動"
 
 
@@ -341,7 +355,7 @@ def route_detail_note(vendor_specific: dict[str, Any]) -> str:
 
 # 安全網5(REQ-25)の見立ての名前と、手がかりの説明(docs/notes/platform-sniff.md の表の ID)
 _HINT_LABEL = {"a": "Cisco 系・Arista の config", "d": "FortiGate の config"}
-_HINT_RULE = {"SNF-01": "先頭行が #config-version=", "SNF-02": "config … と end の対", "SNF-03": "interface・hostname・! の行"}
+_HINT_RULE = {"SNF-01": "先頭行が #config-version=", "SNF-02": "config … と end の対", "SNF-03": "interface・hostname・! の行", "SNF-04": "FortiOS の書式の行だけ"}
 
 
 def _platform_mismatch_message(w: SafetyWarning) -> str:
@@ -4130,7 +4144,7 @@ CLI_HELP = {
     "compare.kind": "入力の種類。auto は内容から判定する(既定: config)",
     "compare.platform": (
         "config では、既定でないパーサーの系統を選ぶ。fujitsu_sir を指定すると平坦 config のパーサー、"
-        "fortinet を指定すると FortiGate のパーサーを使う"
+        "fortinet を指定すると FortiGate のパーサー、yamaha を指定するとヤマハ RTX のパーサー、juniper_junos を指定すると Juniper Junos のパーサー、paloalto_panos を指定すると Palo Alto PAN-OS のパーサーを使う"
         "(--show-command は不要。省略や他の名前は Cisco 系で、指定は要らない)。"
         "show では、機種を ntc-templates の platform 名で指定する(例: cisco_ios)。--show-command と一緒に指定する。"
         "auto は config の中身から機種を決める(--show-command は不要。show では機種なしの単純比較になる)"
@@ -4185,11 +4199,11 @@ CLI_HELP = {
         "無い名前なら比較も送信もせずに終わる"
     ),
     "patterns.help": "config パーサーの対応一覧(パターン表)を出力する",
-    "patterns.platform": "平坦 config・FortiGate の表を出す(省略時は Cisco 系の表。docs/notes/flat-patterns.md、fortinet-patterns.md)",
+    "patterns.platform": "平坦 config・FortiGate・ヤマハ RTX・Juniper Junos・Palo Alto PAN-OS の表を出す(省略時は Cisco 系の表。docs/notes/flat-patterns.md、fortinet-patterns.md、yamaha-patterns.md、junos-patterns.md、panos-patterns.md)",
     "coverage.help": "config パーサーの被覆率を測る",
     "coverage.paths": "config のファイル、または切り出し済みのディレクトリ(_index.tsv を読む)",
     "coverage.exposure": "ファイルを直接渡したときの区分(既定: normal)。ディレクトリは _index.tsv の command 列で決まる",
-    "coverage.platform": "平坦 config・FortiGate のパーサーで測る(省略時は Cisco 系のパーサー)",
+    "coverage.platform": "平坦 config・FortiGate・ヤマハ RTX・Juniper Junos・Palo Alto PAN-OS のパーサーで測る(省略時は Cisco 系のパーサー)",
     "coverage.top": "未解釈の形と、FortiGate の汎用の形の行が多いブロックの上位件数(既定: {default})",
     "coverage.files": "text に出すファイル行の件数(既定: {default})",
     "coverage_show.help": "show 側の被覆率(特定率とテンプレート保有率)を測る",
@@ -4208,6 +4222,11 @@ CLI_HELP = {
     "pilot_call.compare": (
         "依頼のファイルを読んで 2 つの入力を比べ、結果を output_dir のファイルに書く"
         "(標準入力が閉じたら止める。終了コード: 差分なし 0・差分あり 1・エラー 2・選択待ち 3・止めた 130)"
+    ),
+    "pilot_call.config_facts": (
+        "依頼のファイルを読んで 1 つの config を「道すじ・値」の一覧にし、result.json(伏せない)と"
+        "masked_facts.json(AI に渡す形)を output_dir に書く"
+        "(標準入力が閉じたら止める。終了コード: 成功 0・エラー 2・止めた 130)"
     ),
     "pilot_call.request": "依頼の JSON のファイル(UTF-8)",
 }
@@ -4231,6 +4250,12 @@ PILOT_CALL_MESSAGES = {
     "write_failed": "結果のファイルを書けませんでした: {path}({reason})",
     "cancelled": "標準入力が閉じられたため、比較を止めました",
     "internal_error": "予期しないエラーで止まりました: {error_type}",
+    # config-facts(ADR-0223。REQ-319)の文。区間の数か例外の型の名前だけを入れる
+    "unsupported_operation_facts": "operation は config-facts だけ受けます",
+    "invalid_inputs_facts": "inputs は、role が config のものを 1 つだけ持つ配列にし、path は絶対パスの文字列にしてください",
+    "multiple_segments": "config の中に区間が {count} 件あります。区間を 1 つにした config を渡してください",
+    "parse_failed": "config を読み取れませんでした: {error_type}",
+    "cancelled_facts": "標準入力が閉じられたため、一覧の作成を止めました",
 }
 
 # --- コマンドの誤りの文(「エラー: 」の後ろ。REQ-258) ---

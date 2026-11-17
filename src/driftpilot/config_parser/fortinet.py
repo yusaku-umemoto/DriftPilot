@@ -1,9 +1,10 @@
-"""FortiGate の木(fortinet_tree)を IR の interfaces・static_routes・bgp・ospf・ipsec・sdwan・route_maps・prefix_lists・
-ipv6_prefix_lists・global(hostname・dns・ntp_options)と vendor_specific の firewall・config に写す extractor(REQ-22・
-REQ-31・REQ-45・REQ-50・REQ-164・REQ-174・REQ-191・REQ-192・REQ-193・REQ-194・REQ-195・REQ-196。
-ADR-0025 決定4・決定9、ADR-0026 決定3・5・6、ADR-0037、ADR-0040、ADR-0047、ADR-0119、ADR-0129、ADR-0139)。
+"""FortiGate・FortiSwitch の木(fortinet_tree)を IR の interfaces・static_routes・bgp・ospf・ipsec・sdwan・route_maps・
+prefix_lists・ipv6_prefix_lists・global(hostname・dns・ntp_options)・vlans と vendor_specific の firewall・config に写す
+extractor(REQ-22・REQ-31・REQ-45・REQ-50・REQ-164・REQ-174・REQ-191・REQ-192・REQ-193・REQ-194・REQ-195・REQ-196・REQ-299。
+ADR-0025 決定4・決定9、ADR-0026 決定3・5・6、ADR-0037、ADR-0040、ADR-0047、ADR-0119、ADR-0129、ADR-0139、ADR-0212)。
 
-専用の読み方で写すのは最上位の `config system interface`・`config router static`・`config router static6`・
+専用の読み方で写すのは最上位の `config system interface`・`config switch vlan`・`config switch interface`・
+`config switch trunk`・`config switch physical-port`(FortiSwitch。下記)・`config router static`・`config router static6`・
 `config router bgp`(`set as` が読めるとき)・`config router ospf`(入れ子の中も含めて set・unset・edit の行が
 あるとき)・`config vpn ipsec phase1`・`phase2`・`phase1-interface`・`phase2-interface`・`config system sdwan`・
 `config system virtual-wan-link`(入れ子の中も含めて set・unset・edit の行があるとき)・`config router prefix-list`・
@@ -170,6 +171,20 @@ prefix-list・route-map(REQ-195。ADR-0139 決定2・4、ADR-0047)。最上位�
 - DNS・NTP は vendor_specific["fortinet"]["config"] に入れない。中に行が無いブロックは見出しだけを解釈済みにする。
   直下の edit は未解釈。`config vdom`・`config global` の中は今のまま汎用の形
 
+FortiSwitch(REQ-299。ADR-0212 決定2〜9)。最上位の `config switch vlan`・`config switch interface`・`config switch trunk`・
+`config switch physical-port` を、今の IR の項目(vlans・interfaces の switchport・type・shutdown・port_options)に写す。
+IR に欄は足さない。`config system interface` を先に全部読んでから写すので、ブロックの出てくる順によらず同じ IR になる:
+- `switch vlan` の直下の `edit <1〜4095 の数>` → vlans[str(int(キー))](name は None)。中の行は BGP の options と同じ書き方
+  (道すじの頭なし)で options に入れる。数でない・範囲外のキーの edit は中も未解釈
+- `switch interface` の直下の `edit <名前>` → interfaces[名前]。`set native-vlan <数>` → switchport.native_vlan、
+  `set allowed-vlans <一覧>` → switchport.trunk_allowed_vlan(昇順のタプル)、`allowed-vlans-all enable` → `()`・
+  trunk_allowed_none=False。一覧も enable も無い edit は `()`・trunk_allowed_none=True(allowed-vlans が空 = native VLAN だけ通す)。
+  mode・access_vlan は None のまま。ほかの行は port_options に `switch interface > …` で入れる
+- `switch trunk` の edit の中の行は全部 port_options に `switch trunk > …` で入れる。メンバーのポートには何も足さない
+- `switch physical-port` の `set status up|down` → shutdown。ほかの行は port_options に `switch physical-port > …`。
+  `config system interface` にある名前では、switchport と port_options だけを写す(status も port_options に入る)
+- 4つのブロックは config に入れない。ほかの `config switch …` と `config switch-controller …` は汎用の形のまま
+
 汎用の形(REQ-50。ADR-0040)。専用の見出しに当たらない最上位のブロックを、FortiOS の書き方のまま
 vendor_specific["fortinet"]["config"][ブロックの名前] に写す(値を解釈しない):
 - config の段は set・unset・secrets・config・edits・order、edit の段は set・unset・secrets・config を空でも必ず持つ
@@ -195,6 +210,7 @@ from driftpilot.config_parser import ospf as cisco_ospf
 from driftpilot.config_parser.flat_tree import DuplicateLine, FlatNode, FlatTree
 from driftpilot.config_parser.fortinet_tree import CONFIG, EDIT, EMBEDDED, unquote
 from driftpilot.config_parser.ir import (
+    Acl,
     Bgp,
     BgpNeighbor,
     Global,
@@ -210,6 +226,7 @@ from driftpilot.config_parser.ir import (
     RouteMapEntry,
     SdwanBlock,
     StaticRoute,
+    Vlan,
     new_bgp,
     new_bgp_neighbor,
     new_global,
@@ -218,6 +235,7 @@ from driftpilot.config_parser.ir import (
     new_ospf,
     new_prefix_list,
     new_route_map_entry,
+    new_vlan,
     unset_marker,
 )
 from driftpilot.config_parser.patterns import Pattern, apply_first
@@ -744,7 +762,8 @@ _GEN_NOTE = (
     "router prefix-list・router prefix-list6・router route-map〔写せるリストがあるとき。写せないリストと直下の edit でない"
     "行は、この表の行で config に写す〕・"
     "system dns・system ntp・ファイアウォールの11〔policy・address・addrgrp・service custom・service group・vip・vip6・"
-    "vipgrp・ippool・ippool6・central-snat-map〕)は config に写さない。system global は汎用の形で写すが、直下の "
+    "vipgrp・ippool・ippool6・central-snat-map〕・switch vlan・switch interface・switch trunk・switch physical-port"
+    "〔FortiSwitch。REQ-299〕)は config に写さない。system global は汎用の形で写すが、直下の "
     "`set hostname` は global.hostname に写し、set・unset に入れない"
     "(その edit の中の表に当たらない行は、この表の行で edit の other に写す。表が持つ欄は写さない。ADR-0119)。"
     "同じ名前の config・同じキーの edit はまとめ、同じ欄の set は後の行の値"
@@ -2031,6 +2050,245 @@ _GLOBAL_PATTERNS: tuple[Pattern, ...] = (
 )
 
 
+# --- FortiSwitch(最上位の config switch vlan・interface・trunk・physical-port。REQ-299、ADR-0212 決定2〜9) ---
+
+_FSW_VLAN_BLOCK = "vlans.fortiswitch.block"
+_FSW_INTERFACE_BLOCK = "interfaces.fortiswitch.block"
+_FSW_TRUNK_BLOCK = "interfaces.fortiswitch.trunk_block"
+_FSW_PORT_BLOCK = "interfaces.fortiswitch.physical_port_block"
+_FSW_BLOCK_IDS = frozenset({_FSW_VLAN_BLOCK, _FSW_INTERFACE_BLOCK, _FSW_TRUNK_BLOCK, _FSW_PORT_BLOCK})
+_FSW_VLAN_OPTION_SCOPE = "fsw_vlan_option"
+_FSW_OPTION_SCOPE = "fsw_option"
+# 表が持つ欄。この欄の、表に当たらない set・unset は port_options に入れず未解釈に残す(ADR-0119 決定2)
+_FSW_INTERFACE_FIELDS = frozenset({"native-vlan", "allowed-vlans", "allowed-vlans-all"})
+_FSW_PORT_FIELDS = frozenset({"status"})
+_MAX_VLAN = 4095
+_FSW_SWITCH_INTERFACE = "switch interface"
+_FSW_SWITCH_TRUNK = "switch trunk"
+_FSW_SWITCH_PORT = "switch physical-port"
+
+
+@dataclass
+class _FswVlan:
+    """`config switch vlan` の直下の edit 1つ(VLAN 1つ)。key は読めたときの `str(int(キー))`。"""
+
+    key: str = ""
+
+
+@dataclass
+class _FswEdit:
+    """switch interface・trunk・physical-port の直下の edit 1つ。name は引用符を外した原文。"""
+
+    name: str = ""
+
+
+@dataclass
+class _FswPort:
+    """名前1つのインターフェースを読んでいる間の状態。allowed は最後に読めた `set allowed-vlans`(無い・unset なら None)、
+    all_enabled は `set allowed-vlans-all enable` を読んだか、has_interface_edit は switch interface に edit があるか。"""
+
+    interface: Interface
+    allowed: tuple[int, ...] | None = None
+    all_enabled: bool = False
+    has_interface_edit: bool = False
+
+
+def _fsw_vlan_edit(m: re.Match[str], ctx: _FswVlan) -> bool:
+    key = m["key"]
+    if not (key.isascii() and key.isdecimal()) or not 1 <= int(key) <= _MAX_VLAN:
+        return False
+    ctx.key = str(int(key))
+    return True
+
+
+def _fsw_port_edit(m: re.Match[str], ctx: _FswEdit) -> bool:
+    ctx.name = m["name"]
+    return True
+
+
+def _fsw_native_vlan(m: re.Match[str], ctx: _FswPort) -> bool:
+    value = int(m["value"])
+    if not 1 <= value <= _MAX_VLAN:
+        return False
+    ctx.interface["switchport"]["native_vlan"] = value  # 同じ欄が2回あれば後の行
+    return True
+
+
+_VLAN_SEGMENT = re.compile(r"([0-9]+)(?:-([0-9]+))?")
+
+
+def _expand_vlans(text: str) -> tuple[int, ...] | None:
+    """`20,30-32` のような一覧を昇順・重複なしのタプルにする(`switchport trunk allowed vlan <一覧>` と同じ読み方)。
+
+    D型の extractor は hier_config を使わないので、展開は自前で行う。空の区間・逆の範囲(`20-10`)・`1-2-3` は展開できない
+    (None)。巨大な範囲(`1-99999999` など)を展開しないよう、VLAN の番号は 4095 までにする。
+    """
+    found: set[int] = set()
+    for segment in text.split(","):
+        if (m := _VLAN_SEGMENT.fullmatch(segment)) is None:
+            return None
+        first = int(m[1])
+        last = int(m[2]) if m[2] is not None else first
+        if first > last or last > _MAX_VLAN:
+            return None
+        found.update(range(first, last + 1))
+    return tuple(sorted(found))
+
+
+def _fsw_allowed_vlans(m: re.Match[str], ctx: _FswPort) -> bool:
+    if (vlans := _expand_vlans(m["range"])) is None:
+        return False
+    ctx.allowed = vlans
+    return True
+
+
+def _fsw_allowed_vlans_unset(m: re.Match[str], ctx: _FswPort) -> bool:
+    ctx.allowed = None  # 一覧の行が無いのと同じ
+    return True
+
+
+def _fsw_allowed_vlans_all(m: re.Match[str], ctx: _FswPort) -> bool:
+    if m["state"] == "enable":  # 行の順によらない。disable は値を変えない
+        ctx.all_enabled = True
+    return True
+
+
+def _fsw_status(m: re.Match[str], ctx: _FswPort) -> bool:
+    ctx.interface["shutdown"] = m["state"] == "down"  # 2回あれば後の行
+    return True
+
+
+def _fsw_option_patterns(
+    prefix: str, scope: str, target: str, examples: tuple[str, str, str, str, str], note: str
+) -> tuple[Pattern, ...]:
+    """行を道すじ付きの文字列にして target(文字列の昇順の集合)に写す表(BGP・DNS と同じ6行・同じ関数)。
+    examples は (秘密の欄, set, unset, config, edit) の例。"""
+    secret_example, set_example, unset_example, config_example, edit_example = examples
+    secret_note = (
+        "秘密の欄(値の最初の語が ENC、名前が汎用の形の秘密の一覧に完全一致するか `hostkey-` で始まる。汎用の形と同じ判定)は、"
+        "どの段でも値を持たず `<道すじ> <欄>`(語の名前だけ)を入れる"
+    )
+    return (
+        Pattern(
+            f"{prefix}option_secret_enc", scope, r"""set\s+(?P<field>\S+)\s+(?P<q>["']?)ENC(?P=q)(?:\s.*)?""", target,
+            "set auth-key ENC EXAMPLEONLY", _opt_secret, note=secret_note + "。値の最初の語は引用符を外して比べる",
+        ),
+        Pattern(
+            f"{prefix}option_secret", scope,
+            rf"set\s+(?P<field>{'|'.join(map(re.escape, SECRET_FIELDS))}|{re.escape(_SECRET_PREFIX)}\S+)(?:\s.*)?",
+            target, secret_example, _opt_secret, note=secret_note,
+        ),
+        Pattern(
+            f"{prefix}option_set", scope, r"set\s+(?P<field>\S+)(?:\s+(?P<value>.*))?", target, set_example,
+            _opt_set(_is_secret),
+            note="`<道すじ> <欄> <値…>`。値は引用符を外した語を空白1つでつなぐ。値が無いか `''` なら `<欄>` だけ。"
+            "秘密の欄(上の行と同じ判定)は `<欄>` だけ。" + note + _GLOBAL_OPTION_NOTE + "。" + _GEN_SPACE_NOTE,
+        ),
+        Pattern(
+            f"{prefix}option_unset", scope, r"unset\s+(?P<field>\S+)", target, unset_example, _opt_unset,
+            note="`<道すじ> unset <欄>`。1語だけ。`unset a b` などは未解釈。" + note,
+        ),
+        Pattern(
+            f"{prefix}option_config", scope, r"config\s+(?P<name>.+)", "(道すじの段)", config_example, _opt_config,
+            note="入れ子の config。中の行を道すじ付きで同じ表で読む。" + _GLOBAL_OPTION_NOTE,
+        ),
+        Pattern(
+            f"{prefix}option_edit", scope, r"edit (?P<key>.*)", "(道すじの段)", edit_example, _opt_edit,
+            note="入れ子の config の中の edit。キーは木のテキストの `edit <キー>` のキー(引用符を外した原文)。"
+            "ブロックの直下の edit は、別の行(edit の名前を読む行)で読む",
+        ),
+    )
+
+
+_FSW_PORT_NOTE = (
+    "名前は `edit <キー>` のキー(引用符を外した原文)。新しく作るときは `new_interface` の後に parent_interface を None にする"
+    "(名前の `.` から親を推定しない)。`config system interface` を先に全部読んでから、switch interface → switch trunk → "
+    "switch physical-port の順に読む(ブロックの出てくる順によらず同じ IR にする)。`config system interface` にある名前では "
+    "type・shutdown・description・ip_address などを変えず、switchport と port_options だけを写す。"
+    "`config system interface` に無い名前の type は、switch trunk の直下に同じ名前の edit があれば port_channel、無ければ switchport"
+    "(vendor_specific.fortinet.interfaces には足さない)。port_options は3つのブロックのどれかに edit がある名前でリスト。"
+    "同じブロック(重なったブロックを含む)の同じ名前の edit は1つにまとめる"
+)
+_FSW_SWITCH_NOTE = (
+    "直下の edit でない行は未解釈。vendor_specific.fortinet.config には入れない(汎用の形の見出しより先に当てる)"
+)
+_FSW_PATTERNS: tuple[Pattern, ...] = (
+    Pattern(
+        _FSW_VLAN_BLOCK, "top", r"config switch vlan", "vlans", "config switch vlan", _block,
+        note="最上位の `config switch vlan` を読む(重なったブロックは1つにまとめる。edit が1つも無くても見出しだけを解釈済みにする)。"
+        + _FSW_SWITCH_NOTE,
+    ),
+    Pattern(
+        "vlans.fortiswitch.edit", "fsw_vlan_edit", r"edit (?P<key>.+)", "vlans[str(int(キー))]", "edit 10",
+        _fsw_vlan_edit,
+        note="キーは引用符を外した 1〜4095 の10進の数のときだけ読む(`vlans[\"10\"]`。name は None)。数でない・範囲外のキーの "
+        "edit は、中の行も未解釈。同じ番号の edit(重なったブロックを含む)は1つの VLAN にまとめる(options は和)",
+    ),
+    *_fsw_option_patterns(
+        "vlans.fortiswitch.", _FSW_VLAN_OPTION_SCOPE, "vlans[key].options[]",
+        ("set secret EXAMPLEONLY", "set learning enable", "unset policer", "config member-by-mac", "edit 1"),
+        "道すじの頭は付けない(例 `description users`・`member-by-mac > 1 > mac 192.0.2.1`)。",
+    ),
+    Pattern(
+        _FSW_INTERFACE_BLOCK, "top", r"config switch interface", "interfaces", "config switch interface", _block,
+        note="最上位の `config switch interface` を読む(edit が1つも無くても見出しだけを解釈済みにする)。"
+        "表の欄は switchport に、ほかの行は port_options に `switch interface > …` で写す。" + _FSW_SWITCH_NOTE,
+    ),
+    Pattern(
+        _FSW_TRUNK_BLOCK, "top", r"config switch trunk", "interfaces", "config switch trunk", _block,
+        note="最上位の `config switch trunk` を読む。直下の edit の中の行は全部 port_options に `switch trunk > …` で写す。"
+        "メンバーのポートの channel_group には何も足さない。" + _FSW_SWITCH_NOTE,
+    ),
+    Pattern(
+        _FSW_PORT_BLOCK, "top", r"config switch physical-port", "interfaces", "config switch physical-port", _block,
+        note="最上位の `config switch physical-port` を読む。`set status up|down` は shutdown に、ほかの行は port_options に "
+        "`switch physical-port > …` で写す。" + _FSW_SWITCH_NOTE,
+    ),
+    Pattern(
+        "interfaces.fortiswitch.edit", "fsw_port_edit", r"edit (?P<name>.+)", "interfaces[name]", "edit port1",
+        _fsw_port_edit, note=_FSW_PORT_NOTE,
+    ),
+    Pattern(
+        "interfaces.fortiswitch.native_vlan", "fsw_interface", r"set native-vlan (?P<value>[0-9]+)",
+        "interfaces[name].switchport.native_vlan", "set native-vlan 10", _fsw_native_vlan,
+        note="`config switch interface` の edit の中。1〜4095 の10進の数。同じ欄は後の行の値。ほかの形(`abc`・範囲外・"
+        "`unset native-vlan`)は port_options に入れず未解釈(ADR-0119 決定2)。mode・access_vlan は None のまま",
+    ),
+    Pattern(
+        "interfaces.fortiswitch.allowed_vlans", "fsw_interface", r"set allowed-vlans (?P<range>[0-9][0-9,\-]*)",
+        "interfaces[name].switchport.trunk_allowed_vlan", "set allowed-vlans 20,30-32", _fsw_allowed_vlans,
+        note="`switchport trunk allowed vlan <一覧>` と同じ読み方で、昇順のタプルにする(`20,21` と `20-21` は同じ)。"
+        "展開できない一覧(`10-abc`・逆の範囲・4095 を超える数)は未解釈。同じ欄は後の行。edit を読み終えたとき、"
+        "`allowed-vlans-all enable` も読める一覧も無ければ `()` と trunk_allowed_none=True(allowed-vlans が空 = native VLAN だけ通す)",
+    ),
+    Pattern(
+        "interfaces.fortiswitch.allowed_vlans_unset", "fsw_interface", r"unset allowed-vlans",
+        "interfaces[name].switchport.trunk_allowed_vlan", "unset allowed-vlans", _fsw_allowed_vlans_unset,
+        note="一覧の行が無いのと同じ(後の行が勝つ。既定は `()` と trunk_allowed_none=True)",
+    ),
+    Pattern(
+        "interfaces.fortiswitch.allowed_vlans_all", "fsw_interface", r"set allowed-vlans-all (?P<state>enable|disable)",
+        "interfaces[name].switchport.trunk_allowed_vlan・trunk_allowed_none", "set allowed-vlans-all enable",
+        _fsw_allowed_vlans_all,
+        note="enable の行があれば、行の順によらず `()` と trunk_allowed_none=False(すべて通す)。disable は値を変えない",
+    ),
+    Pattern(
+        "interfaces.fortiswitch.status", "fsw_physical_port", r"set status (?P<state>up|down)",
+        "interfaces[name].shutdown", "set status down", _fsw_status,
+        note="`config switch physical-port` の edit の中で、`config system interface` に無い名前だけ。down → True、up → False。"
+        "2回あれば後の行。ほかの値・`unset status` は未解釈。`config system interface` にある名前では表の欄にせず、"
+        "port_options に `switch physical-port > status up` の形で入れる",
+    ),
+    *_fsw_option_patterns(
+        "interfaces.fortiswitch.", _FSW_OPTION_SCOPE, "interfaces[name].port_options[]",
+        ("set secret EXAMPLEONLY", "set stp-state enabled", "unset untagged-vlans", "config port-security", "edit 1"),
+        "道すじの頭は `switch interface`・`switch trunk`・`switch physical-port`(例 `switch interface > stp-state enabled`)。"
+        "switch interface の表の欄(native-vlan・allowed-vlans・allowed-vlans-all)の、表に当たらない形は未解釈。"
+        "physical-port の status も、表の欄にする名前では同じ。",
+    ),
+)
+
+
 _VS = "vendor_specific.fortinet.interfaces[name]"
 _ROUTE_NOTE = (
     "表が持たない欄の set・unset <1語> は、汎用の形で経路の詳細の other に写す(写す行があるときだけキーを置く。ADR-0119 決定3)。"
@@ -2216,6 +2474,7 @@ PATTERNS: tuple[Pattern, ...] = (
     *_SDWAN_PATTERNS,
     *_ROUTE_LIST_PATTERNS,
     *_GLOBAL_PATTERNS,
+    *_FSW_PATTERNS,
     *_FW_PATTERNS,
     *_GEN_PATTERNS,
 )
@@ -2855,6 +3114,92 @@ def _system_ntp(blocks: list[FlatNode], interpreted: InterpretedLines, options: 
             _option_line(line, (), options, interpreted, scope=_NTP_OPTION_SCOPE)
 
 
+def _switch_vlans(blocks: list[FlatNode], interpreted: InterpretedLines) -> dict[str, Vlan]:
+    """最上位の `config switch vlan`(出現の順)の直下の edit を vlans に写す(REQ-299 §3)。
+
+    キーが 1〜4095 の10進の数の edit だけを `vlans[str(int(キー))]` にする(同じ番号はまとめる。name は None のまま)。
+    中の行は道すじの頭なしで options に入れる。直下の edit でない行と、読めないキーの edit(中も)は未解釈。
+    """
+    vlans: dict[str, Vlan] = {}
+    for block in blocks:
+        for item in block.children:
+            if item.scope_id != EDIT:
+                continue
+            ctx = _FswVlan()
+            if (opened := apply_first(PATTERNS, "fsw_vlan_edit", item.text, ctx)) is None:
+                continue
+            interpreted.mark(item, opened.id)
+            vlan = vlans.setdefault(ctx.key, new_vlan(int(ctx.key)))
+            for line in item.children:
+                _option_line(line, (), vlan["options"], interpreted, scope=_FSW_VLAN_OPTION_SCOPE)
+    return vlans
+
+
+def _switch_ports(
+    sections: tuple[tuple[str, list[FlatNode]], ...], system_names: frozenset[str], interpreted: InterpretedLines,
+    interfaces: dict[str, Interface],
+) -> None:
+    """最上位の `config switch interface`・`trunk`・`physical-port` の直下の edit を interfaces に写す(REQ-299 §4〜§7)。
+
+    sections は (道すじの頭, ブロックの出現の順) を、switch interface → trunk → physical-port の順に並べたもの。
+    system_names は `config system interface` にある名前(先に全部読んである)。その名前では switchport と port_options
+    だけを写し、type・shutdown などは変えない。無い名前は新しく作り、type は switch trunk の edit があれば port_channel。
+    """
+    ports: dict[str, _FswPort] = {}
+    trunks: set[str] = set()
+    for head, blocks in sections:
+        for block in blocks:
+            for item in block.children:
+                if item.scope_id != EDIT:
+                    continue
+                edit = _FswEdit()
+                if (opened := apply_first(PATTERNS, "fsw_port_edit", item.text, edit)) is None:
+                    continue
+                interpreted.mark(item, opened.id)
+                name = edit.name
+                if (port := ports.get(name)) is None:
+                    interface = interfaces.get(name)
+                    if interface is None:
+                        interface = interfaces[name] = new_interface(name)
+                        interface["parent_interface"] = None  # 名前の `.` から親を推定しない
+                    ports[name] = port = _FswPort(interface)
+                if port.interface["port_options"] is None:
+                    port.interface["port_options"] = []
+                if head == _FSW_SWITCH_TRUNK:
+                    trunks.add(name)
+                if head == _FSW_SWITCH_INTERFACE:
+                    port.has_interface_edit = True
+                new = name not in system_names
+                reserved = frozenset()
+                scope = None
+                if head == _FSW_SWITCH_INTERFACE:
+                    reserved, scope = _FSW_INTERFACE_FIELDS, "fsw_interface"
+                elif head == _FSW_SWITCH_PORT and new:
+                    reserved, scope = _FSW_PORT_FIELDS, "fsw_physical_port"
+                for line in item.children:
+                    if (
+                        scope is not None
+                        and line.scope_id is None
+                        and (pattern := apply_first(PATTERNS, scope, line.text, port)) is not None
+                    ):
+                        interpreted.mark(line, pattern.id)
+                        continue
+                    _option_line(
+                        line, (head,), port.interface["port_options"], interpreted, reserved, _FSW_OPTION_SCOPE
+                    )
+    for name, port in ports.items():
+        if port.has_interface_edit:  # 許可する VLAN は、全部を読み終えてから決める(行の順によらない)
+            switchport = port.interface["switchport"]
+            if port.all_enabled:
+                switchport["trunk_allowed_vlan"], switchport["trunk_allowed_none"] = (), False
+            elif port.allowed is not None:
+                switchport["trunk_allowed_vlan"], switchport["trunk_allowed_none"] = port.allowed, False
+            else:  # FortiSwitch の allowed-vlans が空 = native VLAN だけ通す
+                switchport["trunk_allowed_vlan"], switchport["trunk_allowed_none"] = (), True
+        if name not in system_names:
+            port.interface["type"] = "port_channel" if name in trunks else "switchport"
+
+
 def _new_firewall() -> dict[str, Any]:
     """ブロックが1つも無くても置く形(片方の config だけにキーがあると、余計な差分になるため)。"""
     return {
@@ -2869,10 +3214,17 @@ def extract(
     tree: FlatTree, interpreted: InterpretedLines
 ) -> tuple[
     dict[str, Interface], list[StaticRoute], Bgp | None, dict[str, Ospf], Ipsec | None, dict[str, SdwanBlock],
-    dict[str, RouteMap], dict[str, PrefixList], dict[str, PrefixList], Global, dict[str, Any], list[DuplicateLine],
+    dict[str, RouteMap], dict[str, PrefixList], dict[str, PrefixList], Global, dict[str, Vlan], dict[str, Acl],
+    dict[str, Any], list[DuplicateLine],
 ]:
-    """(interfaces, static_routes, bgp, ospf, ipsec, sdwan, route_maps, prefix_lists, ipv6_prefix_lists, global,
-    vendor_specific["fortinet"], 値の食い違い) を返す。
+    """(interfaces, static_routes, bgp, ospf, ipsec, sdwan, route_maps, prefix_lists, ipv6_prefix_lists, global, vlans, acls,
+    vendor_specific["fortinet"], 値の食い違い) を返す。acls はいつも空の辞書(Junos だけが写す)。
+
+    vlans は最上位の `config switch vlan` から写す(REQ-299。FortiSwitch)。FortiGate の config(4つのブロックが無い)では
+    空の辞書。最上位の `config switch interface`・`trunk`・`physical-port` は interfaces に写す(switchport・port_options・
+    shutdown)。`config system interface` を先に全部読み、そのあとで写す(ブロックの出てくる順によらず同じ IR にする)。
+    この4つのブロックは config に入れない(汎用の形の見出しより先に当てる)。ほかの `config switch …` と
+    `config switch-controller …` は汎用の形のまま。
 
     bgp は最上位の `config router bgp` から写す(REQ-191)。直下の最後の `set as` が読めなければ None で、
     そのブロックは汎用の形で config に写す。`config vdom` の中の `config router bgp` はいつも汎用の形。
@@ -2914,6 +3266,7 @@ def extract(
     glob = new_global()
     dns_blocks: list[FlatNode] = []
     ntp_blocks: list[FlatNode] = []
+    fsw_blocks: dict[str, list[FlatNode]] = {block_id: [] for block_id in _FSW_BLOCK_IDS}
     # BGP・OSPF・SD-WAN・prefix-list・route-map を写すかは、重なったブロックも含めて先に1回だけ決める
     # (ADR-0139 決定4、REQ-192 §2、REQ-194、REQ-195)
     local_as = _bgp_local_as(tree)
@@ -2957,6 +3310,8 @@ def extract(
             dns_blocks.append(block)
         elif header.id == _NTP_BLOCK:
             ntp_blocks.append(block)
+        elif header.id in _FSW_BLOCK_IDS:  # 見出しだけを解釈済みにし、あとで(system interface を読んだ後に)写す
+            fsw_blocks[header.id].append(block)
         elif header.id in _FW_BY_HEADER:
             _firewall(block, _FW_BY_HEADER[header.id], interpreted, firewall)
         elif ctx.name == _SYSTEM_GLOBAL:  # 見出しは汎用の形。直下の hostname だけ global に写す(REQ-196)
@@ -2970,8 +3325,19 @@ def extract(
     sdwan = _system_sdwan(sdwan_blocks, interpreted)
     _system_dns(dns_blocks, interpreted, glob["dns"])
     _system_ntp(ntp_blocks, interpreted, glob["ntp_options"])
+    vlans = _switch_vlans(fsw_blocks[_FSW_VLAN_BLOCK], interpreted)
+    _switch_ports(
+        (
+            (_FSW_SWITCH_INTERFACE, fsw_blocks[_FSW_INTERFACE_BLOCK]),
+            (_FSW_SWITCH_TRUNK, fsw_blocks[_FSW_TRUNK_BLOCK]),
+            (_FSW_SWITCH_PORT, fsw_blocks[_FSW_PORT_BLOCK]),
+        ),
+        frozenset(vendor),  # `config system interface` にある名前(上のループで全部読み終えている)
+        interpreted, interfaces,
+    )
     return (
         interfaces, routes, bgp, ospf, ipsec, sdwan, route_maps, prefix_lists[_PL_HEADER], prefix_lists[_PL6_HEADER], glob,
+        vlans, {},
         {"interfaces": vendor, "static_routes": details, "firewall": firewall, "config": generic, "header": file_header},
         [],
     )

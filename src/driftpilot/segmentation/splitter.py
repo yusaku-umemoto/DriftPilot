@@ -7,6 +7,12 @@
 行頭のページ送りの印(--More--)は、制御文字を消す前に外し、外した数を持つ(ADR-0134 決定1・2)。
 FortiGate の形のプロンプト(`<host> # `・`<host> (<文脈>) # `)は別の規則でも見分ける(ADR-0134 決定3)。
 アラクサラ AX の形のプロンプト(`> `・`# `・`(config)# `・`!<host># `・20文字までのホスト名)も別の規則で見分ける。
+Cisco IOS-XR の形のプロンプト(`RP/0/RSP0/CPU0:<host>#`・`RP/0/RP0/CPU0:<host>(config-if)#`)も別の規則で見分け、
+設定モードの形の行のコマンドの頭の `do ` は外す(ADR-0211 決定7。場所の部分だけで 14〜15 文字あり、一般の候補の上限を超えるため)。
+括弧の形のプロンプト(`[RTX1210] > `・`[RTX1210]# `・`[RTX830 Tokyo] > `。ヤマハ RTX の `console prompt`、Check Point Gaia の expert)も
+別の規則で見分ける(ADR-0213 決定8)。一般の候補は頭の字が `[` の候補を数えないため。FortiGate の形では、`[` で始まるホスト名は数えない。
+Cisco ASA の形のプロンプト(`<host>/pri/act# `・`<host>/sec/stby# `・`<host>/ctx1/pri/act(config-if)# `。フェイルオーバーの状態を出す設定)も
+別の規則で見分け、設定モードの形の行のコマンドの頭の `do ` は外す(ADR-0214 決定7。`/pri/act` だけで 8 文字あり、一般の候補の上限を超えるため)。
 設定モードの運用コマンドの頭の `$`(`(config)# $show ip arp`)は、区間のコマンドから外す(ADR-0207 決定1〜3)。
 採ったプロンプトが設定モードの形(`Router(config)# `)のときは、モードを外したホスト名(`Router`)の
 ほかのモードのプロンプトと `Router# `・`Router> ` も区切りにする(ADR-0209 決定7)。
@@ -50,6 +56,27 @@ FORTIGATE_PROMPT = re.compile(r"^(?P<prefix>(?P<host>\S{1,35})(?: \([^()]{1,79}\
 # アラクサラ AX の形のプロンプト(ADR-0207 決定1)。一般の候補・FortiGate の形とは別に見分ける。
 # 頭の `!` は未保存の印。ホスト名は空でもよい(裸のプロンプト)・20文字まで。(config…) は設定モード。終端の後ろは空白1つ
 AX_PROMPT = re.compile(r"^(?P<prefix>!?(?P<host>[^\s#>()]{0,20})(?:\((?P<mode>config[^()\s]{0,30})\))?[#>] )(?P<rest>.*)$")
+
+# Cisco IOS-XR の形のプロンプト(ADR-0211 決定7)。場所(`RP/0/RSP0/CPU0`・`LC/0/1/CPU0` など)+ `:` + ホスト名 + 設定モード(省略可)+ `#`。
+# 場所だけで 14〜15 文字あり一般の候補の上限(20 文字)を超えるので、別に見分ける。`#` の後ろの空白は 0 個か 1 個。
+# ホスト名の頭の字が文字か数字であることは _xr_match で確かめる
+XR_PROMPT = re.compile(
+    r"^(?P<prefix>(?P<loc>(?:RP|LC)/\d+/[A-Za-z0-9]+/CPU\d+):(?P<host>[^\s()#>$]{1,63})"
+    r"(?:\((?P<mode>[^()\s]{1,40})\))?#\s?)(?P<rest>.*)$"
+)
+
+# 括弧の形のプロンプト(ADR-0213 決定8)。`[` + ホスト名(括弧の中の 1〜32 文字、`[`・`]` を含まない・頭の字は空白でない)+ `]` + 空白(0〜1 個)
+# + 終端 `#` か `>` + 空白(0〜1 個)。ヤマハ RTX は `console prompt` の文字列の後に `>`(一般)か `#`(管理者)を付ける
+BRACKET_PROMPT = re.compile(r"^(?P<prefix>\[(?P<host>[^\[\]\s][^\[\]]{0,31})\] ?[#>] ?)(?P<rest>.*)$")
+
+# Cisco ASA の形のプロンプト(ADR-0214 決定7)。フェイルオーバーの状態を出す設定(`prompt hostname [context] [priority] state`)では
+# `<host>[/<context>][/pri|/sec]/<state>[(<mode>)]#` になり、`/pri/act` だけで 8 文字ある(一般の候補の上限を超えるため別に見分ける)。
+# 状態の語(act・stby・actNoFailover・stbyNoFailover)が最後の `/` の後に無い形(`/etc/freeradius#`・`asa01/admin#`)は当たらない。
+# ホスト名に `@`・`:` は入らない。ctx と pri の組は `/pri/act` の `/pri` を ctx が取ることがあるので使わない(host・mode・prefix・state の終わりだけ使う)
+ASA_PROMPT = re.compile(
+    r"^(?P<prefix>(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,62})(?P<ctx>/[A-Za-z0-9._-]{1,32})?(?P<pri>/(?:pri|sec))?"
+    r"/(?P<state>act|stby|actNoFailover|stbyNoFailover)(?:\((?P<mode>[^()\s]{1,40})\))?[#>]\s?)(?P<rest>.*)$"
+)
 
 LOGIN = re.compile(r"^(Login|Username|Password)\s*:\s*$", re.IGNORECASE)
 BARE_COMMAND = re.compile(r"^(show|get|display|dir|more|cat)\b.*$", re.IGNORECASE)
@@ -125,6 +152,14 @@ def _first_word(command: str | None) -> str:
     return parts[0].lower() if parts else ""
 
 
+def _fortigate_match(line: str) -> re.Match | None:
+    """行が FortiGate の形のプロンプトで始まるときだけ当たりを返す。ホスト名が `[` で始まるものは当てない(括弧の形で読む。ADR-0213 決定8)。"""
+    m = FORTIGATE_PROMPT.match(line)
+    if m and not m.group("host").startswith("["):
+        return m
+    return None
+
+
 def _fortigate_forms(lines: list[str]) -> tuple[dict[str, collections.Counter], collections.Counter, collections.Counter]:
     """FortiGate の形の候補をホスト名ごとに数える(ADR-0134 決定3)。
 
@@ -135,7 +170,7 @@ def _fortigate_forms(lines: list[str]) -> tuple[dict[str, collections.Counter], 
     total: collections.Counter = collections.Counter()
     score: collections.Counter = collections.Counter()
     for line in lines:
-        m = FORTIGATE_PROMPT.match(line)
+        m = _fortigate_match(line)
         if not m:
             continue
         host = m.group("host")
@@ -155,6 +190,94 @@ def _strip_dollar(command: str) -> str:
     if c.startswith("$"):
         c = " ".join(c[1:].split())
     return c
+
+
+def _strip_do(command: str) -> str:
+    """設定モードの行のコマンドの頭の `do `(運用コマンドを呼ぶ語。大文字・小文字は区別しない)を外す。後ろに語が無ければそのまま。"""
+    head, _, tail = command.partition(" ")
+    if head.lower() == "do" and tail:
+        return tail
+    return command
+
+
+def _xr_match(line: str) -> re.Match | None:
+    """行が XR の形のプロンプトで始まり、ホスト名の頭の字が文字か数字(ADR-0201 決定2)のときだけ当たりを返す。"""
+    m = XR_PROMPT.match(line)
+    if m and _host_head_ok(m.group("host")):
+        return m
+    return None
+
+
+def _xr_command(m: re.Match) -> str:
+    """XR の形の行の後ろのコマンド。`mode` があるときだけ頭の `do ` も外す。"""
+    c = _strip_dollar(_display_command(m.group("rest")))
+    return _strip_do(c) if m.group("mode") else c
+
+
+def _xr_forms(lines: list[str]) -> tuple[dict[str, collections.Counter], collections.Counter, collections.Counter]:
+    """XR の形の候補をホスト名ごとに数える(ADR-0211 決定7)。`_fortigate_forms` と同じ組を返す。
+
+    場所と設定モードが違っても、同じホスト名にまとめる。コマンドの形は `_xr_command` で整えてから `COMMAND_SHAPED` で判定する。
+    """
+    forms: dict[str, collections.Counter] = {}
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in lines:
+        m = _xr_match(line)
+        if not m:
+            continue
+        host = m.group("host")
+        forms.setdefault(host, collections.Counter())[m.group("prefix")] += 1
+        total[host] += 1
+        if COMMAND_SHAPED.match(_xr_command(m)):
+            score[host] += 1
+    return forms, total, score
+
+
+def _asa_command(m: re.Match) -> str:
+    """ASA の形の行の後ろのコマンド。`mode` があるときだけ頭の `do ` も外す。"""
+    c = _strip_dollar(_display_command(m.group("rest")))
+    return _strip_do(c) if m.group("mode") else c
+
+
+def _asa_forms(lines: list[str]) -> tuple[dict[str, collections.Counter], collections.Counter, collections.Counter]:
+    """ASA の形の候補をホスト名ごとに数える(ADR-0214 決定7)。`_fortigate_forms` と同じ組を返す。
+
+    コンテキスト・優先度・状態・設定モード・終端が違っても、同じホスト名にまとめる。コマンドの形は `_asa_command` で整えてから `COMMAND_SHAPED` で判定する。
+    """
+    forms: dict[str, collections.Counter] = {}
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in lines:
+        m = ASA_PROMPT.match(line)
+        if not m:
+            continue
+        host = m.group("host")
+        forms.setdefault(host, collections.Counter())[m.group("prefix")] += 1
+        total[host] += 1
+        if COMMAND_SHAPED.match(_asa_command(m)):
+            score[host] += 1
+    return forms, total, score
+
+
+def _bracket_forms(lines: list[str]) -> tuple[dict[str, collections.Counter], collections.Counter, collections.Counter]:
+    """括弧の形の候補をホスト名(括弧の中)ごとに数える(ADR-0213 決定8)。`_fortigate_forms` と同じ組を返す。
+
+    `>`・`#`・空白の違いは、括弧の中が同じなら同じホスト名にまとめる。コマンドの形は `rest` の前後の空白を除いて `COMMAND_SHAPED` で判定する。
+    """
+    forms: dict[str, collections.Counter] = {}
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in lines:
+        m = BRACKET_PROMPT.match(line)
+        if not m:
+            continue
+        host = m.group("host")
+        forms.setdefault(host, collections.Counter())[m.group("prefix")] += 1
+        total[host] += 1
+        if COMMAND_SHAPED.match(m.group("rest").strip()):
+            score[host] += 1
+    return forms, total, score
 
 
 def _ax_forms(lines: list[str]) -> tuple[dict[str, collections.Counter], collections.Counter, collections.Counter]:
@@ -202,10 +325,22 @@ def detect_prompt(lines: list[str]) -> tuple[str, ...]:
     一般の候補で決まったときは、同じホスト名で頭に `!` の付いた AX の形も足す(未保存の印。ADR-0207 の運用での追加)。
     決まらなければ FortiGate の形だけをホスト名ごとに数え、同じ基準を満たす順位1位のホスト名の形を
     出現の多い順にすべて返す(決定3 の2)。
+    それでも決まらなければ XR の形(`XR_PROMPT`)を同じ基準でホスト名ごとに数え、順位1位のホスト名の形を
+    設定モードの形も含めてすべて返す(ADR-0211 決定7)。
+    それでも決まらなければ括弧の形(`BRACKET_PROMPT`。`[RTX1210] > `)を括弧の中のホスト名ごとに同じ基準で数え、
+    順位1位のホスト名の形を出現の多い順にすべて返す(ADR-0213 決定8)。FortiGate の形は、`[` で始まるホスト名を数えない。
+    それでも決まらなければ ASA の形(`ASA_PROMPT`。`fw-01/pri/act# `)をホスト名ごとに同じ基準で数え、
+    順位1位のホスト名の形を設定モードの形も含めてすべて返す(ADR-0214 決定7)。
     それでも決まらなければ AX の形(`AX_PROMPT`)を同じ基準でホスト名ごとに数え、順位1位のホスト名の形を
     設定モードの形も含めてすべて返す(ADR-0207 決定2)。
+    最後に、プロンプトが 1 回だけのログの決まりを見る(`_detect_single_prompt`)。
     特定できなければ空のタプル。先頭は順位1位、一般の候補の残りは出現順。
     """
+    return _detect(lines)[0]
+
+
+def _detect(lines: list[str]) -> tuple[tuple[str, ...], str]:
+    """(プロンプトの組, どの規則で決まったか) を返す。規則は general・fortigate・xr・bracket・asa・ax・single-xr・single-asa・single-other・none。"""
     freq: collections.Counter = collections.Counter()
     score: collections.Counter = collections.Counter()
     for line in lines:
@@ -216,6 +351,9 @@ def detect_prompt(lines: list[str]) -> tuple[str, ...]:
         if COMMAND_SHAPED.match(m.group("rest").strip()):
             score[m.group("prefix")] += 1
     forms, fgt_total, fgt_score = _fortigate_forms(lines)
+    xr, xr_total, xr_score = _xr_forms(lines)
+    br, br_total, br_score = _bracket_forms(lines)
+    asa, asa_total, asa_score = _asa_forms(lines)
     ax, ax_total, ax_score = _ax_forms(lines)
     ranked = sorted(freq, key=lambda p: (score[p], freq[p]), reverse=True)
     # 設定モードのプロンプト(sw1(config)#)は、同じ機器の通常のプロンプト(sw1#)が候補にあるときは、まず除いて順位を付ける。
@@ -228,37 +366,54 @@ def detect_prompt(lines: list[str]) -> tuple[str, ...]:
             if score[p] >= 1 and freq[p] >= 2:
                 host = _host(p)
                 if not host:
-                    return (p,)
+                    return (p,), "general"
                 adopted = [p, *(q for q in freq if q != p and _host(q) == host)]
                 adopted += [q for q in _by_count(forms.get(host, collections.Counter())) if q not in adopted]
                 # 同じホスト名の、頭に `!` の付いた AX の形(未保存の印)も足す(決定者の回答による。ADR-0134 決定3 の足し方と同じ)
                 adopted += [q for q in _ax_bang_forms(ax, host) if q not in adopted]
-                return tuple(adopted)
+                return tuple(adopted), "general"
     hosts = sorted(fgt_total, key=lambda h: (fgt_score[h], fgt_total[h]), reverse=True)
     for host in hosts:
         if fgt_score[host] >= 1 and fgt_total[host] >= 2:
-            return tuple(_by_count(forms[host]))
+            return tuple(_by_count(forms[host])), "fortigate"
+    xr_hosts = sorted(xr_total, key=lambda h: (xr_score[h], xr_total[h]), reverse=True)
+    for host in xr_hosts:
+        if xr_score[host] >= 1 and xr_total[host] >= 2:
+            return tuple(_by_count(xr[host])), "xr"
+    br_hosts = sorted(br_total, key=lambda h: (br_score[h], br_total[h]), reverse=True)
+    for host in br_hosts:
+        if br_score[host] >= 1 and br_total[host] >= 2:
+            return tuple(_by_count(br[host])), "bracket"
+    asa_hosts = sorted(asa_total, key=lambda h: (asa_score[h], asa_total[h]), reverse=True)
+    for host in asa_hosts:
+        if asa_score[host] >= 1 and asa_total[host] >= 2:
+            return tuple(_by_count(asa[host])), "asa"
     ax_hosts = sorted(ax_total, key=lambda h: (ax_score[h], ax_total[h]), reverse=True)
     for host in ax_hosts:
         if ax_score[host] >= 1 and ax_total[host] >= 2:
-            return tuple(_by_count(ax[host]))
-    return _detect_single_prompt(lines, freq, forms, ax)
+            return tuple(_by_count(ax[host])), "ax"
+    return _detect_single_prompt(lines, freq, forms, xr, br, asa, ax)
 
 
 def _detect_single_prompt(
     lines: list[str],
     freq: collections.Counter,
     forms: dict[str, collections.Counter],
+    xr: dict[str, collections.Counter],
+    br: dict[str, collections.Counter],
+    asa: dict[str, collections.Counter],
     ax: dict[str, collections.Counter],
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], str]:
     """プロンプトが 1 回だけのログ(ADR-0201 決定5)。最初の空でない行がプロンプト+出力が空でも残す語のコマンドなら採る。
 
-    一般の候補を先に見て、次に FortiGate の形、最後に AX の形を見る。同じホスト名の候補を後ろに足す。
+    一般の候補を先に見て、次に FortiGate の形(`[` で始まるホスト名を除く)、XR の形、括弧の形、ASA の形、最後に AX の形を見る。同じホスト名の候補を後ろに足す。
+    XR の形・ASA の形では、設定モードなら頭の `do ` を外してから頭の語を見る(ADR-0211 決定7・ADR-0214 決定7)。
     AX の形では、後ろの頭の `$` を外してから頭の語を見る(ADR-0207 決定2)。
+    (プロンプトの組, 規則) を返す。XR の形で決まったときの規則は single-xr、ASA の形は single-asa、ほかは single-other、決まらなければ none。
     """
     first = next((line for line in lines if line.strip()), None)
     if first is None:
-        return ()
+        return (), "none"
     m = CANDIDATE.match(first)
     if m and _within_limit(m.group("prefix")):
         prefix = m.group("prefix")
@@ -266,17 +421,29 @@ def _detect_single_prompt(
         if host and _host_head_ok(host) and _first_word(m.group("rest")) in KEEP_EMPTY_COMMANDS:
             adopted = [prefix, *(q for q in freq if q != prefix and _host(q) == host)]
             adopted += [q for q in _ax_bang_forms(ax, host) if q not in adopted]
-            return tuple(adopted)
-    m = FORTIGATE_PROMPT.match(first)
+            return tuple(adopted), "single-other"
+    m = _fortigate_match(first)
     if m and _first_word(m.group("rest")) in KEEP_EMPTY_COMMANDS:
         host = m.group("host")
         prefix = m.group("prefix")
-        return (prefix, *(q for q in _by_count(forms.get(host, collections.Counter())) if q != prefix))
+        return (prefix, *(q for q in _by_count(forms.get(host, collections.Counter())) if q != prefix)), "single-other"
+    m = _xr_match(first)
+    if m and _first_word(_xr_command(m)) in KEEP_EMPTY_COMMANDS:
+        prefix = m.group("prefix")
+        return (prefix, *(q for q in _by_count(xr.get(m.group("host"), collections.Counter())) if q != prefix)), "single-xr"
+    m = BRACKET_PROMPT.match(first)
+    if m and _first_word(m.group("rest")) in KEEP_EMPTY_COMMANDS:
+        prefix = m.group("prefix")
+        return (prefix, *(q for q in _by_count(br.get(m.group("host"), collections.Counter())) if q != prefix)), "single-other"
+    m = ASA_PROMPT.match(first)
+    if m and _first_word(_asa_command(m)) in KEEP_EMPTY_COMMANDS:
+        prefix = m.group("prefix")
+        return (prefix, *(q for q in _by_count(asa.get(m.group("host"), collections.Counter())) if q != prefix)), "single-asa"
     m = AX_PROMPT.match(first)
     if m and _host_head_ok(m.group("host")) and _first_word(_strip_dollar(m.group("rest"))) in KEEP_EMPTY_COMMANDS:
         prefix = m.group("prefix")
-        return (prefix, *(q for q in _by_count(ax.get(m.group("host"), collections.Counter())) if q != prefix))
-    return ()
+        return (prefix, *(q for q in _by_count(ax.get(m.group("host"), collections.Counter())) if q != prefix)), "single-other"
+    return (), "none"
 
 
 def _erase_pager(m: re.Match) -> str:
@@ -325,14 +492,29 @@ def _plain_base_rest(line: str, bases_by_length: list[str]) -> str | None:
     return None
 
 
+def _is_xr_mode_prompt(prompt: str) -> bool:
+    """XR の形で、設定モードのプロンプトか(`mode` があり、プロンプトの後ろが空)。"""
+    m = _xr_match(prompt)
+    return bool(m and m.group("mode") and not m.group("rest"))
+
+
+def _is_asa_mode_prompt(prompt: str) -> bool:
+    """ASA の形で、設定モードのプロンプトか(`mode` があり、プロンプトの後ろが空)。"""
+    m = ASA_PROMPT.match(prompt)
+    return bool(m and m.group("mode") and not m.group("rest"))
+
+
 def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResult:
     """端末ログを区間に切り分ける。prompt を渡すと自己校正をせずそれを使う(1つでも複数でもよい)。"""
     text, marks = _strip_pager(text)
     lines = _clean_lines(text)
     prompts: tuple[str, ...] = ((prompt,) if prompt else ()) if isinstance(prompt, str) else tuple(p for p in (prompt or ()) if p)
     source: PromptSource = "manual" if prompts else "auto"
+    # 設定モードの行の頭の `do ` を外す対象にする規則(XR・ASA の形で自分で決めたときと、手で渡されたときだけ。ADR-0211 決定7・ADR-0214 決定7)
+    strip_do_ok = source == "manual"
     if not prompts:
-        prompts = detect_prompt(lines)
+        prompts, rule = _detect(lines)
+        strip_do_ok = rule in ("xr", "single-xr", "asa", "single-asa")
     if not prompts:
         # 特定できなければ切り分けない。1ファイル=1区間(現在の動作への縮退)
         pre, body = _finish(lines)
@@ -347,6 +529,8 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
     hosts |= bases
     # 長いホスト名から順に見る(`Router#` の判定で、より長い名前を先に当てるため)
     bases_by_length = sorted(bases, key=len, reverse=True)
+    # XR・ASA の形で設定モードのプロンプト(`...(config-if)#`)。この行のコマンドは頭の `do ` を外す
+    do_mode_prompts = frozenset(p for p in prompts if strip_do_ok and (_is_xr_mode_prompt(p) or _is_asa_mode_prompt(p)))
 
     sections: list[tuple[str | None, list[str]]] = []
     cmd: str | None = None
@@ -372,6 +556,8 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
         if hit is not None:
             flush()
             c = _strip_dollar(_display_command(line[len(hit) :]))
+            if hit in do_mode_prompts:
+                c = _strip_do(c)
             if c:
                 cmd = c
             continue
@@ -379,9 +565,7 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
         if mode and mode.group("host") in hosts:
             flush()
             c = _strip_dollar(_display_command(mode.group("rest")))
-            head, _, tail = c.partition(" ")
-            if head.lower() == "do" and tail:
-                c = tail
+            c = _strip_do(c)
             if c:
                 cmd = c
             continue

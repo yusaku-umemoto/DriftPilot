@@ -23,7 +23,33 @@ PEM ブロック(`-----BEGIN ` から `-----END ` まで)は行単位の表で�
 正規表現の中で見る(判定の処理は変えない)。足した頭の形(GH-15〜19)も、割れた秘密の行のかたまりの判定では今までの頭の形と同じく
 秘密の行として扱う。続く行が新しい設定の行に見えない出力(shadow・.env・ヘッダーの並び)は、かたまりごと送らないことがある。
 当たれば伏せて送るか送り、どれにも当たらなければ送らない。判定の順は、見えない文字 → 形の一覧 → (秘密語・行の頭の形・値の形に
-当たらなければそのまま送る)→ 表 → 送らない。
+当たらなければそのまま送る)→ 表 → 送らない → (そのまま送るになった行だけ)ログの行の段。
+
+ログの行の段(ADR-0215。REQ-306): 上の判定で「そのまま送る」になった行だけ、行の頭のログの形(mask_patterns.LOG_PREFIXES。時刻・
+ホスト名・プロセス名・`+ `・プロンプトなど)を外して、残りを同じ判定(祖先の行も同じ)にもう一度かける。残りが伏せるなら、外した頭を
+元のまま前に戻して返す。残りが送らないなら送らない。残りもそのまま送る(か pass)なら、行の途中の `<名前>=<値>` を探す
+(名前を `_`・`-`・`.` で区切った最後の部分が KEY・TOKEN・PASSWORD・PASSWD・PASS・PWD・SECRET・CREDENTIAL・CREDENTIALS)。
+値の終わりがはっきりしない形(閉じない引用符・閉じた後ろに文字が続く・引用符の中の `\\`・引用符の無い値の途中の引用符か `\\`)が
+1つでもあれば、行ごと送らない。改行を含む値は、行ごとにこの段を通し、どれかの行が伏せるか送らないになれば値ごと送らない。
+今「伏せる」「送らない」「pass」の行は、この段に回さない(送る行は増えない)。この段の決まりを変えたら、
+mask_patterns.LOG_LINE_RULES の版を上げる。
+
+行の途中の秘密(ADR-0219。REQ-315): 上の `<名前>=<値>` に、行のどこにあっても秘密のヘッダー(`Authorization: …`・`X-API-Key: …`・
+`Cookie: …`。mask_patterns.SECRET_HEADER_NAMES・AUTH_SCHEMES)とコマンドの秘密の引数(`--token <値>`・`curl -u user:<値>`・
+`sshpass -p <値>`。mask_patterns.COMMAND_SECRET_OPTIONS)を足し、「伏せる」になった行(表の判定・頭を外した判定で伏せた後の文)にも
+当てる。伏せた後の文では、値が記号(`<secret:N>`)だけのものは見ない。「送らない」「pass」の行は今のまま。記号の番号は、送らないと
+決まらないと分かってから付ける(表で付けた番号は、最後に送らないになったら巻き戻す)。
+
+残る穴(ADR-0220。REQ-316): 同じ段に、行のどこにあってもパスワードのハッシュ(`$6$<salt>$<hash>`・`$apr1$…`など。mask_patterns.
+CRYPT_HASH_SCHEMES・CRYPT_HASH。`$<方式>$` から続きの終わりまでを1つの記号にする)を足した。コマンドの語は頭の `"`・`'`・`(`・`` ` ``・
+`$(` を外して見る(`sh -c "curl -u …"`)。`curl -U`・`curl -b`・`redis-cli -a` は続け書きも当てる。ヘッダーは、エスケープした引用符
+(`{\\"Authorization\\": \\"Bearer …\\"}`)・タプルの形(`('Authorization', 'Bearer …')`)・引用符の無い値の方式の語(`"Authorization": Bearer …`
+は方式の語を残して次の語を伏せる)も当てる。「送らない」「pass」の行は今のまま。名前の前だけがエスケープした引用符で名前の後ろに閉じる
+引用符が無い形(`\\"Authorization: …\\"`)と、コマンドの値の後ろに閉じの引用符がくっつく形は、はっきりしない形として行ごと送らない。
+
+残る穴(ADR-0221。REQ-317): コマンドの語は、語の中の最後の区切りの記号(`|`・`;`・`&`・`(`・`` ` ``・`"`・`'`・`=`)までを外して見る
+(`RESULT=$(curl -u …)`・`x|curl -u …`・`ok;redis-cli -a …`)。パスワードのハッシュの前の文字は、英数字と `_` でなければよい(行の頭も含む。
+`<hash>$6$…</hash>`・`x admin:!$6$…`)。値の取り方は今のまま(`(redis-cli -a <値>)` の閉じかっこは値に含まれる)。「送らない」「pass」の行は今のまま。
 
 見えない文字(Unicode の種類が Cc・Cf の文字。タブ・LF・CR を除く)のある行は、形の一覧とゲートより前に送らないと決める
 (ADR-0142 決定1)。BOM の無い UTF-16 の NUL や語の中のゼロ幅の文字で、秘密語の判定を外れるため。文字の種類だけを見ていて、
@@ -39,9 +65,14 @@ from typing import Literal
 
 from driftpilot.coverage_report.fold import fold_word
 from driftpilot.llm_analyzer.mask_patterns import (
+    AUTH_SCHEMES,
+    COMMAND_SECRET_OPTIONS,
+    CRYPT_HASH,
     GATE_HEAD_SCOPES,
     GATE_HEADS,
+    LOG_PREFIXES,
     MASK_PATTERNS,
+    SECRET_HEADER_NAMES,
     SECRET_WORDS,
     SECRET_VALUE_PREFIXES,
     XML_SECRET_NAMES,
@@ -106,6 +137,11 @@ class SymbolTable:
 
     def __len__(self) -> int:
         return len(self._numbers)
+
+    def _truncate(self, count: int) -> None:
+        """記号表の件数を count に戻す(その後に足した値を消す)。送らないと決まった行の値を残さないための内部用。"""
+        for value in list(self._numbers)[count:]:
+            del self._numbers[value]
 
     def __repr__(self) -> str:  # 値を表示しない
         return f"SymbolTable({len(self)} 件)"
@@ -285,6 +321,359 @@ def unsent_form(line: str, ancestors: Sequence[str]) -> str | None:
 
 _WORD = re.compile(r"\S+")
 
+# ログの行の頭の形(ADR-0215 決定2)。読み込み時にコンパイルしておく
+_LOG_PREFIXES = tuple((prefix_id, re.compile(regex), kind) for prefix_id, regex, kind in LOG_PREFIXES)
+# 行の途中の `<名前>=<値>`(ADR-0215 決定4)。名前は語の頭から。名前を `_`・`-`・`.` で区切った最後の部分が秘密を示す語なら値を伏せる。
+# この一覧や値の決まりを変えたら mask_patterns.LOG_LINE_RULES を上げる
+_KV_NAME = re.compile(r"(?<!\S)([A-Za-z_][\w.-]*)=")
+_KV_SPLIT = re.compile(r"[_.-]")
+_KV_SECRET_PARTS = frozenset({"key", "token", "password", "passwd", "pass", "pwd", "secret", "credential", "credentials"})
+
+
+def _log_head_end(line: str, start: int) -> int:
+    """行の start(字下げの後ろ)から、ログの頭の形を当たる限り順に外した後の位置。外せなければ start。"""
+    pos = start
+    after_time = False
+    while True:
+        for _, regex, kind in _LOG_PREFIXES:
+            if kind == "after_time" and not after_time:
+                continue
+            m = regex.match(line, pos)
+            if m is None or m.end() == pos:
+                continue
+            pos = m.end()
+            if kind == "time":
+                after_time = True
+            elif kind == "any":
+                after_time = False
+            break
+        else:
+            return pos
+
+
+def _secret_pairs(line: str) -> tuple[list[tuple[int, int, str]], str | None]:
+    """行の中の秘密の `<名前>=<値>` の、(値の始まり, 終わり, 名前)の並びと、値の終わりがはっきりしない語の名前(無ければ None)。
+
+    空白で区切った語の頭の `<名前>=` だけを見る。値が空(`""`・`''` を含む)なら伏せる対象が無い。引用符で正しく閉じた値は
+    中(空白も含む)、引用符の無い値は空白までの1語を伏せる。はっきりしない形(閉じない引用符・閉じた後ろに文字が続く・
+    引用符の中の `\\`・引用符の無い値の途中の引用符か `\\`)があれば、その語の名前を返す(呼び出し側は行ごと送らない)。
+    """
+    found: list[tuple[int, int, str]] = []
+    pos = 0
+    while True:
+        m = _KV_NAME.search(line, pos)
+        if m is None:
+            return found, None
+        name, value_start = m.group(1), m.end()
+        pos = value_start
+        if _KV_SPLIT.split(name)[-1].lower() not in _KV_SECRET_PARTS:
+            continue
+        if value_start >= len(line) or line[value_start].isspace():
+            continue
+        quote = line[value_start]
+        if quote in "\"'":
+            close = line.find(quote, value_start + 1)
+            after = close + 1
+            if close < 0 or "\\" in line[value_start + 1 : close] or (after < len(line) and not line[after].isspace()):
+                return found, name
+            if close > value_start + 1:
+                found.append((value_start + 1, close, name))
+            pos = after
+        else:
+            end = value_start
+            while end < len(line) and not line[end].isspace():
+                end += 1
+            if any(ch in line[value_start:end] for ch in "\"'\\"):
+                return found, name
+            found.append((value_start, end, name))
+            pos = end
+
+
+# 行の途中の秘密のヘッダー・コマンドの秘密の引数(ADR-0219)。この一覧や値の決まりを変えたら mask_patterns.LOG_LINE_RULES を上げる
+# ヘッダーの名前: 名前の前は行の頭・空白・`"`・`'`・`{`・`(`・`,`・`[`(語の途中には当てない)。名前の後ろは `:`(名前が引用符で囲まれた形は
+# 閉じる引用符の後ろの `:`)と、0 個以上の空白
+_HEADER = re.compile(r"""(?<![^\s"'{(,\[])(?P<name>[A-Za-z][A-Za-z0-9-]*)(?P<close>["']?):[^\S\n]*""")
+_HEADER_NAMES = frozenset(name.lower() for name in SECRET_HEADER_NAMES)
+_AUTH_SCHEMES = frozenset(scheme.lower() for scheme in AUTH_SCHEMES)
+_SCHEME_AND_SPACE = re.compile(r"\S+\s+")
+# エスケープした引用符(`\"`・`\'`)・タプルの形(ADR-0220 決定4・5)。名前を同じ種類の引用符で囲み、閉じの後ろが `:` と空白(名前の前が
+# エスケープした引用符のときだけ)、または空白 0 個以上・`,`・空白 0 個以上。引用符で囲んだ名前の `:` の形は `_HEADER` が受け持つ。
+# 名前の前だけがエスケープした引用符で後ろに閉じる引用符が無い形(`\"Authorization: …\"`)は、ここに入れず `_HEADER` の決まりのままにする
+_HEADER_QUOTED = re.compile(
+    r"""(?P<open>\\["']|["'])(?P<name>[A-Za-z][A-Za-z0-9-]*)(?P<close>\\["']|["'])"""
+    r"""(?:(?P<colon>:[^\S\n]*)|(?P<comma>[^\S\n]*,[^\S\n]*))"""
+)
+_QUOTE_AT = re.compile(r"""\\["']|["']""")
+# 方式の語の後ろの空白と次の語(`,`・`}`・`]`・`)`・空白の前まで)
+_NEXT_WORD = re.compile(r"[^\S\n]+([^\s,}\])]+)")
+# 値が記号(`<secret:N>`)だけのものは、伏せ直さない
+_SYMBOL_ONLY = re.compile(r"<secret:\d+>")
+# 長い名前の引数(`--<名前>=<値>`・`--<名前> <値>`)。名前を `-`・`_` で区切った最後の部分が秘密を示す語なら値を伏せる
+_LONG_OPTION = re.compile(r"--(?P<name>[A-Za-z][\w-]*)(?:=|$)")
+_OPTION_SPLIT = re.compile(r"[-_]")
+# コマンドの語の、最後に出る区切りの記号(`|`・`;`・`&`・`(`・`` ` ``・`"`・`'`・`=`)までを外す(ADR-0221 決定1。REQ-317)。
+# `sh -c "curl …"`・`(curl …)`・`` `curl …` ``・`RESULT=$(curl …)`・`x|curl …`・`ok;redis-cli …`・`a&&sshpass …`。
+# 最長一致なので、記号が続いても語の中で最後の記号までを外す。記号が無ければ何も外さない
+_COMMAND_LEAD = re.compile(r"""^.*[|;&(`"'=]""")
+# パスワードのハッシュ(ADR-0220 決定1)。読み込み時にコンパイルしておく
+_CRYPT_HASH = re.compile(CRYPT_HASH)
+
+
+def _crypt_hashes(line: str) -> list[tuple[int, int, str]]:
+    """行の中のパスワードのハッシュの、(始まり, 終わり, 記録の語 `$<方式>$…`)の並び。`$<方式>$` から続きの終わりまでを1つにする。"""
+    return [(m.start(), m.end(), f"${m.group('scheme')}$…") for m in _CRYPT_HASH.finditer(line)]
+
+
+def _shown_name(name: str) -> str:
+    """記録に残す名前。長い名前は `<長い語>` にする(HTML の文面などで形が読めなくなるため)。"""
+    return _LONG_WORD if len(name) > _SHAPE_WORD_CHARS else name
+
+
+def _is_secret_header(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in _HEADER_NAMES or ("-" in name and lowered.rsplit("-", 1)[-1] in _KV_SECRET_PARTS)
+
+
+def _closing_quote(line: str, start: int, quote: str) -> int | None:
+    """start(引用符の次の位置)から、同じ引用符が閉じる位置。閉じない・中に `\\` がある(はっきりしない形)なら None。"""
+    close = line.find(quote, start)
+    if close < 0 or "\\" in line[start:close]:
+        return None
+    return close
+
+
+def _header_value_span(line: str, start: int, end: int) -> tuple[int, int] | None:
+    """ヘッダーの値の範囲 [start, end) から、伏せる範囲を決める。伏せる部分が空か記号だけなら None。
+
+    末尾の空白は含めない。値の最初の語が認証の方式の語で後ろに語が続くなら、方式の語と空白を残して後ろを全部。ほかは値の全部。
+    """
+    # 引用符の中の値は、空白やタブから始まることがある。先頭と末尾の空白を除いた範囲で見る
+    value = line[start:end]
+    start += len(value) - len(value.lstrip())
+    end = start + len(line[start:end].rstrip())
+    if end <= start:
+        return None
+    value = line[start:end]
+    first = value.split(None, 1)[0]
+    scheme = _SCHEME_AND_SPACE.match(value)
+    if first.lower() in _AUTH_SCHEMES and scheme is not None:
+        start += scheme.end()
+    if _SYMBOL_ONLY.fullmatch(line[start:end]):
+        return None
+    return start, end
+
+
+def _secret_headers(line: str) -> tuple[list[tuple[int, int, str]], str | None]:
+    """行の中の秘密のヘッダーの、(値の伏せる始まり, 終わり, 記録の語 `名前: …`)の並びと、値の終わりがはっきりしない形の記録の語。
+
+    名前: SECRET_HEADER_NAMES、または `-` を含み最後の部分が `_KV_SECRET_PARTS` の語(大文字・小文字を問わない)。
+    値の範囲: 名前の直前が引用符 q で、名前の後ろに q が無い形は次の q の前まで(無いか、中に `\\` があれば、はっきりしない形)。
+    名前が引用符 q で囲まれた形は、`:` の後ろの空白の次が引用符 r なら次の r の前まで(閉じないか中に `\\` があれば、はっきりしない形)、
+    引用符でなければ次の `,`・`}`・空白の前まで(最初の語が認証の方式の語で後ろに語が続けば、方式の語を残して次の語だけ。ADR-0220 決定6)。
+    ほか(引用符の無い形)は行の終わりまで。
+    もう1回、`_HEADER_QUOTED` で、名前を同じ種類のエスケープした引用符(`\\"`・`\\'`)か引用符で囲み、閉じの後ろが `:`(名前の前が
+    エスケープした引用符のときだけ)か `,`(タプルの形)の形を見る(ADR-0220 決定4・5)。値の取り方は上と同じで、引用符の値は同じ引用符の前まで。
+    """
+    found: list[tuple[int, int, str]] = []
+    for m in _HEADER.finditer(line):
+        name = m.group("name")
+        if not _is_secret_header(name):
+            continue
+        close = m.group("close")
+        name_start = m.start("name")
+        opened = line[name_start - 1] if name_start > 0 and line[name_start - 1] in "\"'" else ""
+        label = f"{_shown_name(name)}: …"
+        value_start = m.end()
+        if opened and not close:  # 名前が引用符の中で始まる形(`"Authorization: Bearer …"`)
+            end = _closing_quote(line, value_start, opened)
+            if end is None:
+                return found, label
+        elif opened and close == opened:  # 名前が引用符で囲まれた形(`'Authorization': 'Bearer …'`)
+            if value_start >= len(line):
+                continue
+            if line[value_start] in "\"'":
+                value_start += 1
+                end = _closing_quote(line, value_start, line[value_start - 1])
+                if end is None:
+                    return found, label
+            else:
+                span = _unquoted_header_span(line, value_start)
+                if span is not None:
+                    found.append((span[0], span[1], label))
+                continue
+        elif not opened and not close:  # 引用符の無い形は行の終わりまで
+            end = len(line)
+        else:
+            continue
+        span = _header_value_span(line, value_start, end)
+        if span is not None:
+            found.append((span[0], span[1], label))
+    for m in _HEADER_QUOTED.finditer(line):  # エスケープした引用符・タプルの形(ADR-0220 決定4・5)
+        name = m.group("name")
+        if not _is_secret_header(name) or m.group("open") != m.group("close"):
+            continue
+        label = f"{_shown_name(name)}: …"
+        value_start = m.end()
+        if value_start >= len(line):
+            continue
+        quote = _QUOTE_AT.match(line, value_start)
+        if quote is None:
+            if m.group("comma") is not None or not m.group("open").startswith("\\"):
+                continue  # 引用符の無い値は、名前もエスケープした `:` の形だけ(引用符で囲んだ名前の `:` は上で見た)
+            span = _unquoted_header_span(line, value_start)
+            if span is not None:
+                found.append((span[0], span[1], label))
+            continue
+        if m.group("colon") is not None and not m.group("open").startswith("\\"):
+            continue  # 引用符で囲んだ名前の `:` の形は上で見た
+        token = quote.group()
+        content = quote.end()
+        close_at = line.find(token, content)
+        if close_at < 0 or "\\" in line[content:close_at]:
+            return found, label
+        span = _header_value_span(line, content, close_at)
+        if span is not None:
+            found.append((span[0], span[1], label))
+    return found, None
+
+
+def _unquoted_header_span(line: str, start: int) -> tuple[int, int] | None:
+    """引用符の無いヘッダーの値(start から)の、伏せる範囲。無ければ None(ADR-0220 決定6)。
+
+    値は `,`・`}`・空白の前まで。その最初の語が認証の方式の語で、後ろに空白と語が続くなら、方式の語を残して次の語
+    (`,`・`}`・`]`・`)`・空白の前まで)だけを伏せる。次の語が記号だけなら何もしない。ほかは最初の語の全部。
+    """
+    end = start
+    while end < len(line) and line[end] not in ",}" and not line[end].isspace():
+        end += 1
+    if line[start:end].lower() in _AUTH_SCHEMES:
+        word = _NEXT_WORD.match(line, end)
+        if word is not None:
+            return None if _SYMBOL_ONLY.fullmatch(word.group(1)) else (word.start(1), word.end(1))
+    if end <= start or _SYMBOL_ONLY.fullmatch(line[start:end]):
+        return None
+    return start, end
+
+
+def _option_value(line: str, start: int) -> tuple[int, int] | Literal["vague"] | None:
+    """引数の値の範囲 [始まり, 終わり)。値が無い・空なら None、はっきりしない形なら "vague"(`_secret_pairs` の値と同じ決まり)。
+
+    正しく閉じた引用符は中を伏せる。引用符の無い値は空白までの1語で、途中に引用符か `\\` があればはっきりしない形。
+    """
+    if start >= len(line) or line[start].isspace():
+        return None
+    quote = line[start]
+    if quote in "\"'":
+        close = line.find(quote, start + 1)
+        after = close + 1
+        if close < 0 or "\\" in line[start + 1 : close] or (after < len(line) and not line[after].isspace()):
+            return "vague"
+        return (start + 1, close) if close > start + 1 else None
+    end = start
+    while end < len(line) and not line[end].isspace():
+        end += 1
+    if any(ch in line[start:end] for ch in "\"'\\"):
+        return "vague"
+    return start, end
+
+
+def _secret_options(line: str) -> tuple[list[tuple[int, int, str]], str | None]:
+    """行の中のコマンドの秘密の引数の、(値の伏せる始まり, 終わり, 記録の語 `引数 …`)の並びと、はっきりしない形の記録の語。
+
+    長い名前の引数: 空白で区切った語が `--<名前>=<値>`、または語 `--<名前>` の次の語が `<値>`。名前を `-`・`_` で区切った最後の部分が
+    `_KV_SECRET_PARTS` の語なら値を伏せる。次の語が `-` で始まるか無ければ何もしない。
+    COMMAND_SECRET_OPTIONS の引数: そのコマンドの語(前にパスが付いてもよい。語の中の最後の区切りの記号(`|`・`;`・`&`・`(`・`` ` ``・`"`・`'`・`=`)までは外して見る。
+    ADR-0220 決定2・ADR-0221 決定1)が同じ行の前のほうにあるときだけ当てる。値の後ろに閉じの引用符がくっつく形は、はっきりしない形(行ごと送らない)。
+    """
+    found: list[tuple[int, int, str]] = []
+    words = list(_WORD.finditer(line))
+    first_seen: dict[str, int] = {}  # コマンドの語(パスを除く) → 最初に出る語の位置
+    for position, word in enumerate(words):
+        # 語の中の最後の区切りの記号(`|`・`;`・`&`・`(`・`` ` ``・`"`・`'`・`=`)までを外してから、`/` の前のパスを除いて比べる(ADR-0221 決定1)
+        first_seen.setdefault(_COMMAND_LEAD.sub("", word.group()).rsplit("/", 1)[-1], position)
+
+    def take(label: str, value_start: int, mode: str) -> str | None:
+        """値を調べて found に足す。はっきりしない形なら記録の語を返す。"""
+        value = _option_value(line, value_start)
+        if value == "vague":
+            return label
+        if value is None:
+            return None
+        start, end = value
+        if mode == "after-colon":
+            colon = line.find(":", start, end)
+            if colon < 0:
+                return None
+            start = colon + 1
+        elif mode == "if-equals" and "=" not in line[start:end]:
+            return None
+        if start < end and not _SYMBOL_ONLY.fullmatch(line[start:end]):
+            found.append((start, end, label))
+        return None
+
+    for index, word in enumerate(words):
+        text = word.group()
+        following = words[index + 1] if index + 1 < len(words) else None
+        long = _LONG_OPTION.match(text)
+        if long is not None and _OPTION_SPLIT.split(long.group("name"))[-1].lower() in _KV_SECRET_PARTS:
+            label = f"{_shown_name('--' + long.group('name'))} …"
+            if long.end() > len(long.group("name")) + 2:  # `--<名前>=<値>`
+                vague = take(label, word.start() + long.end(), "all")
+            elif following is not None and not line[following.start()] == "-":
+                vague = take(label, following.start(), "all")
+            else:
+                vague = None
+            if vague is not None:
+                return found, vague
+        for command, option, mode, attached in COMMAND_SECRET_OPTIONS:
+            if first_seen.get(command, index) >= index:  # そのコマンドの語が、この語より前に無い
+                continue
+            label = f"{option} …"
+            if text == option:
+                vague = take(label, following.start(), mode) if following is not None else None
+            elif option.startswith("--") and text.startswith(option + "="):
+                vague = take(label, word.start() + len(option) + 1, mode)
+            elif attached and text.startswith(option) and not text.startswith("--") and len(text) > len(option):
+                vague = take(label, word.start() + len(option), mode)
+            else:
+                continue
+            if vague is not None:
+                return found, vague
+    return found, None
+
+
+def _midline_secrets(text: str, *, masked: bool) -> tuple[list[tuple[int, int, str]], str | None]:
+    """行の途中の秘密(`<名前>=<値>`・ヘッダー・引数・パスワードのハッシュ)の、(伏せる始まり, 終わり, 記録の語)の並びと、はっきりしない形の記録の語。
+
+    並びは始まりの順で、重なる範囲は1つにまとめる(記録の語は先のもの)。記録の語は `名前=…`・`名前: …`・`引数 …`・`$<方式>$…`。
+    3つのどれかにはっきりしない形があれば、並びは空で記録の語を返す(呼び出し側は行ごと送らない。ハッシュにははっきりしない形が無い)。
+    masked が真(伏せた後の文)のときは、値が記号だけの `<名前>=<値>` を除く(今伏せた値を伏せ直さない)。
+    そのまま送る行(masked が偽)の `<名前>=<値>` は、REQ-306 の決まりのまま。
+    """
+    pairs, vague_pair = _secret_pairs(text)
+    headers, vague_header = _secret_headers(text)
+    options, vague_option = _secret_options(text)
+    if vague_pair is not None:
+        return [], f"{_shown_name(vague_pair)}=…"
+    if vague_header is not None:
+        return [], vague_header
+    if vague_option is not None:
+        return [], vague_option
+    spans = [
+        (start, end, f"{_shown_name(name)}=…")
+        for start, end, name in pairs
+        if not (masked and _SYMBOL_ONLY.fullmatch(text[start:end]))
+    ]
+    spans = sorted([*spans, *headers, *options, *_crypt_hashes(text)], key=lambda span: (span[0], span[1]))
+    merged: list[tuple[int, int, str]] = []
+    for start, end, label in spans:
+        if merged and start < merged[-1][1]:
+            previous = merged[-1]
+            merged[-1] = (previous[0], max(previous[1], end), previous[2])
+        else:
+            merged.append((start, end, label))
+    return merged, None
+
 
 def _original_value(line: str, start: int, end: int) -> str:
     """語を1つの空白で区切った形(body)の位置 [start, end) に当たる、元の行の文字列(空白の重なり・タブを残したもの)。
@@ -359,6 +748,77 @@ class Masker:
         return self._judge(line, ancestors, SymbolTable())
 
     def _judge(self, line: str, ancestors: Sequence[str], symbols: SymbolTable) -> LineJudgement:
+        """今の判定(_judge_base)の後に、行の途中の秘密の段(ADR-0215・ADR-0219)を当てる。unsent・pass は変えない。
+
+        「そのまま送る」の行はログの行の段(頭を外した判定 → 行の途中の `<名前>=<値>`・ヘッダー・引数)、「伏せる」の行は伏せた後の文に
+        行の途中の秘密の決まりを当てる。最後の結果が「伏せる」でなければ、途中で記号表に足した値を戻す(送らない行の値を残さない)。
+        """
+        mark = len(symbols)
+        base = self._judge_base(line, ancestors, symbols)
+        if base.decision == "mask" and base.text is not None:
+            result = self._midline(base.text, ancestors, symbols, True, base.pattern_id) or base
+        elif base.decision == "plain":
+            if "\n" in line:
+                return self._log_stage_value(line, ancestors, base)
+            result = self._log_stage_line(line, ancestors, symbols) or base
+        else:
+            return base
+        if result.decision != "mask":
+            symbols._truncate(mark)
+        return result
+
+    def _midline(
+        self, text: str, ancestors: Sequence[str], symbols: SymbolTable, masked: bool, pattern_id: str | None
+    ) -> LineJudgement | None:
+        """行の途中の秘密(`<名前>=<値>`・ヘッダー・引数・パスワードのハッシュ)を伏せるか送らないにする。当たらなければ None。
+
+        はっきりしない形が1つでもあれば行ごと送らない。記録は場所と記録の語(名前だけで、値は残さない)。
+        記号の番号は、送らないと決まらないと分かってから付ける。
+        """
+        spans, vague = _midline_secrets(text, masked=masked)
+        if vague is not None:
+            return LineJudgement("unsent", None, None, f"[{scope_label(ancestors)}] {vague}")
+        if not spans:
+            return None
+        out, last = [], 0
+        for start, end, _ in spans:
+            out.append(text[last:start])
+            out.append(symbols.symbol(text[start:end]))
+            last = end
+        out.append(text[last:])
+        return LineJudgement("mask", "".join(out), pattern_id)
+
+    def _log_stage_line(self, line: str, ancestors: Sequence[str], symbols: SymbolTable) -> LineJudgement | None:
+        """1行のログの行の段。伏せるか送らないになれば、その判定。変わらなければ None(呼び出し側が元の判定を返す)。"""
+        start = len(line) - len(line.lstrip())
+        head_end = _log_head_end(line, start)
+        if head_end > start:
+            inner = self._judge_base(line[head_end:], ancestors, symbols)
+            if inner.decision == "mask" and inner.text is not None:
+                text = line[:head_end] + inner.text
+                return self._midline(text, ancestors, symbols, True, inner.pattern_id) or LineJudgement(
+                    "mask", text, inner.pattern_id
+                )
+            if inner.decision == "unsent":
+                return inner
+        return self._midline(line, ancestors, symbols, False, None)
+
+    def _log_stage_value(self, value: str, ancestors: Sequence[str], base: LineJudgement) -> LineJudgement:
+        """改行を含む値のログの行の段。行ごとに使い捨ての記号表で当て、どれかが伏せるか送らないになれば値ごと送らない(記録に値を残さない)。"""
+        label = scope_label(ancestors)
+        for part in value.splitlines():
+            found = self._log_stage_line(part, ancestors, SymbolTable())
+            if found is None:
+                continue
+            if found.decision == "unsent":
+                return LineJudgement("unsent", None, found.pattern_id, found.shape)
+            if found.pattern_id is not None:  # 表の行(頭を外した後の伏せる)。記録は表の ID だけ
+                return LineJudgement("unsent", None, None, f"[{label}] {found.pattern_id} …")
+            words = [word for _, _, word in _midline_secrets(part, masked=False)[0]]  # 行の途中の秘密の伏せる。記録は名前だけ
+            return LineJudgement("unsent", None, None, f"[{label}] {words[0] if words else '…'}")
+        return base
+
+    def _judge_base(self, line: str, ancestors: Sequence[str], symbols: SymbolTable) -> LineJudgement:
         if has_unseen_char(line):
             return LineJudgement("unsent", None, None, f"[{scope_label(ancestors)}] {UNSEEN_SHAPE}")
         if "\n" in line:
@@ -474,7 +934,8 @@ def wrapped_secret_groups(
     """割れた秘密の行のかたまりの範囲(開始と終了の行の位置。0始まり、両端を含む。ADR-0137 決定2)。
 
     行は右の空白を落として見る。幅は一番長い行の長さ。行 i から、次の行が空でなければ次の順に見る。
-    かたまりができたら、その終わりの次の行へ進む。
+    かたまりができたら、その終わりの次の行へ進む。ただし、かたまりの最後の行にも秘密語があれば、その行から
+    もう一度見て、かたまりができれば広げる(広げたものを 1 つのかたまりとして返す。ADR-0222)。
 
     - B: 長い行で、その行にも次の行にも秘密語が無く、2行をつなぐと秘密語が現れる → 2行
     - A: 秘密語のある長い行 → 続く長い行と、その次の行まで(折り返しのファイルでなければ、次の行が新しい設定の行に見えるところで止める)
@@ -503,39 +964,55 @@ def wrapped_secret_groups(
     def unscoped_form(text: str) -> bool:
         return any(form_id not in UNSENT_FORM_SCOPES for form_id in _form_line_ids(text))
 
+    def group_at(i: int) -> tuple[int, int] | None:
+        """行 i から A〜D の順に見て、かたまり (i, j) か None を返す。"""
+        if i >= len(rows) - 1:
+            return None
+        row, following = rows[i], rows[i + 1]
+        if not following.strip():
+            return None
+        group: tuple[int, int] | None = None
+        found = has_secret(row)
+        if is_long(row) and not found and not has_secret(following) and has_secret(row + following.lstrip()):
+            group = (i, i + 1)
+        elif is_long(row) and found:
+            keep = wrapped_file or unscoped_form(row)
+            j = i
+            while (
+                j + 1 < len(rows)
+                and is_long(rows[j])
+                and rows[j + 1].strip()
+                and (keep or not _looks_like_fresh_line(rows[j + 1]))
+            ):
+                j += 1
+            if j > i:
+                group = (i, j)
+        if group is None and found and not is_pass(row):
+            parts = row.split()
+            last_digit = len(parts[-1]) == 1 and parts[-1] in "0123456789"
+            if parts[-1] in secret or (len(parts) >= 2 and parts[-2] in secret and last_digit) or _is_form_head(row):
+                group = (i, i + 1)
+        if group is None and found and not _looks_like_fresh_line(following):
+            group = (i, i + 1)
+        return group
+
     groups: list[tuple[int, int]] = []
     i = 0
     while i < len(rows) - 1:
-        row, following = rows[i], rows[i + 1]
-        group: tuple[int, int] | None = None
-        if following.strip():
-            found = has_secret(row)
-            if is_long(row) and not found and not has_secret(following) and has_secret(row + following.lstrip()):
-                group = (i, i + 1)
-            elif is_long(row) and found:
-                keep = wrapped_file or unscoped_form(row)
-                j = i
-                while (
-                    j + 1 < len(rows)
-                    and is_long(rows[j])
-                    and rows[j + 1].strip()
-                    and (keep or not _looks_like_fresh_line(rows[j + 1]))
-                ):
-                    j += 1
-                if j > i:
-                    group = (i, j)
-            if group is None and found and not is_pass(row):
-                parts = row.split()
-                last_digit = len(parts[-1]) == 1 and parts[-1] in "0123456789"
-                if parts[-1] in secret or (len(parts) >= 2 and parts[-2] in secret and last_digit) or _is_form_head(row):
-                    group = (i, i + 1)
-            if group is None and found and not _looks_like_fresh_line(following):
-                group = (i, i + 1)
+        group = group_at(i)
         if group is None:
             i += 1
-        else:
-            groups.append(group)
-            i = group[1] + 1
+            continue
+        start, end = group
+        # かたまりの最後の行にも秘密語があれば、その行から続けて見て広げる(ADR-0222)
+        seg_start = start
+        while end > seg_start and has_secret(rows[end]):
+            chained = group_at(end)
+            if chained is None:
+                break
+            seg_start, end = end, chained[1]
+        groups.append((start, end))
+        i = end + 1
     return groups
 
 

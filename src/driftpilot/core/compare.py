@@ -19,7 +19,7 @@ pager_marks と同じ経路で、読み込みは切り分けより前の工程�
 
 機種の自動(ADR-0151。REQ-209): 要求の platform が auto のとき、区間を選んだ後の本文から片側ごとに機種を判定し
 (detect_platform)、choose_platform の組み合わせで使う系統を決める。以降は同じ系統を手で指定したのと同じ道を通る。
-種類も auto なら、判定が fujitsu_sir・fortinet の側は config、ほかは sniff で決める(AmbiguousFormatError は出さない)。
+種類も auto なら、判定が fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos の側は config、ほかは sniff で決める(AmbiguousFormatError は出さない)。
 show に決まったら機種なし(単純比較)にする。自動のときは platform_mismatch を出さず、判定なし・食い違いのときだけ
 platform_auto の警告を1件出す。食い違いのときは AI に送らない(platform_conflict)。
 
@@ -412,7 +412,7 @@ def choose_platform(before: str, after: str) -> AutoPlatform:
 
 
 def combine_platforms(before: str | None, after: str | None) -> AutoPlatform:
-    """片側ごとの判定(fujitsu_sir・fortinet・a・None)の組み合わせ(ADR-0151 決定2 の表)。
+    """片側ごとの判定(fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos・a・None)の組み合わせ(ADR-0151 決定2 の表)。
 
     同じならそれ、片側だけ判定できればその側、両側とも判定なしなら指定なし、違えば指定なしで conflict。
     a(Cisco 系)は指定なし(used=None)。
@@ -554,11 +554,11 @@ def _resolve_kind(request: CompareRequest, before: str, after: str):
 def _resolve_auto_kind(detected: dict[SideName, str | None], texts: dict[SideName, str]):
     """種類も機種も自動のときの種類(ADR-0151 決定3)。2つの判定が食い違うと None。AmbiguousFormatError は出さない。
 
-    片側ごとに、機種の判定が fujitsu_sir・fortinet なら config。ほかは sniff の判定が show なら show、それ以外は config。
+    片側ごとに、機種の判定が fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos なら config。ほかは sniff の判定が show なら show、それ以外は config。
     """
     kinds = set()
     for side in SIDES:
-        if detected[side] in ("fujitsu_sir", "fortinet"):
+        if detected[side] in ("fujitsu_sir", "yamaha", "fortinet", "juniper_junos", "paloalto_panos"):
             kinds.add("config")
         else:
             kinds.add("show" if sniff(texts[side]).verdict == "show" else "config")

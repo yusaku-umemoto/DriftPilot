@@ -142,6 +142,24 @@ def _dns_server(m: re.Match[str], result: Global) -> bool:
     return True
 
 
+def _asa_dns_server_group(m: re.Match[str], result: Global) -> bool:
+    """`dns server-group DefaultDNS` の見出し。中の行を読めたかは extract_global が見て、解釈済みにするか決める。"""
+    return True
+
+
+def _asa_name_server(m: re.Match[str], result: Global) -> bool:
+    """ASA の `name-server <アドレス>[ <アドレス>…]`。語が全部 IPv4・IPv6 のアドレスのときだけ読む(REQ-304)。"""
+    addresses: list[str] = []
+    for word in m["rest"].split(" "):
+        try:
+            addresses.append(str(ip_address(word)))
+        except ValueError:
+            return False
+    for address in addresses:
+        _add(result["dns"]["servers"], address)
+    return True
+
+
 def _dns_option(m: re.Match[str], result: Global) -> bool:
     _add(result["dns"]["options"], m.string)
     return True
@@ -356,7 +374,26 @@ def _snmp_contact(m: re.Match[str], result: Global) -> bool:
 _ADDRESS_WORD = r"(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)"
 
 
+# `snmp-server host` で、コミュニティ名の位置に来ても値ではない語(キーワード)。この語をコミュニティ名として読む行は読まない
+# (値が options に入って送られるため。REQ-333、ADR-0229)
+_SNMP_HOST_NON_VALUE_WORDS = frozenset({
+    "vrf", "traps", "informs", "trap", "inform", "version", "clear", "encrypted",
+    "use-vrf", "filter-vrf", "source-interface", "udp-port", "community",
+})
+
+
+def _snmp_host_community(m: re.Match[str], result: Global) -> bool:
+    value = m["value"]
+    if value.startswith('"'):
+        value = value[1:-1]
+    options = " ".join(m["before"].split() + m["after"].split())
+    result["snmp"]["hosts"].append({"host": m["host"], "community": value, "options": options or None})
+    return True
+
+
 def _snmp_host(m: re.Match[str], result: Global) -> bool:
+    if m["community"] in _SNMP_HOST_NON_VALUE_WORDS:
+        return False
     options = " ".join(part for part in (m["mode"].strip(), m["rest"]) if part)
     result["snmp"]["hosts"].append(
         {"host": m["host"], "community": m["community"], "options": options or None}
@@ -582,6 +619,30 @@ PATTERNS: tuple[Pattern, ...] = (
         ),
     ),
     Pattern(
+        "global.asa_domain_name", "top", r"domain-name (?P<name>\S+)", "domain_name",
+        "domain-name example.test", _domain_name,
+        note=(
+            "ASA と見立てた config だけ(ADR-0214 決定 5、REQ-304)。ip domain name と同じ項目で、"
+            "どの書き方でも二度目に現れた行は上書きせず読まない(未解釈)。子を持つ行は読まない"
+        ),
+    ),
+    Pattern(
+        "global.asa_dns_server_group", "top", r"dns server-group DefaultDNS", "dns.servers",
+        "dns server-group DefaultDNS", _asa_dns_server_group,
+        note=(
+            "ASA と見立てた config だけ。子を持つ見出しだけ読む。中の行(global.asa_name_server)を1つでも読んだら"
+            "見出しも解釈済みにする。ほかのグループ名・中の domain-name・timeout・retries は未解釈"
+        ),
+    ),
+    Pattern(
+        "global.asa_name_server", "dns server-group", r"name-server (?P<rest>\S.*)", "dns.servers",
+        "name-server 192.0.2.53", _asa_name_server,
+        note=(
+            "ASA の dns server-group DefaultDNS の中だけ。語が全部 IPv4・IPv6 のアドレスのときだけ、"
+            "正規のアドレスを集合に足す(重ねない。昇順)。nameif の付いた行・子を持つ行は読まない"
+        ),
+    ),
+    Pattern(
         "global.dns_option", "top",
         r"(?:no )?ip domain lookup(?: \S.*)?|(?:no )?ip domain-lookup(?: \S.*)?|ip domain-list \S+"
         r"|(?:no )?ip domain (?:multicast|periodic-resolve|recursive|round-robin)(?: \S.*)?|(?:no )?ip hostname strict",
@@ -620,17 +681,39 @@ PATTERNS: tuple[Pattern, ...] = (
         "snmp-server contact admin@example.com", _snmp_contact, note=_ONCE,
     ),
     Pattern(
+        "global.snmp.host_community", "top",
+        # 語 community が 2 つ以上ある行は読まない。ASA の `snmp-server host <nameif> <アドレス> …` も読まない
+        rf"snmp-server host (?!(?:.* )?community(?: .*)? community(?: |$))(?!\S+ {_ADDRESS_WORD}(?: |$))"
+        # 値は `"` で始まれば次の `"` まで(空白を含んでよい)、ほかは空白の無い語。前後の語は `"` を含まない語だけ
+        r'(?P<host>\S+)(?P<before>(?: [^\s"]+)*?) community (?P<value>"[^"]+"|[^\s"]+)(?P<after>(?: [^\s"]+)*)',
+        "snmp.hosts", "snmp-server host 192.0.2.1 trap version v2c community public", _snmp_host_community,
+        note=(
+            "手続き。語 community が 1 つだけで、その後ろに値がある行を読む(`\"` で囲まれた値は引用符を外す)。"
+            "options は host の後ろの語から community と値を除いた残り(前、後ろの順に 1 つの空白でつなぐ。無ければ None)。"
+            "語 community が 2 つ以上ある行、値が無い行、閉じていない引用符・引用符の中に community がある行は読まない(未解釈)。"
+            "`snmp-server host <名前> <アドレス> …`(ASA の nameif つきの形)も読まない。ADR-0229"
+        ),
+    ),
+    Pattern(
         "global.snmp.host", "top",
         # ASA の `snmp-server host <nameif> <アドレス> …` は読まない(値が options に入って送られるため。REQ-307)
-        rf"snmp-server host (?!\S+ {_ADDRESS_WORD}(?: |$))(?P<host>\S+)"
+        # 語 community を含む行は読まない(global.snmp.host_community だけで読む。REQ-333)
+        rf"snmp-server host (?!(?:.* )?community(?: |$))(?!\S+ {_ADDRESS_WORD}(?: |$))(?P<host>\S+)"
         # auth / noauth / priv は version 3 のときだけセキュリティ指定。1 / 2c ではコミュニティ名になりうる。
-        # vrf(IOS の `<アドレス> vrf <名前>`)は traps・informs・version と同じく options の側に読む(REQ-307)
-        r"(?P<mode>(?: vrf \S+)?(?: traps| informs)?(?: version (?:(?:1|2c)|3(?: auth| noauth| priv)?))?)"
+        # vrf(IOS の `<アドレス> vrf <名前>`)は traps・informs・version と同じく options の側に読む(REQ-307)。
+        # clear・encrypted(IOS-XR)は、アドレス(と vrf)の直後か、traps・informs・version 1|2c の後に 1 つ置ける(REQ-333)
+        r"(?P<mode>(?: vrf \S+)?(?: clear| encrypted)(?: traps| informs)?"
+        r"(?: version (?:(?:1|2c)|3(?: auth| noauth| priv)?))?"
+        r"|(?: vrf \S+)?(?: traps| informs)?(?: version (?:1|2c))?(?: clear| encrypted)"
+        r"|(?: vrf \S+)?(?: traps| informs)?(?: version (?:(?:1|2c)|3(?: auth| noauth| priv)?))?)"
         r" (?P<community>\S+)(?: (?P<rest>\S.*))?",
         "snmp.hosts", "snmp-server host 192.0.2.30 version 2c public", _snmp_host,
         note=(
-            "手続き。vrf <名前>・traps / informs と version は options にまとめ、その後ろの語は options の続きにする。"
-            "`snmp-server host <名前> <アドレス> …`(ASA の nameif つきの形)は読まない(未解釈)"
+            "手続き。vrf <名前>・traps / informs と version・clear / encrypted は options にまとめ、"
+            "その後ろの語は options の続きにする。"
+            "コミュニティ名の位置の語が vrf・traps・informs・trap・inform・version・clear・encrypted・use-vrf・filter-vrf・"
+            "source-interface・udp-port・community のどれかの行は読まない(未解釈)。語 community を含む行も読まない。"
+            "`snmp-server host <名前> <アドレス> …`(ASA の nameif つきの形)も読まない(未解釈)。ADR-0229"
         ),
     ),
     # v3 の利用者・グループ・ビューと、ほかの snmp の行(REQ-83)。今の community・location・contact・host より後ろに置く
@@ -867,8 +950,12 @@ _LEAF_ONLY = frozenset(
         "global.snmp.view",
         "global.snmp.option",
         "global.banner",
+        "global.asa_domain_name",
     }
 )
+# ASA と見立てた config だけ読む書式。ASA でなければ表から外す(REQ-304)
+_ASA_ONLY = frozenset({"global.asa_domain_name", "global.asa_dns_server_group"})
+_ASA_DNS_GROUP = "global.asa_dns_server_group"
 # 子を持つ行だけ読む書式(REQ-81 §3)。子の無い行は、表の後ろの書式(aaa.line など)に通すか未解釈
 _BLOCK_ONLY = frozenset({"global.aaa_server", "global.aaa_group", "global.aaa_dynamic_author"})
 _BLOCK_PATTERNS = tuple(pattern for pattern in PATTERNS if pattern.id not in _LEAF_ONLY)
@@ -895,16 +982,39 @@ def _read_aaa_block(block: HConfigChild, heading: str, result: Global, interpret
             interpreted.mark(line, pattern.id)
 
 
-def extract_global(tree: HConfig, interpreted: InterpretedLines) -> Global:
+def _read_asa_dns_group(block: HConfigChild, result: Global, interpreted: InterpretedLines) -> bool:
+    """`dns server-group DefaultDNS` の中の `name-server` を読む。1つでも読めたら True。子を持つ行は読まない。"""
+    found = False
+    for line in block.children:
+        if line.children:
+            continue
+        if (pattern := apply_first(PATTERNS, "dns server-group", line.text, result)) is not None:
+            interpreted.mark(line, pattern.id)
+            found = True
+    return found
+
+
+_NON_ASA_BLOCK_PATTERNS = tuple(pattern for pattern in _BLOCK_PATTERNS if pattern.id not in _ASA_ONLY)
+_NON_ASA_LEAF_PATTERNS = tuple(pattern for pattern in _LEAF_PATTERNS if pattern.id not in _ASA_ONLY)
+
+
+def extract_global(tree: HConfig, interpreted: InterpretedLines, asa: bool = False) -> Global:
     """tree のトップレベルの行から Global を返す。
 
     証明書チェーンと機器全体の設定(device_settings)、管理の入口(management)と feature(features)、
-    証明書の trustpoint(trustpoints)も含む。
+    証明書の trustpoint(trustpoints)も含む。asa が真のとき(ASA と見立てた config)だけ、
+    最上位の domain-name と dns server-group DefaultDNS も読む(REQ-304)。
     """
     result = new_global()
+    block_patterns = _BLOCK_PATTERNS if asa else _NON_ASA_BLOCK_PATTERNS
+    leaf_patterns = _LEAF_PATTERNS if asa else _NON_ASA_LEAF_PATTERNS
     for block in tree.children:
-        patterns = _BLOCK_PATTERNS if block.children else _LEAF_PATTERNS
+        patterns = block_patterns if block.children else leaf_patterns
         if (pattern := apply_first(patterns, "top", block.text, result)) is not None:
+            if pattern.id == _ASA_DNS_GROUP:
+                if block.children and _read_asa_dns_group(block, result, interpreted):
+                    interpreted.mark(block, pattern.id)
+                continue
             interpreted.mark(block, pattern.id)
             if pattern.id in _BLOCK_ONLY:
                 _read_aaa_block(block, pattern.id, result, interpreted)

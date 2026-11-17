@@ -111,6 +111,14 @@ _INTERFACE_WORDS = frozenset(
         "ikev2", "ipsec",
         # Cisco のインターフェースの `logging event …`(ADR-0217 決定1、REQ-310)
         "logging",
+        # Aruba AOS-CX の `routing`・`vlan access …`・`lag <数>`・`loop-protect …`(ADR-0210、REQ-294)
+        "routing", "vlan", "lag", "loop-protect",
+        # Cisco ASA の `nameif`・`security-level`・`management-only`(`vlan` は上に既にある。ADR-0214 決定 5、REQ-304)
+        "nameif", "security-level", "management-only",
+        # HPE Aruba AOS-Switch の `name`・`disable`・`enable`・`speed-duplex`(ADR-0228 決定 3、REQ-332)
+        "name", "disable", "enable", "speed-duplex",
+        # HPE Aruba AOS-Switch の `untagged vlan …`・`tagged vlan …`(ADR-0228 の追記、REQ-334)
+        "untagged", "tagged",
     }
 )
 # 項目に写す設定の頭の語(`vxlan ` を外した後)。`no ` の付いた形は options に入れない

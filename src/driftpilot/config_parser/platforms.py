@@ -4,6 +4,17 @@ kind=config の `--platform` は「既定でないパーサーの系統を選ぶ
 - 省略・cisco_ios・ntc-templates の名前: A型(今までどおり。config としての意味を持たない)
 - fujitsu_sir: B型(平坦 config。行頭スコープ表)
 - fortinet: D型(FortiGate。終端記号の対で木を組む。ADR-0025)。木の部品は B型と同じ
+- yamaha: B型(ヤマハ RTX。`pp select`・`tunnel select` の範囲で木を組み、範囲ごとの行の集合に写す。ADR-0213)。木の部品は B型と同じ
+- juniper_junos: B型(Juniper Junos。brace〔show configuration〕と set〔display set〕を同じ 2 段の文の木〔最上位の語 → 残りの語の文〕に組み、
+  global・interfaces・static_routes・bgp・prefix_lists・route_maps・acls のよく使う文を共通スキーマに写し、
+  ほかは最上位の語ごとの文の集合に写す。ADR-0224)。形は中身から見分ける。ospf などの写しは後の依頼書。木の部品は B型と同じ。
+  指紋に入る木の版は junos_tree の TREE_VERSION の 1 つだけ(brace_tree・junos_set_tree の版と見分けの規則・木の作り方をまとめた版。
+  どれかを変えたらこの版を上げる)
+- paloalto_panos: B型(Palo Alto PAN-OS。XML・set・brace を同じ 2 段の文の木〔最上位の語 → 残りの語の文〕に組み、全部の文を
+  vendor_specific["paloalto_panos"]["config"] の最上位の語ごとの文の集合に写す〔汎用の形だけ。共通スキーマへの写しは後の依頼書〕。ADR-0226)。
+  形は中身から見分ける。XML は自前の走査で読み(panos_xml)、複数行の値は <複数行の値 行数 sha256 の頭 16 字> の 1 語にする。
+  指紋に入る木の版は panos_tree の TREE_VERSION の 1 つだけ(brace_tree の版と見分けの規則・XML と set の読み方・木の作り方をまとめた版)。
+  ntc-templates の show の機種名も paloalto_panos で、kind=show(--show-command つき)の道は変えない
 - fujitsu_srs: 表が未作成のため UnsupportedConfigPlatform
 sniff では機種を当てない。中身からの系統の見立て(family_hint)は安全網5 の警告に使う(ADR-0027)。
 機種を「自動」(auto)にしたときだけ、core が family_hint.detect_platform で選んだ名前をここに渡す(ADR-0151)。
@@ -17,12 +28,13 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from driftpilot import i18n
-from driftpilot.config_parser import fortinet, fujitsu_sir, registry
+from driftpilot.config_parser import fortinet, fujitsu_sir, junos, panos, registry, yamaha
 from driftpilot.config_parser.flat_scopes import SIR_SCOPES, FlatScope
 from driftpilot.config_parser.flat_tree import DuplicateLine, FlatTree
 from driftpilot.config_parser.fortinet_tree import TREE_VERSION as FORTINET_TREE_VERSION
 from driftpilot.config_parser.fortinet_tree import build_fortinet_tree, embedded_lines
 from driftpilot.config_parser.ir import (
+    Acl,
     Bgp,
     Global,
     Interface,
@@ -32,10 +44,17 @@ from driftpilot.config_parser.ir import (
     RouteMap,
     SdwanBlock,
     StaticRoute,
+    Vlan,
 )
+from driftpilot.config_parser.junos_tree import TREE_VERSION as JUNOS_TREE_VERSION
+from driftpilot.config_parser.junos_tree import build_junos_tree
+from driftpilot.config_parser.panos_tree import TREE_VERSION as PANOS_TREE_VERSION
+from driftpilot.config_parser.panos_tree import build_panos_tree
 from driftpilot.config_parser.patterns import Pattern
 from driftpilot.config_parser.registry import PatternsFingerprint
 from driftpilot.config_parser.tracking import InterpretedLines
+from driftpilot.config_parser.yamaha_tree import TREE_VERSION as YAMAHA_TREE_VERSION
+from driftpilot.config_parser.yamaha_tree import build_yamaha_tree
 
 
 class UnsupportedConfigPlatform(ValueError):
@@ -46,7 +65,7 @@ class UnsupportedConfigPlatform(ValueError):
 class FlatPlatform:
     """FlatTree で読む機種1つ。scopes は行頭スコープ表、patterns は IR への写しの表、extract はその表で写す extractor。
 
-    build は行頭スコープ表を使わずに木を組む関数(D型)。None なら build_flat_tree(B型)。
+    build は行頭スコープ表を使わずに木を組む関数(D型・ヤマハ)。None なら build_flat_tree(B型)。
     tree_version は build の規則の版で、表の指紋に入る(build が無い機種では None。指紋を動かさない)。
     protected_lines は、機種の正規化ルールを当てない行(行をまたぐ値の本文など)を返す関数。None なら全行に当てる。
     family は系統(b=平坦 config、d=FortiGate)。安全網5 の見立てとの突き合わせだけに使い、指紋には入れない。
@@ -59,8 +78,8 @@ class FlatPlatform:
         [FlatTree, InterpretedLines],
         tuple[
             dict[str, Interface], list[StaticRoute], Bgp | None, dict[str, Ospf], Ipsec | None, dict[str, SdwanBlock],
-            dict[str, RouteMap], dict[str, PrefixList], dict[str, PrefixList], Global, dict[str, Any],
-            list[DuplicateLine],
+            dict[str, RouteMap], dict[str, PrefixList], dict[str, PrefixList], Global, dict[str, Vlan], dict[str, Acl],
+            dict[str, Any], list[DuplicateLine],
         ],
     ]
     build: Callable[[str], FlatTree] | None = None
@@ -80,6 +99,15 @@ FLAT_PLATFORMS: dict[str, FlatPlatform] = {
         FORTINET_TREE_VERSION,
         embedded_lines,
         family="d",
+    ),
+    "yamaha": FlatPlatform(
+        "yamaha", (), yamaha.PATTERNS, yamaha.extract, build_yamaha_tree, YAMAHA_TREE_VERSION, None, family="b"
+    ),
+    "juniper_junos": FlatPlatform(
+        "juniper_junos", (), junos.PATTERNS, junos.extract, build_junos_tree, JUNOS_TREE_VERSION, None, family="b"
+    ),
+    "paloalto_panos": FlatPlatform(
+        "paloalto_panos", (), panos.PATTERNS, panos.extract, build_panos_tree, PANOS_TREE_VERSION, None, family="b"
     ),
 }
 # 系統は B型だが表が無い機種 → 理由

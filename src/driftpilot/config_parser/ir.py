@@ -46,13 +46,21 @@ class Switchport(TypedDict):
     # True は `switchport trunk native vlan none`(このとき `native_vlan` は None)。後に `native vlan <数>` があれば
     # False に戻る(ADR-0206 決定4、REQ-289)
     native_vlan_none: bool
+    # True は AOS-CX の `vlan trunk native <数> tag`(ネイティブ VLAN にもタグを付ける)。`tag` の無い行と、
+    # Cisco の `switchport trunk native vlan <数>`・`none` では False に戻る(後の行が勝つ。ADR-0210 決定5、REQ-294)
+    native_vlan_tagged: bool
     # `()` は行が無い、または `all`(どちらも、すべて通す。ADR-0111 決定1)。`add` は前の数の一覧に足す(REQ-176)。
+    # AOS-CX の `vlan trunk allowed <一覧>` は足す命令(前の一覧との和集合)で、`vlan trunk allowed all` は `()` になる
+    # (前に `all` を読んだインターフェースでは、後の一覧の行は未解釈。ADR-0210 決定6、REQ-294)。
     # アライドテレシス AW+ と見立てた config(ADR-0206 決定1)では、前に一覧が無い `add` は空の一覧に足し、
     # `remove` は前の一覧から引く(全部引けば `()`。決定3、REQ-289)。
     # `none` は `trunk_allowed_none` が表す。`except` などは未解釈
     trunk_allowed_vlan: tuple[int, ...]
     # True は `switchport trunk allowed vlan none`(1つも通さない。このとき `trunk_allowed_vlan` は `()`)。
-    # False は行が無い・数の一覧・`all`(ADR-0132 決定1、REQ-177)
+    # False は行が無い・数の一覧・`all`(ADR-0132 決定1、REQ-177)。
+    # FortiSwitch(`config switch interface` の edit がある名前)だけは、`allowed-vlans-all enable` も読める
+    # `set allowed-vlans <一覧>` も無い edit で True(allowed-vlans が空 = native VLAN だけ通す。このとき `trunk_allowed_vlan`
+    # は `()`。ADR-0212 決定3、REQ-299)
     trunk_allowed_none: bool
     # `switchport voice vlan <数>`(ADR-0068 決定1)。None は行が無い。Arista の phone の書き方とはそろえない
     voice_vlan: int | None
@@ -65,6 +73,8 @@ class Switchport(TypedDict):
 
 class ChannelGroup(TypedDict):
     id: int
+    # AOS-CX の `lag <数>` は mode を `lag` にする(LACP の方式は `interface lag <数>` の `lacp mode …` が
+    # port_options に持つ。ADR-0210 決定7、REQ-294)
     mode: str
 
 
@@ -193,6 +203,9 @@ class Interface(TypedDict):
     # 行の原文、子を持たない `comment` から `EOF` までの本文の各行は `comment > <行>`(ADR-0133 決定2・3、REQ-178)。
     # 文字列の昇順。今の項目と同じ設定の行(`channel-group auto` は channel_group_auto など)、秘密の語がある行、子を持つ行は入れない。
     # None は読んでいない(B型・D型)。A型は読んだうえで無ければ空のリスト。
+    # D型の FortiSwitch は、最上位の `config switch interface`・`trunk`・`physical-port` のどれかに edit がある名前でリスト
+    # (写す行が無ければ空のリスト。道すじの頭は `switch interface`・`switch trunk`・`switch physical-port`。ADR-0212 決定3〜5、
+    # REQ-299)。`config system interface` だけにある名前は None のまま。
     # Cisco の `[no] logging event <残り>`(`logging event trunk-status` など)も入る(ADR-0217 決定1、REQ-310)
     port_options: list[str] | None
     # PoE の優先度・見張りの行(`power inline port …`・`power inline police …` と no 付き。ADR-0111 決定3。
@@ -1098,6 +1111,7 @@ def new_switchport() -> Switchport:
         "access_vlan": None,
         "native_vlan": None,
         "native_vlan_none": False,
+        "native_vlan_tagged": False,
         "trunk_allowed_vlan": (),
         "trunk_allowed_none": False,
         "voice_vlan": None,

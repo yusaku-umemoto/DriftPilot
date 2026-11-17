@@ -13,6 +13,7 @@ from ipaddress import IPv4Address, IPv4Interface, IPv6Address, IPv6Interface
 from hier_config import HConfig, HConfigChild
 from hier_config.platforms.functions import expand_range
 
+from driftpilot.config_parser.aos_switch_ports import AosPorts, expand_ports, expand_vlans, parse_vlan_number
 from driftpilot.config_parser.device_settings import has_mask_word, has_secret
 from driftpilot.config_parser.ir import Interface, InterfaceType, Vrrp, new_interface
 from driftpilot.config_parser.isis import is_key_form
@@ -56,10 +57,30 @@ class _Ctx:
     awplus: bool = False
     # このインターフェースで前に `switchport trunk allowed vlan all` を読んだか(AW+ の `add` の判定に使う)
     allowed_all: bool = False
+    # AOS-CX の `routing` の行を読んだか(`no routing` で戻る。型の判定で `no switchport` と同じ入力になる。ADR-0210 決定3)
+    routing: bool = False
+    # Cisco ASA と見立てた config か(ADR-0214 決定 5、REQ-304)。nameif などを読み、type の決まりが変わる
+    asa: bool = False
+    # 塊の中に `switchport` で始まる行(`no switchport` を含む)があったか。読めた行か読めない行かは問わない(ASA の type の判定)
+    switchport_line: bool = False
+    # HPE Aruba AOS-Switch と見立てた config か(ADR-0228 決定 3、REQ-332)。`name`・`disable`・`speed-duplex` などと、
+    # `vlan <数>` の塊の中のアドレスを読み、`Trk<数>` の type を決める
+    aos_switch: bool = False
+    # AOS-Switch のポートの VLAN の所属と trunk を集める入れ物(見立てたときだけ。ADR-0228 の追記、REQ-334)。
+    # order は読んでいる行の並び順の鍵(最上位の塊の順, 塊の中の子の順)、vlan は読んでいる `vlan <数>` の塊の数
+    aos_ports: AosPorts | None = None
+    order: tuple[int, int] = (0, 0)
+    vlan: int | None = None
 
 
 def _open(m: re.Match[str], ctx: _Ctx) -> bool:
-    ctx.name = m["name"].strip()
+    _start(ctx, m["name"].strip())
+    return True
+
+
+def _start(ctx: _Ctx, name: str) -> None:
+    """名前のインターフェースを既定値で作って ctx に持たせる(`interface <名前>` の塊と、AOS-Switch の `vlan <数>` の塊が使う)。"""
+    ctx.name = name
     ctx.interface = new_interface(ctx.name)
     ctx.interface["secondary_addresses"] = []
     ctx.interface["ipv6_addresses"] = []
@@ -85,7 +106,6 @@ def _open(m: re.Match[str], ctx: _Ctx) -> bool:
     ctx.interface["ptp"] = []
     ctx.interface["evpn"] = []
     ctx.no_switchport = False
-    return True
 
 
 def _no_switchport(m: re.Match[str], ctx: _Ctx) -> bool:
@@ -94,6 +114,85 @@ def _no_switchport(m: re.Match[str], ctx: _Ctx) -> bool:
 
 
 def _switchport(m: re.Match[str], ctx: _Ctx) -> bool:
+    return True
+
+
+def _routing(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-CX の `routing`(L3 のポート)。型の判定で `no switchport` と同じ入力にする。子を持つ行は読まない(ADR-0210 決定3)。"""
+    if ctx.has_children:
+        return False
+    ctx.routing = True
+    return True
+
+
+def _no_routing(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-CX の `no routing`(L2 のポート)。IR の値は変えず、前の `routing` を打ち消す。子を持つ行は読まない。"""
+    if ctx.has_children:
+        return False
+    ctx.routing = False
+    return True
+
+
+def _vlan_access(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-CX の `vlan access <数>`。access_vlan を数にし、mode を access にする。子を持つ行は読まない(ADR-0210 決定4)。"""
+    if ctx.has_children:
+        return False
+    switchport = ctx.interface["switchport"]
+    switchport["access_vlan"] = int(m["id"])
+    switchport["mode"] = "access"
+    return True
+
+
+def _vlan_trunk_native(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-CX の `vlan trunk native <数> [tag]`。native_vlan を数にし、tag の有無を native_vlan_tagged に写す(ADR-0210 決定5)。"""
+    if ctx.has_children:
+        return False
+    switchport = ctx.interface["switchport"]
+    switchport["native_vlan"] = int(m["id"])
+    switchport["native_vlan_none"] = False
+    switchport["native_vlan_tagged"] = m["tag"] is not None
+    switchport["mode"] = "trunk"
+    return True
+
+
+def _vlan_trunk_allowed(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-CX の `vlan trunk allowed <一覧>`。今の一覧との和集合にする(ADR-0210 決定6)。
+
+    今の値が `()` で、前に `all` の行を読んでいれば未解釈。展開できない一覧も未解釈。判定は値を変える前に済ませる。
+    """
+    if ctx.has_children:
+        return False
+    switchport = ctx.interface["switchport"]
+    current = switchport["trunk_allowed_vlan"]
+    if not current and ctx.allowed_all:
+        return False
+    try:
+        added = expand_range(m["range"])
+    except ValueError:
+        return False
+    switchport["trunk_allowed_vlan"] = tuple(sorted(set(current) | set(added)))
+    switchport["trunk_allowed_none"] = False
+    switchport["mode"] = "trunk"
+    return True
+
+
+def _vlan_trunk_allowed_all(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-CX の `vlan trunk allowed all`。`()` にし、前に `all` を読んだ印を付ける(ADR-0210 決定6)。"""
+    if ctx.has_children:
+        return False
+    switchport = ctx.interface["switchport"]
+    switchport["trunk_allowed_vlan"] = ()
+    switchport["trunk_allowed_none"] = False
+    switchport["mode"] = "trunk"
+    ctx.allowed_all = True
+    return True
+
+
+def _channel_group_lag(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-CX の `lag <数>`。channel_group を `{id, mode: lag}` にする。子を持つ行は読まない(ADR-0210 決定7)。"""
+    if ctx.has_children:
+        return False
+    ctx.interface["channel_group"] = {"id": int(m["id"]), "mode": "lag"}
     return True
 
 
@@ -140,6 +239,7 @@ def _access_vlan(m: re.Match[str], ctx: _Ctx) -> bool:
 def _native_vlan(m: re.Match[str], ctx: _Ctx) -> bool:
     ctx.interface["switchport"]["native_vlan"] = int(m["id"])
     ctx.interface["switchport"]["native_vlan_none"] = False
+    ctx.interface["switchport"]["native_vlan_tagged"] = False
     return True
 
 
@@ -147,6 +247,7 @@ def _native_vlan_none(m: re.Match[str], ctx: _Ctx) -> bool:
     """`none` は `native_vlan` を None にして `native_vlan_none` を True にする(ADR-0206 決定4)。"""
     ctx.interface["switchport"]["native_vlan"] = None
     ctx.interface["switchport"]["native_vlan_none"] = True
+    ctx.interface["switchport"]["native_vlan_tagged"] = False
     return True
 
 
@@ -224,6 +325,161 @@ def _ip_address_secondary(m: re.Match[str], ctx: _Ctx) -> bool:
     except ValueError:
         return False
     ctx.interface["secondary_addresses"].append(address)
+    return True
+
+
+def _asa_ip_address_standby(m: re.Match[str], ctx: _Ctx) -> bool:
+    """ASA の `ip address <A> <マスク> standby <B>`。ASA と見立てた config の、子を持たない行だけ読む(REQ-304)。"""
+    if not ctx.asa or ctx.has_children:
+        return False
+    try:
+        address = IPv4Interface(f"{m['addr']}/{m['mask']}")
+        standby = IPv4Address(m["standby"])
+    except ValueError:
+        return False
+    ctx.interface["ip_address"] = address
+    _add(ctx.interface["ip_options"], f"ip address standby {standby}")
+    return True
+
+
+def _asa_port_options(m: re.Match[str], ctx: _Ctx) -> bool:
+    """ASA の `nameif`・`security-level`・`management-only`・`vlan <数>`。ASA と見立てた config だけ読む(REQ-304)。"""
+    return ctx.asa and _line_option("port_options")(m, ctx)
+
+
+def _unquote(text: str) -> str:
+    """前後の `"` を 1 組だけ外す。対になっていなければそのまま。"""
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        return text[1:-1]
+    return text
+
+
+def _aos_name(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `name "<名前>"`・`name <名前>`。引用符を外して description に写す。見立てていない config と子を持つ行は読まない。"""
+    if not ctx.aos_switch or ctx.has_children:
+        return False
+    ctx.interface["description"] = _unquote(m["text"])
+    return True
+
+
+def _aos_disable(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `disable`(ポートを止める)。shutdown を真にする。見立てていない config と子を持つ行は読まない。"""
+    if not ctx.aos_switch or ctx.has_children:
+        return False
+    ctx.interface["shutdown"] = True
+    return True
+
+
+def _aos_enable(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `enable`。shutdown を偽にする。見立てていない config と子を持つ行は読まない。"""
+    if not ctx.aos_switch or ctx.has_children:
+        return False
+    ctx.interface["shutdown"] = False
+    return True
+
+
+def _aos_speed_duplex(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `speed-duplex <値>`。値の原文を speed に写す。見立てていない config と子を持つ行は読まない。"""
+    if not ctx.aos_switch or ctx.has_children:
+        return False
+    ctx.interface["speed"] = m["value"]
+    return True
+
+
+def _aos_vlan_ip_address(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `vlan <数>` の塊の `ip address <A> <マスク>`。最初の行だけを ip_address に写し、2 行目からは読まない(REQ-332)。"""
+    if not ctx.aos_switch or ctx.has_children or ctx.interface["ip_address"] is not None:
+        return False
+    return _ip_address(m, ctx)
+
+
+def _aos_vlan_address_dhcp(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `vlan <数>` の塊の `ip address dhcp-bootp`。address_mode を `dhcp` にする(今の `ip address dhcp` と同じ値)。"""
+    if not ctx.aos_switch or ctx.has_children:
+        return False
+    ctx.interface["address_mode"] = "dhcp"
+    return True
+
+
+def _aos_vlan_helper_address(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `vlan <数>` の塊の `ip helper-address <A>`。今の `ip helper-address` と同じ持ち方で dhcp_relay に足す。"""
+    if not ctx.aos_switch:
+        return False
+    return _line_option("dhcp_relay")(m, ctx)
+
+
+def _aos_vlan_ipv6_address(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `vlan <数>` の塊の `ipv6 address <A>/<長さ>`。今の `ipv6 address` と同じ持ち方で ipv6_addresses に足す。"""
+    if not ctx.aos_switch or ctx.has_children:
+        return False
+    return _ipv6_address(m, ctx)
+
+
+def _aos_untagged_vlan(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `interface <ポート>` の塊の `untagged vlan <数>`(1〜4094)。ポートの untagged の VLAN として集める。
+
+    集めた所属は extract_interfaces の最後にポートの switchport に写す(REQ-334)。見立てていない config・子を持つ行・範囲の外は読まない。
+    """
+    if not ctx.aos_switch or ctx.aos_ports is None or ctx.has_children:
+        return False
+    vlan = parse_vlan_number(m["id"])
+    if vlan is None:
+        return False
+    ctx.aos_ports.add_untagged(ctx.order, (ctx.name,), vlan)
+    return True
+
+
+def _aos_tagged_vlan(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `interface <ポート>` の塊の `tagged vlan <並び>`。並びの各 VLAN をポートの tagged の集合に足す(REQ-334)。"""
+    if not ctx.aos_switch or ctx.aos_ports is None or ctx.has_children:
+        return False
+    vlans = expand_vlans(m["ids"])
+    if vlans is None:
+        return False
+    ctx.aos_ports.add_tagged(ctx.order, (ctx.name,), vlans)
+    return True
+
+
+def _aos_vlan_untagged(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `vlan <数>` の塊の `untagged <並び>`。並びの各ポートの untagged の VLAN を、塊の数にする(REQ-334)。"""
+    if not ctx.aos_switch or ctx.aos_ports is None or ctx.vlan is None or ctx.has_children:
+        return False
+    ports = expand_ports(m["ports"])
+    if ports is None:
+        return False
+    ctx.aos_ports.add_untagged(ctx.order, ports, ctx.vlan)
+    return True
+
+
+def _aos_vlan_tagged(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `vlan <数>` の塊の `tagged <並び>`。並びの各ポートの tagged の集合に、塊の数を足す(REQ-334)。"""
+    if not ctx.aos_switch or ctx.aos_ports is None or ctx.vlan is None or ctx.has_children:
+        return False
+    ports = expand_ports(m["ports"])
+    if ports is None:
+        return False
+    ctx.aos_ports.add_tagged(ctx.order, ports, (ctx.vlan,))
+    return True
+
+
+def _aos_vlan_no_member(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の `vlan <数>` の塊の `no untagged <並び>`・`no tagged <並び>`。並びが展開できれば解釈済みにするだけで、所属は変えない。
+
+    running-config の `no untagged` は、既定の VLAN 1 から外したことを表す(所属から外すことは書かない。REQ-334)。
+    """
+    if not ctx.aos_switch or ctx.vlan is None or ctx.has_children:
+        return False
+    return expand_ports(m["ports"]) is not None
+
+
+def _aos_trunk(m: re.Match[str], ctx: _Ctx) -> bool:
+    """AOS-Switch の最上位の `trunk <並び> trk<数> <方式>`。並びの各ポートの束ね先を `{"id": 数, "mode": 方式}` にする(REQ-334)。"""
+    if not ctx.aos_switch or ctx.aos_ports is None or ctx.has_children:
+        return False
+    ports = expand_ports(m["ports"])
+    if ports is None:
+        return False
+    ctx.aos_ports.add_trunk(ctx.order, ports, (int(m["id"]), m["mode"]))
     return True
 
 
@@ -896,6 +1152,13 @@ def _line_option(key: str) -> Callable[[re.Match[str], _Ctx], bool]:
 
 _SEPARATOR = " > "
 _BLOCK_SCOPE = "interface block"
+# AOS-Switch の `vlan <数>` の塊の中(ADR-0228 決定 3、REQ-332)
+_AOS_VLAN_SCOPE = "aos-switch vlan"
+# AOS-Switch の `vlan <数>` の塊の中のポートの所属の行。`aos-switch vlan` と分けるのは、所属の行を `vlan<N>` を作る手がかりに
+# 数えないため(`untagged 1-12` だけの `vlan 1` から `vlan1` を作らない。ADR-0228 の追記、REQ-334)
+_AOS_PORT_SCOPE = "aos-switch vlan port"
+# AOS-Switch の最上位の行(`trunk …`)。`top` と分けるのは、`top` が `interface` の見出しを読む場所だから(REQ-334)
+_AOS_TOP_SCOPE = "aos-switch top"
 
 
 def _block_line(key: str) -> Callable[[re.Match[str], _Ctx], bool]:
@@ -982,8 +1245,31 @@ def _read_comment_line(line: HConfigChild, ctx: _Ctx, interpreted: InterpretedLi
     return True
 
 
+def _aoscx_name_type(name: str) -> InterfaceType | None:
+    """AOS-CX の名前で決まる型。`lag <数> [<語> …]` は port_channel、`vlan <数>`・`vlan<数>` は svi(ADR-0210 決定2)。
+
+    表を通さない正規表現は使えないので、文字列の操作で見る。大文字小文字は区別する。`lagX`・`vlan10a`・`vlan abc` は None。
+    """
+    words = name.split()
+    if len(words) >= 2 and words[0] == "lag" and words[1].isascii() and words[1].isdigit():
+        return "port_channel"
+    if len(words) == 2 and words[0] == "vlan" and words[1].isascii() and words[1].isdigit():
+        return "svi"
+    if len(words) == 1 and words[0].startswith("vlan"):
+        number = words[0].removeprefix("vlan")
+        if number.isascii() and number.isdigit():
+            return "svi"
+    return None
+
+
+def _is_aos_trunk_name(name: str) -> bool:
+    """AOS-Switch のトランクの名前(`Trk<数>`。大文字小文字は区別する)か。表を通さない正規表現は使えないので、文字列の操作で見る。"""
+    number = name.removeprefix("Trk")
+    return number != name and number.isascii() and number.isdigit()
+
+
 def _derive_type(m: None, ctx: _Ctx) -> bool:
-    """type を判定する。名前の先頭 → routed の条件 → switchport の順。
+    """type を判定する。名前の先頭 → AOS-CX の名前 → AOS-Switch の `Trk<数>` → routed の条件 → switchport の順。
 
     サブインターフェース(名前に . を含む)も同じ順で判定し、親は parent_interface で表す。
     """
@@ -992,7 +1278,22 @@ def _derive_type(m: None, ctx: _Ctx) -> bool:
         if ctx.name.startswith(prefix):
             interface["type"] = type_
             return True
-    if ctx.no_switchport or interface["ip_address"] is not None or interface["address_mode"] is not None:
+    if (name_type := _aoscx_name_type(ctx.name)) is not None:
+        interface["type"] = name_type
+        return True
+    if ctx.aos_switch and _is_aos_trunk_name(ctx.name):
+        interface["type"] = "port_channel"
+        return True
+    if ctx.asa and not ctx.switchport_line:
+        # ASA のインターフェースは、switchport の行が無ければ L3(ASA 5505・Firepower 1010 のポートは switchport の行がある。REQ-304)
+        interface["type"] = "routed"
+        return True
+    if (
+        ctx.no_switchport
+        or ctx.routing
+        or interface["ip_address"] is not None
+        or interface["address_mode"] is not None
+    ):
         interface["type"] = "routed"
     else:
         interface["type"] = "switchport"
@@ -1017,6 +1318,16 @@ PATTERNS: tuple[Pattern, ...] = (
             "L2 のポートの明示。既定と同じなので IR の値は変えない。"
             "`no switchport` に変われば `type` の差分になる（ADR-0043 決定2）"
         ),
+    ),
+    Pattern(
+        "interfaces.routing", "interface", r"routing", "type(routed の判定にだけ使う)", "routing", _routing,
+        note="手続き。AOS-CX の L3 のポート。IR のキーには写さず、type の判定(interfaces.type)で `no switchport` と同じ"
+        "入力にする(ADR-0210 決定3、REQ-294)。後ろに語が続く行と、子を持つ行は未解釈",
+    ),
+    Pattern(
+        "interfaces.no_routing", "interface", r"no routing", "type(値は変えない)", "no routing", _no_routing,
+        note="手続き。AOS-CX の L2 のポート。IR の値は変えず、前に読んだ `routing` を打ち消す(後の行が勝つ。"
+        "ADR-0210 決定3、REQ-294)。後ろに語が続く行と、子を持つ行は未解釈",
     ),
     Pattern("interfaces.shutdown", "interface", r"shutdown", "shutdown", "shutdown", _shutdown),
     Pattern("interfaces.no_shutdown", "interface", r"no shutdown", "shutdown", "no shutdown", _no_shutdown),
@@ -1117,6 +1428,37 @@ PATTERNS: tuple[Pattern, ...] = (
         "子を持つ行は、子も含めて未解釈",
     ),
     Pattern(
+        "interfaces.switchport.vlan_access", "interface", r"vlan access (?P<id>\d+)", "switchport.access_vlan・switchport.mode",
+        "vlan access 10", _vlan_access,
+        note="手続き。AOS-CX の形。access_vlan を数にし、mode を access にする。2回あれば後の行。"
+        "後ろに語が続く行と、子を持つ行は未解釈(ADR-0210 決定4、REQ-294)",
+    ),
+    Pattern(
+        "interfaces.switchport.vlan_trunk_native", "interface", r"vlan trunk native (?P<id>\d+)(?P<tag> tag)?",
+        "switchport.native_vlan・switchport.native_vlan_none・switchport.native_vlan_tagged・switchport.mode",
+        "vlan trunk native 1", _vlan_trunk_native,
+        note="手続き。AOS-CX の形。native_vlan を数、native_vlan_none を偽にし、`tag` があれば native_vlan_tagged を真、"
+        "無ければ偽にして、mode を trunk にする。2回あれば後の行。後ろにほかの語が続く行"
+        "(`vlan trunk native 1 allowed …` など)と、子を持つ行は未解釈(ADR-0210 決定5、REQ-294)",
+    ),
+    Pattern(
+        "interfaces.switchport.vlan_trunk_allowed", "interface", r"vlan trunk allowed (?P<range>\d[\d,\-]*)",
+        "switchport.trunk_allowed_vlan・switchport.trunk_allowed_none・switchport.mode",
+        "vlan trunk allowed 10,20-22", _vlan_trunk_allowed,
+        note="手続き。AOS-CX の形。範囲を展開して、今の一覧との和集合(昇順のタプル)にする。今の値が `()` で前に `all` の行"
+        "(`vlan trunk allowed all`・`switchport trunk allowed vlan all`)を読んでいれば未解釈。展開できない一覧・"
+        "後ろに語が続く行・子を持つ行も未解釈。読めたら trunk_allowed_none を偽にし、mode を trunk にする"
+        "(ADR-0210 決定6、REQ-294)",
+    ),
+    Pattern(
+        "interfaces.switchport.vlan_trunk_allowed_all", "interface", r"vlan trunk allowed all",
+        "switchport.trunk_allowed_vlan・switchport.trunk_allowed_none・switchport.mode",
+        "vlan trunk allowed all", _vlan_trunk_allowed_all,
+        note="手続き。AOS-CX の形。`()` にし、trunk_allowed_none を偽、mode を trunk にして、前に `all` を読んだ印を付ける"
+        "(AW+ の `switchport trunk allowed vlan all` と同じ印)。後ろに語が続く行と、子を持つ行は未解釈"
+        "(ADR-0210 決定6、REQ-294)",
+    ),
+    Pattern(
         "interfaces.address_mode_dhcp", "interface", r"ip address dhcp(?: (?P<rest>.+))?", "address_mode",
         "ip address dhcp", _address_mode_dhcp,
         note="手続き。`dhcp`、後ろに語があれば `dhcp <残り>`(空白は1つ)を address_mode に写す。2回あれば後の行"
@@ -1174,6 +1516,16 @@ PATTERNS: tuple[Pattern, ...] = (
         "interfaces.ip_address_secondary", "interface", r"ip address (?P<addr>\S+) (?P<mask>\S+) secondary",
         "secondary_addresses", "ip address 192.0.2.129 255.255.255.128 secondary", _ip_address_secondary,
         note="書かれた順に足す(primary の ip_address とは別に持つ)。IPv4 として読めないものは未解釈にする",
+    ),
+    Pattern(
+        "interfaces.asa_ip_address_standby", "interface",
+        r"ip address (?P<addr>\S+) (?P<mask>\S+) standby (?P<standby>\S+)", "ip_address, ip_options",
+        "ip address 192.0.2.1 255.255.255.0 standby 192.0.2.2", _asa_ip_address_standby,
+        note=(
+            "手続き。ASA と見立てた config だけ(ADR-0214 決定 5、REQ-304)。`ip address <A> <マスク>` と同じ手続きで "
+            "ip_address に写し、`ip address standby <B>` を ip_options の集合に足す。A・マスク・B が IPv4 として読めない行、"
+            "standby の後ろに語が続く行、子を持つ行は未解釈。ASA と見立てない config では未解釈"
+        ),
     ),
     # IOS-XR のインターフェースのアドレス(ADR-0211 決定5、REQ-296)。`ip …` と同じ欄に、同じ手続きで読む。
     # dhcp・unnumbered の語の決まった形を、マスクの形より前に置く。`/` の形・secondary 付きも、そうでない形より前に置く
@@ -1271,6 +1623,11 @@ PATTERNS: tuple[Pattern, ...] = (
         "vrf forwarding RED", _vrf,
     ),
     Pattern(
+        "interfaces.vrf_attach", "interface", r"vrf attach (?P<name>\S+)", "vrf", "vrf attach BLUE", _vrf,
+        note="AOS-CX の形。名前が1語のときだけ。後ろに語が続く行は未解釈。`vrf <名前>`(interfaces.vrf_name)より前に置く"
+        "(ADR-0210 決定8、REQ-294)",
+    ),
+    Pattern(
         "interfaces.vrf_name", "interface", r"vrf (?P<name>\S+)", "vrf", "vrf MGMT", _vrf,
         note="Arista の形。名前が1語のときだけ。`vrf forwarding …` は interfaces.vrf が先に読む",
     ),
@@ -1335,6 +1692,11 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         "interfaces.no_channel_group_auto", "interface", r"no channel-group auto", "channel_group_auto",
         "no channel-group auto", _no_channel_group_auto, note="False にする。子を持つ行は未解釈",
+    ),
+    Pattern(
+        "interfaces.channel_group_lag", "interface", r"lag (?P<id>\d+)", "channel_group", "lag 1", _channel_group_lag,
+        note="手続き。AOS-CX の LAG のメンバー。channel_group を `{id: 数, mode: lag}` にする。2回あれば後の行。"
+        "後ろに語が続く行と、子を持つ行は未解釈。最上位や `vsx` の中の `lag` の語は対象外(ADR-0210 決定7、REQ-294)",
     ),
     Pattern(
         "interfaces.mlag", "interface", r"mlag (?P<n>\d+)", "mlag_id", "mlag 10", _mlag,
@@ -1595,10 +1957,11 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         "interfaces.port_security", "interface",
         r"(?:no )?(?:switchport port-security|switchport nonegotiate|storm-control|udld|ip dhcp snooping"
-        r"|ip arp inspection|ip verify source|ip device tracking|device-tracking)(?: .+)?",
+        r"|ip arp inspection|ip verify source|ip device tracking|device-tracking|loop-protect)(?: .+)?",
         "port_security", "storm-control broadcast level 1.00", _port_security,
         note="手続き。行の原文(空白は1つ)を port_security の集合に足す。同じ文字列は重ねず、文字列の昇順"
         "(ADR-0068 決定3)。語の途中では切らない。語に password・secret・key がある行は未解釈。"
+        "AOS-CX の `loop-protect`・`loop-protect <残り>`(`no ` 付きも)も読む(ADR-0210 決定9、REQ-294)。"
         "`spanning-tree guard …` は interfaces.spanning_tree が読む。子を持つ行は未解釈",
     ),
     Pattern(
@@ -1716,6 +2079,147 @@ PATTERNS: tuple[Pattern, ...] = (
         "子を持つ行とその子孫は未解釈(同じブロックのほかの行は読む)",
     ),
     Pattern(
+        "interfaces.asa_port_options", "interface",
+        r"nameif \S+|no nameif|security-level [0-9]+|no security-level|(?:no )?management-only|vlan [0-9]+",
+        "port_options", "nameif outside", _asa_port_options,
+        note=(
+            "手続き。ASA と見立てた config だけ(ADR-0214 決定 5、REQ-304)。行の原文(空白は1つ)を port_options の集合に"
+            "足す(同じ文字列は重ねず、文字列の昇順)。`vlan <数> secondary …` など語が続く `vlan`・子を持つ行・"
+            "秘密の語がある行(`nameif key` など)は未解釈。ASA と見立てない config では未解釈。interfaces.port_options より前に置く"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_name", "interface", r"name (?P<text>.+)", "description", 'name "uplink"', _aos_name,
+        note=(
+            "手続き。HPE Aruba AOS-Switch と見立てた config だけ(ADR-0228 決定 3、REQ-332)。"
+            "`name \"<名前>\"`・`name <名前>` の名前(前後の `\"` は外す)を description に写す。"
+            "見立てていない config・子を持つ行は未解釈。interfaces.port_options より前に置く"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_disable", "interface", r"disable", "shutdown", "disable", _aos_disable,
+        note=(
+            "手続き。AOS-Switch と見立てた config だけ(ADR-0228 決定 3、REQ-332)。shutdown を真にする。"
+            "見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_enable", "interface", r"enable", "shutdown", "enable", _aos_enable,
+        note=(
+            "手続き。AOS-Switch と見立てた config だけ(ADR-0228 決定 3、REQ-332)。shutdown を偽にする"
+            "(後の行が勝つ)。見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_speed_duplex", "interface", r"speed-duplex (?P<value>\S+(?: \S+)*)", "speed",
+        "speed-duplex auto-1000", _aos_speed_duplex,
+        note=(
+            "手続き。AOS-Switch と見立てた config だけ(ADR-0228 決定 3、REQ-332)。値の原文を speed に写す。"
+            "見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_vlan_ip_address", _AOS_VLAN_SCOPE, r"ip address (?P<addr>\S+) (?P<mask>\S+)", "ip_address",
+        "ip address 192.0.2.1 255.255.255.0", _aos_vlan_ip_address,
+        note=(
+            "手続き。AOS-Switch と見立てた config の、字下げの無い `vlan <1〜4094>` の塊の中だけ(ADR-0228 決定 3、REQ-332)。"
+            "インターフェース `vlan<N>`(type は svi)の ip_address に写す。最初の行だけを読み、2 行目からは未解釈"
+            "(アドレスを黙って上書きしない)。IPv4 として読めない行・子を持つ行も未解釈。"
+            "塊の中に写せる行が 1 つでもあるときだけインターフェースを作り、同じ名前がすでにあれば作らず未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_vlan_address_dhcp", _AOS_VLAN_SCOPE, r"ip address dhcp-bootp", "address_mode",
+        "ip address dhcp-bootp", _aos_vlan_address_dhcp,
+        note=(
+            "手続き。AOS-Switch の `vlan <数>` の塊の中だけ(ADR-0228 決定 3、REQ-332)。address_mode を `dhcp` にする"
+            "(今の Cisco の `ip address dhcp` と同じ値)。子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_vlan_helper_address", _AOS_VLAN_SCOPE, r"ip helper-address \S+", "dhcp_relay",
+        "ip helper-address 192.0.2.10", _aos_vlan_helper_address,
+        note=(
+            "手続き。AOS-Switch の `vlan <数>` の塊の中だけ(ADR-0228 決定 3、REQ-332)。行の原文(空白は1つ)を dhcp_relay の"
+            "集合に足す(今の Cisco の `ip helper-address` と同じ持ち方。同じ文字列は重ねず昇順)。"
+            "子を持つ行・秘密の語がある行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_vlan_ipv6_address", _AOS_VLAN_SCOPE,
+        r"ipv6 address (?P<addr>[^\s/]+)/(?P<length>\d+)(?: (?P<kind>eui-64|anycast))?", "ipv6_addresses",
+        "ipv6 address 2001:db8::1/64", _aos_vlan_ipv6_address,
+        note=(
+            "手続き。AOS-Switch の `vlan <数>` の塊の中だけ(ADR-0228 決定 3、REQ-332)。今の Cisco の `ipv6 address <A>/<n>` と"
+            "同じ持ち方で ipv6_addresses の集合に足す。IPv6 として読めない行・子を持つ行は未解釈"
+            "(`ipv6 address dhcp …` などほかの形も未解釈)"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_untagged_vlan", "interface", r"untagged vlan (?P<id>\d+)", "switchport.mode・switchport.access_vlan・"
+        "switchport.native_vlan・switchport.trunk_allowed_vlan", "untagged vlan 30", _aos_untagged_vlan,
+        note=(
+            "手続き。HPE Aruba AOS-Switch と見立てた config だけ(ADR-0228 の追記、REQ-334)。`interface <ポート>` の塊の"
+            "`untagged vlan <1〜4094>` を、そのポートの untagged の VLAN として集める。集めた所属は、AOS-Switch の `vlan <数>` の塊の"
+            "`untagged`・`tagged` の行と合わせて、config の上からの順(後の行が勝つ)で、ポートの switchport に写す"
+            "(tagged の集合が空なら mode は access・access_vlan は untagged の VLAN。空でなければ mode は trunk・native_vlan は"
+            "untagged の VLAN(無ければ None)・trunk_allowed_vlan は tagged の集合と untagged の VLAN の和)。"
+            "違う untagged の VLAN が 2 行以上あれば、後の行の値を使い、食い違いを記録する(値・行番号は持たない)。"
+            "見立てていない config・範囲の外の数・子を持つ行は未解釈。interfaces.port_options より前に置く"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_tagged_vlan", "interface", r"tagged vlan (?P<ids>\S+)", "switchport.mode・switchport.native_vlan・"
+        "switchport.trunk_allowed_vlan", "tagged vlan 40,50", _aos_tagged_vlan,
+        note=(
+            "手続き。AOS-Switch と見立てた config だけ(ADR-0228 の追記、REQ-334)。`interface <ポート>` の塊の "
+            "`tagged vlan <並び>`(`<数>`・`<数>-<数>` を `,` でつないだもの。1〜4094 だけ)の各 VLAN を、そのポートの tagged の"
+            "集合に足す。写し方は interfaces.aos_untagged_vlan と同じ。範囲の終わりが始まりより小さい並び・範囲の外の数・"
+            "ほかの形・見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_vlan_untagged", _AOS_PORT_SCOPE, r"untagged (?P<ports>\S+)", "switchport.mode・switchport.access_vlan・"
+        "switchport.native_vlan・switchport.trunk_allowed_vlan", "untagged 1-12", _aos_vlan_untagged,
+        note=(
+            "手続き。AOS-Switch と見立てた config の、字下げの無い `vlan <1〜4094>` の塊の中だけ(ADR-0228 の追記、REQ-334)。"
+            "ポートの並び(`3`・`1-24`・`A1-A4`・`1/1-1/24`・`1/A1-1/A3`・`Trk1-Trk2` を `,` でつないだもの)の各ポートの "
+            "untagged の VLAN を、塊の数にする。展開できない並び(範囲の終わりが始まりより小さい・英字や前の数が食い違う・"
+            "端の数が 0 で始まる・空の項目・ほかの形・1 行で 1024 個を超える)・見立てていない config・子を持つ行は未解釈。"
+            "この行は `vlan<N>` のインターフェースを作る手がかりに数えない。写し方は interfaces.aos_untagged_vlan と同じ"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_vlan_tagged", _AOS_PORT_SCOPE, r"tagged (?P<ports>\S+)", "switchport.mode・switchport.native_vlan・"
+        "switchport.trunk_allowed_vlan", "tagged 23-24,A1", _aos_vlan_tagged,
+        note=(
+            "手続き。AOS-Switch と見立てた config の、字下げの無い `vlan <1〜4094>` の塊の中だけ(ADR-0228 の追記、REQ-334)。"
+            "ポートの並びの各ポートの tagged の集合に、塊の数を足す。展開できない並び・見立てていない config・子を持つ行は"
+            "未解釈。写し方は interfaces.aos_untagged_vlan と同じ"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_vlan_no_member", _AOS_PORT_SCOPE, r"no (?:untagged|tagged) (?P<ports>\S+)", "(読むだけ。IR は変えない)",
+        "no untagged 13-24", _aos_vlan_no_member,
+        note=(
+            "手続き。AOS-Switch と見立てた config の、字下げの無い `vlan <1〜4094>` の塊の中だけ(ADR-0228 の追記、REQ-334)。"
+            "ポートの並びが展開できれば解釈済みにするだけで、所属は変えない(running-config の `no untagged` は、既定の VLAN 1 から"
+            "外したことを表し、所属から外すことは書かない)。展開できない並び・見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.aos_trunk", _AOS_TOP_SCOPE, r"trunk (?P<ports>\S+) trk(?P<id>\d+) (?P<mode>lacp|trunk|dt-lacp|dt-trunk)",
+        "interfaces[ポート].channel_group", "trunk 23-24 trk1 lacp", _aos_trunk,
+        note=(
+            "手続き。AOS-Switch と見立てた config の、最上位の `trunk <並び> trk<数> <方式>` だけ(ADR-0228 の追記、REQ-334。"
+            "`trk<数>` と方式の語は小文字のときだけ読む)。並びの各ポートの channel_group を `{\"id\": 数, \"mode\": 方式}` に"
+            "する。インターフェース `Trk<数>` が無ければ作る(type は port_channel)。ポートのインターフェースも無ければ作る。"
+            "同じポートが違う束ね先の 2 行以上にあれば、後の行の値を使い、食い違いを記録する(値・行番号は持たない)。"
+            "展開できない並び・見立てていない config・子を持つ行は未解釈。`Trk<数>` に所属の行(`tagged Trk1` など)があれば、"
+            "interfaces.aos_vlan_tagged などの写し方で `Trk<数>` の switchport に写す"
+        ),
+    ),
+    Pattern(
         "interfaces.port_options", "interface",
         r"(?:no )?(?:switchport block|switchport protected|switchport vepa|switchport private-vlan"
         r"|switchport trunk pruning|snmp trap|cdp|lldp|mvrp|macsec|mka|ethernet oam|autonomic|cts|bgp-policy"
@@ -1764,7 +2268,13 @@ PATTERNS: tuple[Pattern, ...] = (
         note=(
             "手続き。名前の先頭(Vlan → svi / Loopback・loopback → loopback / "
             "Port-channel・Port-Channel・port-channel → port_channel。大文字小文字は区別する)、"
-            "次に no switchport、ip address、address_mode のどれかがあれば routed、それ以外は switchport"
+            "AOS-CX の名前(`lag <数>` と、後ろに空白と語が続く `lag <数> …` → port_channel、`vlan <数>`・`vlan<数>` → svi。"
+            "`lagX`・`vlan10a`・`vlan abc` は当たらない。ADR-0210 決定2、REQ-294)、"
+            "AOS-Switch と見立てた config の `Trk<数>` → port_channel(大文字小文字は区別する。ADR-0228 決定 3、REQ-332)、"
+            "ASA と見立てた config で、塊の中に switchport で始まる行(no switchport を含む)が無ければ routed"
+            "(ADR-0214 決定 5、REQ-304。ASA 5505・Firepower 1010 のポートは switchport の行があるので次へ進む)、"
+            "次に no switchport、routing(AOS-CX。no routing で戻る)、ip address、address_mode のどれかがあれば routed、"
+            "それ以外は switchport"
         ),
     ),
 )
@@ -1814,26 +2324,140 @@ def _read_cts_manual_block(node: HConfigChild, ctx: _Ctx, interpreted: Interpret
             interpreted.mark(child, pattern.id)
 
 
+def _aos_vlan_number(text: str) -> int | None:
+    """字下げの無い `vlan <1〜4094>`(1 つの数)の見出しの数。そうでなければ None。表を通さない正規表現は使えないので、文字列の操作で見る。"""
+    words = text.split()
+    if len(words) != 2 or words[0] != "vlan" or not (words[1].isascii() and words[1].isdigit()):
+        return None
+    number = int(words[1])
+    return number if 1 <= number <= 4094 else None
+
+
+def _read_aos_vlan(
+    block: HConfigChild, number: int, interfaces: dict[str, Interface], interpreted: InterpretedLines
+) -> None:
+    """AOS-Switch の `vlan <数>` の塊の子を読み、写せた行が 1 つでもあれば、インターフェース `vlan<N>`(svi)を作る。
+
+    同じ名前のインターフェースがすでにあれば、作らず、行も読まない(未解釈に残す。上書きしない)。
+    """
+    name = f"vlan{number}"
+    if name in interfaces:
+        return
+    ctx = _Ctx(aos_switch=True)
+    _start(ctx, name)
+    matched: list[tuple[HConfigChild, Pattern]] = []
+    for line in block.children:
+        ctx.has_children = bool(line.children)
+        if (pattern := apply_first(PATTERNS, _AOS_VLAN_SCOPE, line.text, ctx)) is not None:
+            matched.append((line, pattern))
+    if not matched:
+        return
+    for line, pattern in matched:
+        interpreted.mark(line, pattern.id)
+    _TYPE.apply(None, ctx)
+    interfaces[name] = ctx.interface
+
+
+def _aos_interface(interfaces: dict[str, Interface], name: str) -> Interface:
+    """名前のインターフェースを返す。無ければ `interface` の塊と同じ既定値で作る(type は `Trk<数>` が port_channel、ほかは switchport)。"""
+    if name not in interfaces:
+        ctx = _Ctx(aos_switch=True)
+        _start(ctx, name)
+        _TYPE.apply(None, ctx)
+        interfaces[name] = ctx.interface
+    return interfaces[name]
+
+
+def _read_aos_ports(tree: HConfig, interpreted: InterpretedLines, ports: AosPorts) -> None:
+    """最上位の塊を上から順に読み、`vlan <数>` の塊の `untagged`・`tagged`・`no …` の行と、子を持たない最上位の `trunk …` の行を集める。
+
+    `vlan<N>` のインターフェースがすでにあるかどうかとは関係なく読む(REQ-334)。当たった行は解釈済みにする。
+    """
+    ctx = _Ctx(aos_switch=True, aos_ports=ports)
+    for index, block in enumerate(tree.children):
+        number = _aos_vlan_number(block.text)
+        if number is not None:
+            ctx.vlan = number
+            for position, line in enumerate(block.children):
+                ctx.order = (index, position)
+                ctx.has_children = bool(line.children)
+                if (pattern := apply_first(PATTERNS, _AOS_PORT_SCOPE, line.text, ctx)) is not None:
+                    interpreted.mark(line, pattern.id)
+            ctx.vlan = None
+        elif not block.children:
+            ctx.order = (index, 0)
+            ctx.has_children = False
+            if (pattern := apply_first(PATTERNS, _AOS_TOP_SCOPE, block.text, ctx)) is not None:
+                interpreted.mark(block, pattern.id)
+
+
+def _write_aos_ports(
+    ports: AosPorts, interfaces: dict[str, Interface], interpreted: InterpretedLines
+) -> None:
+    """集めた所属と trunk をポートの switchport・channel_group に写し、食い違いを interpreted.conflicts に足す(REQ-334)。
+
+    所属の行があるポートは、tagged の集合が空なら mode access・access_vlan が untagged の VLAN、空でなければ mode trunk・
+    native_vlan が untagged の VLAN(無ければ None)・trunk_allowed_vlan が tagged の集合と untagged の VLAN の和(昇順)。
+    書くのはこの 4 つだけ。インターフェースが無いポートと `Trk<数>` は作る。
+    """
+    resolved = ports.resolve()
+    for name, state in resolved.ports.items():
+        if not state.member and state.group is None:
+            continue
+        interface = _aos_interface(interfaces, name)
+        if state.member:
+            switchport = interface["switchport"]
+            if not state.tagged:
+                switchport["mode"] = "access"
+                switchport["access_vlan"] = state.untagged
+            else:
+                switchport["mode"] = "trunk"
+                switchport["native_vlan"] = state.untagged
+                allowed = state.tagged | ({state.untagged} if state.untagged is not None else set())
+                switchport["trunk_allowed_vlan"] = tuple(sorted(allowed))
+        if state.group is not None:
+            interface["channel_group"] = {"id": state.group[0], "mode": state.group[1]}
+            _aos_interface(interfaces, f"Trk{state.group[0]}")
+    interpreted.conflicts.extend(resolved.conflicts)
+
+
 def extract_interfaces(
-    tree: HConfig, interpreted: InterpretedLines, *, awplus: bool = False
+    tree: HConfig,
+    interpreted: InterpretedLines,
+    *,
+    awplus: bool = False,
+    asa: bool = False,
+    aos_switch: bool = False,
 ) -> dict[str, Interface]:
     """tree のトップレベルの interface 行から、名前をキーにした Interface の辞書を返す。
 
     awplus は、AW+ と見立てた config か(トランクの `add`・`remove` の読み方が変わる。ADR-0206 決定1、REQ-289)。
+    asa は、Cisco ASA と見立てた config か(nameif などを読み、type の決まりが変わる。ADR-0214 決定 5、REQ-304)。
+    aos_switch は、HPE Aruba AOS-Switch と見立てた config か(インターフェースの `name`・`disable`・`speed-duplex` を読み、
+    `Trk<数>` を port_channel にする。字下げの無い `vlan <数>` の塊の中のアドレスなどを、インターフェース `vlan<N>` に写す。
+    `interface` の塊を先にすべて読み、`vlan<N>` は同じ名前が無いときだけ作る。ADR-0228 決定 3、REQ-332)。
+    見立てたときは、さらに VLAN の所属(`untagged`・`tagged`)と最上位の `trunk` を集め、ポートの switchport・channel_group に写す
+    (無いポートと `Trk<数>` は作る)。同じ項目に違う値が書かれていたら、後の行の値を使い、interpreted.conflicts に記録する。
+    ADR-0228 の追記、REQ-334。
     """
     interfaces: dict[str, Interface] = {}
-    for block in tree.children:
-        ctx = _Ctx(awplus=awplus)
+    aos_ports = AosPorts() if aos_switch else None
+    for block_index, block in enumerate(tree.children):
+        ctx = _Ctx(awplus=awplus, asa=asa, aos_switch=aos_switch, aos_ports=aos_ports)
         heading = apply_first(PATTERNS, "top", block.text, ctx)
         if heading is None:
             continue
         interpreted.mark(block, heading.id)
 
-        for line in block.children:
+        for line_index, line in enumerate(block.children):
             if ctx.comment:
                 ctx.comment = _read_comment_line(line, ctx, interpreted)
                 continue
             ctx.has_children = bool(line.children)
+            ctx.order = (block_index, line_index)
+            words = line.text.split()
+            if words[:1] == ["switchport"] or words[:2] == ["no", "switchport"]:
+                ctx.switchport_line = True
             ctx.block_key = None
             ctx.vrrp_group = None
             ctx.cts_manual = False
@@ -1851,4 +2475,11 @@ def extract_interfaces(
 
         _TYPE.apply(None, ctx)
         interfaces[ctx.name] = ctx.interface
+    if aos_ports is not None:
+        for block in tree.children:
+            number = _aos_vlan_number(block.text)
+            if number is not None:
+                _read_aos_vlan(block, number, interfaces, interpreted)
+        _read_aos_ports(tree, interpreted, aos_ports)
+        _write_aos_ports(aos_ports, interfaces, interpreted)
     return interfaces

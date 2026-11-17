@@ -5,6 +5,8 @@
 - `pilot-call capabilities`: できることを JSON の 1 行で出して 0 で終わる
 - `pilot-call compare --request <依頼のファイル>`: 依頼を確かめ(合わなければ error と 2。accepted は出さない)、
   accepted を出し、2 つの入力を比べ、result.json と masked_payload.txt を output_dir に書き、result を出す
+- `pilot-call config-facts --request <依頼のファイル>`(ADR-0223。REQ-319): 1 つの config を「道すじ・値」の一覧にし、
+  result.json(伏せない)と masked_facts.json(AI に渡す形)を output_dir に書く。終了コードは成功 0・誤り 2・止めた 130
 
 標準出力には JSON の行だけを出す(1 行ごとに flush)。人向けの知らせは標準エラー。標準入力が閉じたら止める合図とする
 (別のスレッドで読み、終わりになったら取り消しの印を立てる。区間ごとの比較の間と比べ終わりで見る。書きかけは残さない)。
@@ -26,14 +28,18 @@ import driftpilot
 from driftpilot.cli.commands import EXIT_BY_STATUS, EXIT_ERROR
 from driftpilot.cli.output import open_machine_file, write_machine
 from driftpilot.cli.render import to_json, to_json_all
+from driftpilot.config_parser.platforms import CONFIG_PLATFORM_NAMES
 from driftpilot.core import (
+    AUTO_PLATFORM,
     CompareCancelled,
     CompareOutcome,
     CompareRequest,
+    FactsError,
     MaskedPayload,
     MultiCompareOutcome,
     SideInput,
     compare_all,
+    config_facts,
     masked_all,
     masked_single,
     request_problem,
@@ -60,6 +66,7 @@ SCHEMA = "pilot.call-request"
 SCHEMA_VERSION = "1"
 RESULT_FILE = "result.json"
 PAYLOAD_FILE = "masked_payload.txt"
+FACTS_MASKED_FILE = "masked_facts.json"  # config-facts の、AI に渡す伏せた一覧(ADR-0223 決定4)
 
 KINDS = ("auto", "config", "show")
 MODES = ("both", "structured", "raw")
@@ -81,6 +88,8 @@ def add_parser(sub: Any) -> None:
     inner.add_parser("capabilities", help=_H["pilot_call.capabilities"], description=_H["pilot_call.capabilities"])
     cmp = inner.add_parser("compare", help=_H["pilot_call.compare"], description=_H["pilot_call.compare"])
     cmp.add_argument("--request", required=True, metavar="PATH", help=_H["pilot_call.request"])
+    facts = inner.add_parser("config-facts", help=_H["pilot_call.config_facts"], description=_H["pilot_call.config_facts"])
+    facts.add_argument("--request", required=True, metavar="PATH", help=_H["pilot_call.request"])
 
 
 def emit(obj: dict[str, Any]) -> None:
@@ -96,7 +105,10 @@ def capabilities() -> dict[str, Any]:
     return {
         "product": "DriftPilot",
         "version": driftpilot.__version__,
-        "operations": {"compare": {"protocol_versions": [1], "kind": "task", "llm": ["off"]}},
+        "operations": {
+            "compare": {"protocol_versions": [1], "kind": "task", "llm": ["off"]},
+            "config-facts": {"protocol_versions": [1], "kind": "task", "llm": ["off"]},
+        },
     }
 
 
@@ -249,6 +261,77 @@ def validate(path: str) -> CallRequest:
         exc.correlation_id = correlation_id_of(data)
         raise
     return CallRequest(correlation_id_of(data), before, after, output_dir, params)
+
+
+# --- config-facts の依頼の確かめ(ADR-0223 決定2) ---
+
+FACTS_PARAM_NAMES = ("platform",)
+
+
+@dataclass(frozen=True)
+class FactsRequest:
+    correlation_id: str
+    config: str
+    output_dir: Path
+    platform: str
+
+
+def _facts_input_path(data: dict[str, Any]) -> str:
+    """inputs は役 config が 1 つだけ(絶対パスで、ある普通のファイル)。"""
+    inputs = data.get("inputs")
+    invalid = Reject("invalid_inputs", _M["invalid_inputs_facts"])
+    if not isinstance(inputs, list) or len(inputs) != 1 or not isinstance(inputs[0], dict):
+        raise invalid
+    if inputs[0].get("role") != "config" or not _is_absolute(inputs[0].get("path")):
+        raise invalid
+    path = inputs[0]["path"]
+    if not Path(path).is_file():
+        raise Reject("input_not_found", _M["input_not_found"].format(path=path))
+    return path
+
+
+def _facts_platform(data: dict[str, Any]) -> str:
+    """params は platform だけ(auto 既定、または compare の kind: config で選べる機種の名前)。"""
+    raw = data.get("params", {})
+    if not isinstance(raw, dict):
+        raise Reject("invalid_param", _M["invalid_param"].format(name="params"))
+    if unknown := [name for name in raw if name not in FACTS_PARAM_NAMES]:
+        raise Reject(
+            "unknown_param", _M["unknown_param"].format(count=len(unknown), allowed=", ".join(FACTS_PARAM_NAMES))
+        )
+    invalid = Reject("invalid_param", _M["invalid_param"].format(name="platform"))
+    platform = raw.get("platform", AUTO_PLATFORM)
+    if not isinstance(platform, str) or not platform.strip():
+        raise invalid
+    platform = platform.strip()
+    if platform != AUTO_PLATFORM and platform not in CONFIG_PLATFORM_NAMES:
+        raise invalid
+    # 表がまだ無い機種(fujitsu_srs)は compare の kind: config と同じ決まりで断る(文は人向けの CLI の文)
+    probe = CompareRequest(SideInput("", ""), SideInput("", ""), kind="config", platform=platform)
+    if (problem := request_problem(probe)) is not None:
+        raise Reject("invalid_param", problem.message)
+    return platform
+
+
+def validate_config_facts(path: str) -> FactsRequest:
+    """config-facts の依頼のファイルを確かめる(compare の validate と同じ順)。合わなければ Reject。"""
+    data = _read_envelope(path)
+    try:
+        if data.get("schema") != SCHEMA or data.get("schema_version") != SCHEMA_VERSION:
+            raise Reject("unsupported_schema", _M["unsupported_schema"])
+        if data.get("operation") != "config-facts":
+            raise Reject("unsupported_operation", _M["unsupported_operation_facts"])
+        config = _facts_input_path(data)
+        output_dir = _output_dir(data)
+        if data.get("llm", "off") != "off":
+            raise Reject("llm_not_supported", _M["llm_not_supported"])
+        if data.get("secret_on_stdin", False) is not False:
+            raise Reject("secret_not_supported", _M["secret_not_supported"])
+        platform = _facts_platform(data)
+    except Reject as exc:
+        exc.correlation_id = correlation_id_of(data)
+        raise
+    return FactsRequest(correlation_id_of(data), config, output_dir, platform)
 
 
 # --- 標準入力の見張り(ADR-0203 決定7) ---
@@ -467,9 +550,81 @@ def run_compare_call(args: argparse.Namespace, stdin_reader: StdinReader | None 
         return _fail("internal_error", _M["internal_error"].format(error_type=type(exc).__name__), cid)
 
 
+# --- config-facts(ADR-0223) ---
+
+
+def _facts_failure(exc: FactsError) -> tuple[str, str]:
+    """一覧を作れなかったときの code と文。文に入れるのは区間の数か例外の型の名前だけ(config の中身は入れない)。"""
+    if exc.code == "multiple_segments":
+        return exc.code, _M["multiple_segments"].format(count=exc.count)
+    return "parse_failed", _M["parse_failed"].format(error_type=exc.error_type or "unknown")
+
+
+def run_config_facts_call(args: argparse.Namespace, stdin_reader: StdinReader | None = None) -> int:
+    try:
+        call = validate_config_facts(args.request)
+    except Reject as exc:
+        return _fail(exc.code, exc.message, exc.correlation_id)
+    cid = call.correlation_id
+    try:
+        words = load_extra_secret_words()
+    except SettingsError as exc:
+        return _fail("settings_unreadable", _M["settings_unreadable"].format(reason=exc), cid)
+    emit({"type": "accepted", "correlation_id": cid})
+
+    reader = stdin_reader if stdin_reader is not None else default_stdin_reader()
+    watcher = StdinWatcher(reader) if reader is not None else None
+    if watcher is not None:
+        watcher.start()
+    cancel = watcher.closed if watcher is not None else threading.Event()
+    written: list[Path] = []
+    try:
+        side = _side(call.config)
+        if cancel.is_set():
+            raise CompareCancelled("read")
+        facts = config_facts(side.text, side.name, side.notes, call.platform, words)
+        if cancel.is_set():  # 読み終えた後・書く前に見る(書きかけは残さない)
+            raise CompareCancelled("done")
+        written = write_files(
+            call.output_dir, [(RESULT_FILE, facts.result_text), (FACTS_MASKED_FILE, facts.masked_text)]
+        )
+        if cancel.is_set():
+            raise CompareCancelled("write")
+        emit(
+            {
+                "type": "result",
+                "correlation_id": cid,
+                "outcome": "ok",
+                "summary": {
+                    "platform": {"requested": call.platform, "used": facts.used},
+                    "counts": facts.counts,
+                    "unsent": facts.unsent,
+                    "fingerprints": facts.fingerprints,
+                },
+                "files": [str(p) for p in written],
+            }
+        )
+        return 0
+    except Reject as exc:
+        return _fail(exc.code, exc.message, cid)
+    except FactsError as exc:
+        code, message = _facts_failure(exc)
+        return _fail(code, message, cid)
+    except WriteFailed as exc:
+        return _fail("write_failed", _M["write_failed"].format(path=exc.path, reason=exc.reason), cid)
+    except CompareCancelled:
+        remove_files(written)
+        return _fail("cancelled", _M["cancelled_facts"], cid, EXIT_CANCELLED)
+    except Exception as exc:  # noqa: BLE001 - 受け付けた後の予期しない失敗は、書きかけを消して error の行で終える
+        remove_files(written)
+        return _fail("internal_error", _M["internal_error"].format(error_type=type(exc).__name__), cid)
+
+
 def run(args: argparse.Namespace, *, stdin_reader: StdinReader | None = None) -> int:
     """`pilot-call` の入口。終了コードを返す(commands._run から呼ばれる)。"""
     if args.pilot_call_command == "capabilities":
         emit(capabilities())
         return 0
+    if args.pilot_call_command == "config-facts":
+        return run_config_facts_call(args, stdin_reader)
     return run_compare_call(args, stdin_reader)

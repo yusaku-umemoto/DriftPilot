@@ -19,6 +19,8 @@ from driftpilot.config_parser.tracking import InterpretedLines
 _STANDARD_RANGES = ((1, 99), (1300, 1999))
 _EXTENDED_RANGES = ((100, 199), (2000, 2699))
 _PERSISTENT = "persistent"
+# ASA の `access-list <名前>` の塊の子の頭の語で、読めるもの(REQ-303)
+_ASA_KINDS = frozenset({"extended", "standard", "remark"})
 
 
 @dataclass
@@ -33,6 +35,9 @@ class _Ctx:
     current: Acl | None = None
     # 読んでいる最上位の行が子を持つか
     has_children: bool = False
+    # ASA と見立てた config か(REQ-303)と、読んでいる最上位の行の子の文
+    asa: bool = False
+    children: tuple[str, ...] = ()
 
 
 def _numbered_type(number: int) -> AclType | None:
@@ -134,6 +139,30 @@ def _numbered(m: re.Match[str], ctx: _Ctx) -> bool:
     return True
 
 
+def _asa_named(m: re.Match[str], ctx: _Ctx) -> bool:
+    """ASA の `access-list <名前>` の塊(木にする前にまとめた形。asa.py)を、名前(番号の名前を含む)の ACL にする。
+
+    ASA と見立てた config で、子が 1 つ以上あり、子の頭の語が全部 extended・standard・remark のどれかで、
+    remark でない子の頭の語が全部同じで、同じ名前がまだ無いときだけ読む。type は remark でない最初の子の頭の語
+    (全部 remark なら extended)、numbered は偽。ほかの塊(webtype・ethertype などの子がある、extended と standard が
+    混ざる)は読まず、見出しと子は未解釈のまま(REQ-303)。
+    """
+    heads = [words[0] if (words := child.split()) else "" for child in ctx.children]
+    if not ctx.asa or not heads or any(head not in _ASA_KINDS for head in heads):
+        return False
+    kinds = [head for head in heads if head != "remark"]
+    if len(set(kinds)) > 1:
+        return False
+    type_: AclType = "standard" if kinds and kinds[0] == "standard" else "extended"
+    return _open(ctx.acls, m["name"], type_, ctx)
+
+
+def _asa_entry(m: re.Match[str], ctx: _Ctx) -> bool:
+    """ASA の `access-list <名前>` の塊の子を、エントリとして出現順に足す(同じ文の子も両方)。seq は取らない。"""
+    ctx.current["entries"].append({"seq": None, "text": m["text"]})
+    return True
+
+
 def _entry(m: re.Match[str], ctx: _Ctx) -> bool:
     """名前付き ACL の子行をエントリとして出現順に足す。先頭の数字は seq、残りは text。"""
     seq = m["seq"]
@@ -186,6 +215,25 @@ PATTERNS: tuple[Pattern, ...] = (
         ),
     ),
     Pattern(
+        "acls.asa_named", "top", r"access-list (?P<name>\S+)", "acls[name]", "access-list OUT", _asa_named,
+        note=(
+            "手続き。Cisco ASA と見立てた config だけ(木にする前に、`access-list <名前> <文>` の行を名前ごとに"
+            "`access-list <名前>` の塊にまとめている。asa.py)。子が 1 つ以上あり、子の頭の語が全部 extended・standard・"
+            "remark のどれかで、remark でない子の頭の語が全部同じで、同じ名前がまだ acls に無いときだけ読む。"
+            "type は remark でない最初の子の頭の語(全部 remark なら extended)、numbered は偽(番号の名前も同じ)。"
+            "ほかの塊(webtype・ethertype などの子がある、extended と standard が混ざる)と、"
+            "ASA と見立てない config の 2 語だけの行は読まず、見出しと子は未解釈(ADR-0214 決定4、REQ-303)"
+        ),
+    ),
+    Pattern(
+        "acls.asa_entries", "access-list", r"(?P<text>\S.*)", "acls[name].entries", "extended permit ip any any",
+        _asa_entry,
+        note=(
+            "手続き。ASA の `access-list <名前>` の塊の子を、seq の無いエントリとして出現順に足す"
+            "(同じ文の子も両方。頭の数字は seq に取らない)。中身は分解しない(REQ-303)"
+        ),
+    ),
+    Pattern(
         "acls.entries", "ip access-list", r"(?:(?P<seq>\d+) )?(?P<text>\S.*)", "acls[name].entries",
         "10 permit ip any any", _entry,
         note="手続き。名前付き ACL の子行はすべてエントリとして出現順に持つ。中身は分解しない",
@@ -229,22 +277,25 @@ PATTERNS: tuple[Pattern, ...] = (
 _ENTRY_SCOPES = {
     "acls.named": "ip access-list",
     "acls.named_untyped": "ip access-list",
+    "acls.asa_named": "access-list",
     "ipv6_acls.named": "ipv6 access-list",
     "mac_acls.named": "mac access-list",
 }
 
 
 def extract_acls(
-    tree: HConfig, interpreted: InterpretedLines
+    tree: HConfig, interpreted: InterpretedLines, asa: bool = False
 ) -> tuple[dict[str, Acl], dict[str, Acl], dict[str, Acl]]:
     """IPv4(名前付き・番号付き)・IPv6・MAC の ACL を、名前(番号の文字列)をキーにした辞書の組で返す。
 
     同じカテゴリの中でキーが衝突したら、後の方は上書きせず unparsed に残す。
     同じ番号の `access-list` 行が複数あるのは追加であり、衝突ではない。
+    asa は Cisco ASA と見立てた config か。真のとき、`access-list <名前>` の塊(asa.py がまとめた形)を読む(REQ-303)。
     """
-    ctx = _Ctx({})
+    ctx = _Ctx({}, asa=asa)
     for block in tree.children:
         ctx.has_children = bool(block.children)
+        ctx.children = tuple(child.text for child in block.children)
         heading = apply_first(PATTERNS, "top", block.text, ctx)
         if heading is None:
             continue

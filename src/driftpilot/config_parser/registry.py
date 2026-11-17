@@ -2,7 +2,7 @@
 
 並びは parse_config の実行順(interfaces → vlans → acls → ospf(ospfv3 も) → bgp → spanning_tree → vrfs → static_routes
 → lines → global → certificates → device_settings → management → trustpoints → qos → eigrp → ipsec → route_policy
-→ vxlan → mlag → isis → bfd → route_lists → traffic_monitoring → multicast → sdwan → mpls_ptp)。
+→ vxlan → mlag → isis → bfd → route_lists → traffic_monitoring → multicast → sdwan → mpls_ptp → asa_nat)。
 各表の中の並びは優先順位なので変えない。
 """
 
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from driftpilot.config_parser import (
     acls,
+    asa_nat,
     bfd,
     bgp,
     certificates,
@@ -77,6 +78,7 @@ ALL_PATTERNS: tuple[Pattern, ...] = (
     *multicast.PATTERNS,
     *sdwan.PATTERNS,
     *mpls_ptp.PATTERNS,
+    *asa_nat.PATTERNS,
 )
 
 

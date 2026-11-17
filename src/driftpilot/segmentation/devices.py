@@ -8,6 +8,17 @@ FortiGate の形(`fw-01 #`・`fw-01 (root) #`)は `FORTIGATE_PROMPT` の host �
 アラクサラ AX の形(`AX_PROMPT`。`> `・`# `・`!OFFICE1# `・20文字までのホスト名)も同じ基準で見分け、host の部分でまとめる
 (`!` と設定モードは名前に含めない。裸のプロンプトは名前が空の 1 台。ADR-0207)。
 
+Cisco IOS-XR の形(`XR_PROMPT`。`RP/0/RSP0/CPU0:pe1#`・`RP/0/RP0/CPU0:pe1(config-if)#`)も同じ基準で見分け、host の部分でまとめる
+(場所と設定モードは名前に含めない。場所だけが違う形は 1 台。ADR-0211 決定7)。XR の形の行は XR の規則だけで読み、
+一般の候補・FortiGate の形・AX の形では数えない(ホスト名の短い `RP/0/RSP0/CPU0:R1#` を二重に数えないため)。
+
+括弧の形(`BRACKET_PROMPT`。ヤマハの `[RTX1210] > `・`[RTX1210] # `、Check Point Gaia の expert の `[Expert@gw-lab1:0]# `)も同じ基準で見分け、
+括弧の中をホスト名にしてまとめる(`>` と `#` が混ざっても同じ名前の 1 台。ADR-0213 決定8)。FortiGate の形は、`[` で始まるホスト名を数えない。
+
+Cisco ASA の形(`ASA_PROMPT`。`fw-01/pri/act# `・`fw-01/sec/stby# `・`fw-01/ctx1/pri/act(config-if)# `)も同じ基準で見分ける。
+機器の名前は行の頭から状態の語の終わりまで(`fw-01/pri/act`。設定モード・終端の記号・空白は含まない。一般の候補で決まった短い ASA のプロンプトの名前と同じ決まり)。
+優先度か状態が違う形(`fw-01/pri/act` と `fw-01/sec/stby`)は別の機器(フェイルオーバーの 2 台。ADR-0214 決定7)。
+
 今の区間の切り分け(`detect_prompt`・`split_log`)は変えない。ここは比較の窓の知らせと書き出しのためだけの部品。
 行の中身は変えない(見分けるときだけ、ページ送りの印と制御文字を外した行を見る)。
 """
@@ -17,17 +28,22 @@ import re
 from dataclasses import dataclass
 
 from driftpilot.segmentation.splitter import (
+    ASA_PROMPT,
     AX_PROMPT,
+    BRACKET_PROMPT,
     CANDIDATE,
     COMMAND_SHAPED,
     CONTROL,
-    FORTIGATE_PROMPT,
     PAGER,
+    _asa_command,
     _erase_pager,
+    _fortigate_match,
     _host,
     _host_head_ok,
     _strip_dollar,
     _within_limit,
+    _xr_command,
+    _xr_match,
 )
 
 # hostname の末尾に空白なしで付いたかっこ書き 1 つ(Cisco 系の設定モードのプロンプト: edge-a(config-if))
@@ -74,6 +90,8 @@ def _general_hosts(plains: list[str]) -> list[str]:
     freq: collections.Counter = collections.Counter()
     score: collections.Counter = collections.Counter()
     for line in plains:
+        if _xr_match(line):
+            continue  # XR の形の行は XR の規則だけで数える
         m = CANDIDATE.match(line)
         if not m or not _within_limit(m.group("prefix")):
             continue
@@ -90,7 +108,9 @@ def _fortigate_hosts(plains: list[str]) -> list[str]:
     total: collections.Counter = collections.Counter()
     score: collections.Counter = collections.Counter()
     for line in plains:
-        m = FORTIGATE_PROMPT.match(line)
+        if _xr_match(line):
+            continue
+        m = _fortigate_match(line)
         if not m:
             continue
         host = m.group("host")
@@ -100,11 +120,52 @@ def _fortigate_hosts(plains: list[str]) -> list[str]:
     return [host for host in total if score[host] >= 1 and total[host] >= 2]
 
 
+def _bracket_hosts(plains: list[str]) -> list[str]:
+    """括弧の形のプロンプトで機器と決まった名前(括弧の中。ログに最初に出た順)。`>` と `#` の違いは名前に含めない。"""
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in plains:
+        if _xr_match(line):
+            continue
+        m = BRACKET_PROMPT.match(line)
+        if not m:
+            continue
+        host = m.group("host")
+        total[host] += 1
+        if COMMAND_SHAPED.match(m.group("rest").strip()):
+            score[host] += 1
+    return [host for host in total if score[host] >= 1 and total[host] >= 2]
+
+
+def _asa_name(m: re.Match) -> str:
+    """ASA の形の行の機器の名前: 行の頭から状態の語の終わりまで(`fw-01/pri/act`)。設定モード・終端の記号・空白は含まない。"""
+    return m.group(0)[: m.end("state")]
+
+
+def _asa_hosts(plains: list[str]) -> list[str]:
+    """ASA の形のプロンプトで機器と決まった名前(ログに最初に出た順)。優先度か状態が違う形は別の名前。"""
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in plains:
+        if _xr_match(line):
+            continue
+        m = ASA_PROMPT.match(line)
+        if not m:
+            continue
+        name = _asa_name(m)
+        total[name] += 1
+        if COMMAND_SHAPED.match(_asa_command(m)):
+            score[name] += 1
+    return [name for name in total if score[name] >= 1 and total[name] >= 2]
+
+
 def _ax_hosts(plains: list[str]) -> list[str]:
     """AX の形のプロンプトで機器と決まった名前(ログに最初に出た順)。裸のプロンプトの名前は空の文字列。"""
     total: collections.Counter = collections.Counter()
     score: collections.Counter = collections.Counter()
     for line in plains:
+        if _xr_match(line):
+            continue
         m = AX_PROMPT.match(line)
         if not m:
             continue
@@ -117,16 +178,41 @@ def _ax_hosts(plains: list[str]) -> list[str]:
     return [host for host in total if score[host] >= 1 and total[host] >= 2]
 
 
+def _xr_hosts(plains: list[str]) -> list[str]:
+    """XR の形のプロンプトで機器と決まった名前(ログに最初に出た順)。場所と設定モードは名前に含めない。"""
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in plains:
+        m = _xr_match(line)
+        if not m:
+            continue
+        host = m.group("host")
+        total[host] += 1
+        if COMMAND_SHAPED.match(_xr_command(m)):
+            score[host] += 1
+    return [host for host in total if score[host] >= 1 and total[host] >= 2]
+
+
 def _line_host(plain: str, known: frozenset[str]) -> str | None:
     """この行が、機器と決まった名前のプロンプトの行ならその名前。そうでなければ None。"""
+    m = _xr_match(plain)
+    if m:
+        # XR の形の行は XR の規則だけで読む(ほかの規則へは進まない)
+        return m.group("host") if m.group("host") in known else None
     m = CANDIDATE.match(plain)
     if m and _within_limit(m.group("prefix")):
         key = device_key(m.group("prefix"))
         if _host_head_ok(key) and key in known:
             return key
-    m = FORTIGATE_PROMPT.match(plain)
+    m = _fortigate_match(plain)
     if m and m.group("host") in known:
         return m.group("host")
+    m = BRACKET_PROMPT.match(plain)
+    if m and m.group("host") in known:
+        return m.group("host")
+    m = ASA_PROMPT.match(plain)
+    if m and _asa_name(m) in known:
+        return _asa_name(m)
     m = AX_PROMPT.match(plain)
     if m and _host_head_ok(m.group("host")) and m.group("host") in known:
         return m.group("host")
@@ -135,7 +221,7 @@ def _line_host(plain: str, known: frozenset[str]) -> str | None:
 
 def _hosts_in_order(lines: list[str]) -> tuple[list[str], list[str]]:
     plains = [_plain(line) for line in lines]
-    found = set(_general_hosts(plains)) | set(_fortigate_hosts(plains)) | set(_ax_hosts(plains))
+    found = set(_general_hosts(plains)) | set(_fortigate_hosts(plains)) | set(_xr_hosts(plains)) | set(_bracket_hosts(plains)) | set(_asa_hosts(plains)) | set(_ax_hosts(plains))
     known = frozenset(found)
     order: list[str] = []
     for plain in plains:

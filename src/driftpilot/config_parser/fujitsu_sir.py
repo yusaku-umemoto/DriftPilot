@@ -52,6 +52,7 @@ from driftpilot.config_parser.bgp import _asn
 from driftpilot.config_parser.device_settings import has_secret
 from driftpilot.config_parser.flat_tree import DuplicateLine, FlatNode, FlatTree, expand_indexes
 from driftpilot.config_parser.ir import (
+    Acl,
     Bgp,
     Global,
     Interface,
@@ -61,6 +62,7 @@ from driftpilot.config_parser.ir import (
     RouteMap,
     SdwanBlock,
     StaticRoute,
+    Vlan,
     Vrrp,
     new_bgp,
     new_bgp_neighbor,
@@ -814,10 +816,11 @@ def extract(
     tree: FlatTree, interpreted: InterpretedLines
 ) -> tuple[
     dict[str, Interface], list[StaticRoute], Bgp | None, dict[str, Ospf], Ipsec | None, dict[str, SdwanBlock],
-    dict[str, RouteMap], dict[str, PrefixList], dict[str, PrefixList], Global, dict[str, Any], list[DuplicateLine],
+    dict[str, RouteMap], dict[str, PrefixList], dict[str, PrefixList], Global, dict[str, Vlan], dict[str, Acl],
+    dict[str, Any], list[DuplicateLine],
 ]:
-    """(interfaces, static_routes, bgp, ospf, ipsec, sdwan, route_maps, prefix_lists, ipv6_prefix_lists, global,
-    vendor_specific["fujitsu_sir"], 値の食い違い) を返す。
+    """(interfaces, static_routes, bgp, ospf, ipsec, sdwan, route_maps, prefix_lists, ipv6_prefix_lists, global, vlans, acls,
+    vendor_specific["fujitsu_sir"], 値の食い違い) を返す。acls はいつも空の辞書(Junos だけが写す)。vlans はいつも空の辞書(REQ-299。FortiSwitch だけが読む)。
 
     ospf は読まない(いつも空の辞書。FortiGate と同じ形で返すため。REQ-192)。ipsec も読まない(いつも None。REQ-193)。
     sdwan も読まない(いつも空の辞書。REQ-194)。route_maps・prefix_lists・ipv6_prefix_lists も読まない(いつも空の辞書。REQ-195)。
@@ -887,4 +890,4 @@ def extract(
         "interfaces": vendor, "static_routes": route_details, "bgp_neighbors": numbers, "remotes": remotes,
         "scopes": scopes, "settings": settings.generic(),
     }
-    return interfaces, routes, bgp, {}, None, {}, {}, {}, {}, new_global(), vendor_specific, conflicts
+    return interfaces, routes, bgp, {}, None, {}, {}, {}, {}, new_global(), {}, {}, vendor_specific, conflicts

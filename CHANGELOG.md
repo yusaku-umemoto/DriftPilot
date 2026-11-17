@@ -6,6 +6,15 @@
 
 （なし）
 
+## 0.2.7
+
+- **安全の修正:** `snmp-server host` の行で、コミュニティ名の前に別の語が付く形（Aruba AOS-CX の `… trap version v2c community <値>`、AOS-Switch の `… community "<値>"`、Cisco IOS-XR の `… encrypted <値>`・`… clear <値>`、`use-vrf`・`source-interface`・`udp-port` などの語が前に来る形）では、コミュニティ名を構造化比較の差分の欄に入れて AI に送っていました。コミュニティ名を伏せるか、行を送らないようにしました
+- **安全の修正:** 伏せた行に残る `key=value`、行の途中の秘密のヘッダー（`Authorization`・`X-API-Key`・`Cookie` など）、コマンドの秘密の引数（`curl -u`・`sshpass -p`・`redis-cli -a`・`--token` など）、行のどこにあってもパスワードのハッシュ、シェルの区切り記号の直後のコマンド、ログの行の頭（時刻・ホスト名・プロンプト）の後ろの秘密、行をまたいで割れた秘密の続きを、伏せるか送らないようにしました
+- 新しく読める機種: ヤマハ RTX（専用の読み方 `yamaha`。`pp select`・`tunnel select` の範囲、インターフェース）、Juniper Junos（`juniper_junos`。brace と set のどちらでも同じ木。ホスト名・インターフェース・経路・BGP・ポリシー・フィルター）、Palo Alto PAN-OS（`paloalto_panos`。XML・set・brace のどれでも同じ木。ホスト名・インターフェース・経路）。Junos と PAN-OS は機種の自動判定にも足しました
+- Cisco ASA（行頭の `:`・1 行ずつのバナー・`access-list` のまとめ・`nameif`・`security-level` など）、HPE Aruba AOS-Switch（`exit` の行・`;` の行・1 行のバナー、VLAN の名前・SVI のアドレス・ポートの名前・停止・速度、ポートの VLAN の所属と `trunk`）、Aruba AOS-CX（`vlan access`・`vlan trunk`・`lag` など）、FortiSwitch（`config switch …`）を、止まらずに読み、共通の項目で比べられるようにしました。FortiOS の書式の断片は FortiGate として自動で見分けます
+- 端末のログの区切りに、ヤマハの括弧のプロンプト（`[RTX1210] > ` など）と Cisco ASA のプロンプト（`<ホスト名>/pri/act#` など）を足しました
+- ほかの Pilot から呼ぶ入口に、1 つの config を「道すじ・値」の一覧にする操作（`pilot-call config-facts`）を足しました
+
 ## 0.2.6
 
 - 比較の窓の AI の欄で、今表示している差分（単純比較・構造化比較のタブ、選んだカテゴリ）について質問できるようにしました。「AI で解析」は「定型の質問で解析」になりました。質問は、自動送信がオンでも送る前に確認を出します

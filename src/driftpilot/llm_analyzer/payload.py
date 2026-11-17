@@ -1039,3 +1039,77 @@ def masked_body(sections: Sequence[MaskedSection], *, extra_words: Sequence[str]
         parts.append("\n".join([*heading, payload.body]))
     first = MASKED_FINGERPRINT_LINE.format(digest=masking_fingerprint().digest)
     return MaskedBody("\n\n".join([first, *parts]) + "\n", not_sent)
+
+
+# --- config の「道すじ・値」の一覧を伏せる入口(ADR-0223 決定4。REQ-319) ---
+
+
+@dataclass(frozen=True)
+class FactValue:
+    """FactMasker.value の答え。sent が偽なら送らない(value は None)。dropped は送らなかった要素・値の数。
+
+    値 1 つの項目は、送れなければ dropped=1。リストの項目は、落とした要素の数が dropped で、残りが無ければ sent は偽。
+    """
+
+    sent: bool
+    value: Any
+    dropped: int
+
+
+class FactMasker:
+    """config の「道すじ・値」の一覧の値を、構造化の差分の値を AI に送るときと同じ決まりで伏せる(ADR-0223 決定4)。
+
+    今の関数(_mask_tree・_block_hit・_key_in_block・_judge_line・_judge_parent)を呼んで包むだけで、新しい決まりは持たない。
+    判定器は 1 つ(同じ値は同じ <secret:N>)。lines は区間を選んだ後の本文の行(割れた秘密の行のかたまり・PEM のブロックを求める)。
+    """
+
+    def __init__(self, lines: Sequence[str], extra_words: Sequence[str] = ()) -> None:
+        self._masker = Masker(secret_words=normalize_words(extra_words))
+        self._sides = _Sides((), lines, (), lines, self._masker)
+        self._rec = _Recorder()
+
+    def value(self, value: Any, path: str) -> FactValue:
+        """葉の値 1 つ(値、または値だけのリスト)を伏せる。path は葉の総称のパス(fields.py の書き方)。"""
+        masked = _mask_tree(value, path, self._masker, self._sides, self._rec)
+        if masked is _DROP or masked is None:
+            return FactValue(False, None, 1)
+        if isinstance(value, (list, tuple)):
+            dropped = len(value) - len(masked)
+            return FactValue(bool(masked), masked if masked else None, dropped)
+        return FactValue(True, masked, 0)
+
+    def name_in_block(self, name: str) -> bool:
+        """名前(ACL の名前・ipsec の塊の鍵の最後の語)がブロックの行の中にあれば、記録して True(_name_in_block と同じ判定)。"""
+        hit = _block_hit(name, self._sides, partial=True)
+        if hit is None:
+            return False
+        self._sides.record_block(hit, self._rec)
+        return True
+
+    def key_in_block(self, key: str) -> bool:
+        """ipsec の塊の鍵の最後の語がブロックの行の中にあれば、記録して True(_key_in_block と同じ)。"""
+        return _key_in_block(key, self._sides, self._rec)
+
+    def unparsed(self, lines: Sequence[str]) -> tuple[list[str], int] | None:
+        """読めなかった行(祖先の行から順、最後がその行)を判定する(_structured_line の unparsed の枝と同じ順)。
+
+        送る行の並びと、送れず省略の文に置き換えた祖先の数を返す。その行そのものが送れなければ None。
+        """
+        if not lines:
+            return None
+        *parents, text = lines
+        masked = _judge_line(text, tuple(p.strip() for p in parents), self._masker, self._sides, self._rec)
+        if masked is _DROP:
+            return None
+        shown: list[str] = []
+        omitted = 0
+        for depth, parent in enumerate(parents):
+            judged = _judge_parent(
+                parent, tuple(p.strip() for p in parents[:depth]), self._masker, self._sides, self._rec
+            )
+            if judged is None:
+                shown.append(_M["omitted"])
+                omitted += 1
+            else:
+                shown.append(judged.strip())
+        return [*shown, str(masked).strip()], omitted

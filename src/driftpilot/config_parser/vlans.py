@@ -39,6 +39,8 @@ class _Ctx:
     vn_segment: int | None = None
     options: list[str] = field(default_factory=list)
     has_children: bool = False
+    # HPE Aruba AOS-Switch と見立てた config か(ADR-0228 決定 3、REQ-332)。`name "<名前>"` の引用符を外す
+    aos_switch: bool = False
 
 
 def _definition(m: re.Match[str], ctx: _Ctx) -> bool:
@@ -94,7 +96,10 @@ def _name(m: re.Match[str], ctx: _Ctx) -> bool:
     """最初の name だけを読む。二度目以降は上書きせず読まない。"""
     if ctx.name is not None:
         return False
-    ctx.name = m["text"]
+    text = m["text"]
+    if ctx.aos_switch and len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    ctx.name = text
     return True
 
 
@@ -164,7 +169,8 @@ PATTERNS: tuple[Pattern, ...] = (
     ),
     Pattern(
         "vlans.name", "vlan", r"name (?P<text>.+)", "vlans[id].name", "name USERS", _name,
-        note="最初の name だけを読む",
+        note="最初の name だけを読む。HPE Aruba AOS-Switch と見立てた config だけ、名前の前後の `\"` を外す"
+        "(`name \"users\"` → `users`。ADR-0228 決定 3、REQ-332)",
     ),
     Pattern(
         "vlans.trunk_group", "vlan", r"trunk group (?P<name>\S+)", "vlans[id].trunk_groups",
@@ -192,15 +198,16 @@ PATTERNS: tuple[Pattern, ...] = (
 )
 
 
-def extract_vlans(tree: HConfig, interpreted: InterpretedLines) -> dict[str, Vlan]:
+def extract_vlans(tree: HConfig, interpreted: InterpretedLines, *, aos_switch: bool = False) -> dict[str, Vlan]:
     """tree の `vlan` 行から、VLAN ID の文字列をキーにした Vlan の辞書を返す。
 
     すでに定義されたIDと重なる行は上書きせず、その行と子行を unparsed に残す。
+    aos_switch は、HPE Aruba AOS-Switch と見立てた config か(`name "<名前>"` の引用符を外す。ADR-0228 決定 3、REQ-332)。
     """
     vlans: dict[str, Vlan] = {}
     defined: set[str] = set()
     for block in tree.children:
-        ctx = _Ctx(vlans, defined)
+        ctx = _Ctx(vlans, defined, aos_switch=aos_switch)
         heading = apply_first(PATTERNS, "top", block.text, ctx)
         if heading is None:
             continue

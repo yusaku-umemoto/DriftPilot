@@ -1,5 +1,5 @@
 /*
- * pilot.css — Pilot シリーズ（DriftPilot・ConvoyPilot・CommandPilot）の画面の見た目の部品（ADR-0074 決定4 / REQ-103）。
+ * pilot.css — Pilot シリーズ（DriftPilot・UnisonPilot・CommandPilot）の画面の見た目の部品（ADR-0074 決定4 / REQ-103）。
  * 使い分けと言葉づかいは docs/notes/pilot-ui-standard.md。ほかの製品は、この文書とこのファイルをコピーして使う。
  *
  * - 色・文字・余白は CSS の変数（--pilot- で始まる名前）で持つ。:root にライト、prefers-color-scheme: dark にダーク。

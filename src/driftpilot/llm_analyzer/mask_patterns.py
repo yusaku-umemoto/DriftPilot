@@ -30,6 +30,18 @@ ADR-0211 決定6(REQ-296)で、IOS-XR の伏せる穴3つ(`snmp-server vrf` の�
 ADR-0214 決定6(REQ-307)で、ASA の伏せる穴2つ(行の中に鍵を書く `aaa-server … host <アドレス> <鍵>`・
 `secondary-pre-fill-username … use-common-password <値>`)の頭の形(GH-25・26)を足した。これらの行も表に mask の行を持たず、
 送らない側に落ちる。
+ADR-0215 決定2(REQ-306)で、ログの行の頭(時刻・ホスト名・プロセス名・`+ `・プロンプトなど)の形(下の `LOG_PREFIXES`)を足した。
+masking.py は、今の判定で「そのまま送る」になった行だけ、この形を行の頭から外して判定し直す。頭を外す手順と、行の途中の
+`<名前>=<値>` の決まり(masking.py)の版の名前が `LOG_LINE_RULES` で、masking.py の決まりを変えたら上げる(指紋に入れる)。
+ADR-0219 決定6(REQ-315)で、伏せた行にも `<名前>=<値>` を当て、行のどこにあっても秘密のヘッダー(`Authorization:` など)と
+コマンドの秘密の引数(`curl -u` など)を伏せるため、名前の一覧(下の `SECRET_HEADER_NAMES`・`AUTH_SCHEMES`・
+`COMMAND_SECRET_OPTIONS`)を足した。三つとも指紋に入れ、`LOG_LINE_RULES` を `log-line-v2` に上げた(表の件数は変えない)。
+ADR-0220 決定8(REQ-316)で、行のどこにあってもパスワードのハッシュ(`$6$<salt>$<hash>` など)を伏せるため、方式の一覧
+(下の `CRYPT_HASH_SCHEMES`)とハッシュの形(`CRYPT_HASH`)を足した。`COMMAND_SECRET_OPTIONS` の `curl -U`・`curl -b`・
+`redis-cli -a` には続け書きを認めた。足した一覧・形と変えた続け書きを指紋に入れ、`LOG_LINE_RULES` を `log-line-v3` に上げた
+(表の件数は変えない)。
+ADR-0221 決定1〜4(REQ-317)で、コマンドの語の見分け(masking.py。区切りの記号の直後のコマンド)と、ハッシュの前の文字の決まり
+(`CRYPT_HASH`。英数字と `_` 以外なら当たる)を広げ、`LOG_LINE_RULES` を `log-line-v4` に上げた(表の件数は変えない)。
 """
 
 import hashlib
@@ -1254,8 +1266,111 @@ GATE_HEAD_SCOPES: dict[str, str] = {
     "GH-22": "snmp-server vrf",
 }
 
+# ログの行の頭の形(ADR-0215 決定2。REQ-306)。(ID, 正規表現, 種類)。masking.py が「そのまま送る」になった行の頭(字下げの後ろ)から、
+# この並びの順に試して、当たった形を外す。当たる形が無くなるまで繰り返す(同じ形が続いてもよい)。種類は次のとおり。
+#   time: 時刻の形。外すと「時刻の後」の状態になる
+#   after_time: 「時刻の後」の状態(after_time の形を外した後も続く)のときだけ試す形。any の形を外すと状態は消える
+#   any: いつでも試す形
+# レベルの語(LP-05)は、ホスト名とプロセス名(LP-06)より前に置く(`… ERROR Authorization: …` の ERROR をホスト名に取らせないため)。
+# 伏せる・送らないの判定は変えない(外した後の残りを今の判定にかけるだけ)。
+LOG_PREFIXES: tuple[tuple[str, str, str], ...] = (
+    (
+        "LP-01",
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)? ",
+        "time",
+    ),  # syslog の時刻(journalctl の short-precise の小数の秒も)
+    ("LP-02", r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})? ", "time"),  # ISO 8601(short-iso の時差も)
+    ("LP-03", r"\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[^\]]*\] ", "time"),  # 角かっこの時刻
+    ("LP-04", r"(?:stdout|stderr) [FP] ", "after_time"),  # kubectl logs・コンテナの実行環境
+    ("LP-05", r"(?i:INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL|CRITICAL):? ", "after_time"),  # ログのレベルの語
+    ("LP-06", r"[\w.-]+ [\w./-]+(?:\[\d+\])?: ", "after_time"),  # 時刻の後ろのホスト名とプロセス名
+    ("LP-07", r"[\w./-]+\[\d+\]: ", "any"),  # プロセス名だけ
+    ("LP-08", r"\+{1,3} ", "any"),  # bash -x の印
+    ("LP-09", r"[$#>] ", "any"),  # シェルのプロンプト
+    ("LP-10", r"[\w.-]+@[\w.-]+:[^\s$#]*[$#] ", "any"),
+    ("LP-11", r"\[[\w.-]+@[\w.-]+ [^\]]*\][$#] ", "any"),
+    ("LP-12", r"\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \[\w+\] \d+#\d+: (?:\*\d+ )?", "any"),  # nginx の error.log
+    (
+        "LP-13",
+        r"(?=\[\w{3} \w{3} {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4}\])(?:\[[^\]]*\] )+",
+        "any",
+    ),  # Apache の error_log(最初の角かっこが時刻の形のときだけ)
+    ("LP-14", r"[\w.-]+ +\| ", "any"),  # docker compose logs
+    ("LP-15", r"<\d{1,3}>\d{1,2} \S+ \S+ \S+ \S+ \S+ (?:-|(?:\[[^\]]*\])+) ", "any"),  # RFC 5424 の syslog
+)
+LOG_PREFIX_KINDS = ("time", "after_time", "any")
+# 頭を外す手順と、行の途中の key=value・ヘッダー・引数の決まり(masking.py)の版の名前。決まりを変えたら上げる。masking.py からは読まない
+LOG_LINE_RULES = "log-line-v4"
+
+# 行のどこにあっても値を伏せる秘密のヘッダーの名前(ADR-0219 決定2。REQ-315)。大文字・小文字を問わない。
+# このほかに、`-` を 1 つ以上含み、`-` で区切った最後の部分が masking.py の `_KV_SECRET_PARTS` の語の名前(`X-API-Key` など)も当てる
+SECRET_HEADER_NAMES: tuple[str, ...] = ("Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie")
+# ヘッダーの値の最初の語がこれなら、その語を残して後ろを伏せる(ADR-0219 決定2)。大文字・小文字を問わない
+AUTH_SCHEMES: tuple[str, ...] = ("Bearer", "Basic", "Token", "Digest", "Negotiate", "NTLM", "ApiKey")
+# コマンドの秘密の引数(ADR-0219 決定3)。(コマンド, 引数, 伏せ方, 続け書きを認めるか)。
+# コマンドの語(前に `/` で区切ったパスが付いてもよい)が同じ行の前のほうにあるときだけ、その右の引数に当てる。
+# 伏せ方: all = 値の全部 / after-colon = 値の最初の `:` より後ろ(`:` が無ければ何もしない) /
+# if-equals = 値に `=` があれば値の全部(無ければ何もしない)。続け書きは `-u<値>` の形(短い引数だけ)。長い引数は `--user=<値>` の形も当てる
+COMMAND_SECRET_OPTIONS: tuple[tuple[str, str, str, bool], ...] = (
+    ("curl", "-u", "after-colon", True),
+    ("curl", "--user", "after-colon", False),
+    ("curl", "-U", "after-colon", True),
+    ("curl", "--proxy-user", "after-colon", False),
+    ("curl", "-b", "if-equals", True),
+    ("curl", "--cookie", "if-equals", False),
+    ("sshpass", "-p", "all", True),
+    ("redis-cli", "-a", "all", True),
+    ("redis-cli", "--pass", "all", False),
+)
+OPTION_MASK_MODES = ("all", "after-colon", "if-equals")
+
+# 行のどこにあっても 1 つの記号にするパスワードのハッシュの方式(ADR-0220 決定1。REQ-316)。`$<方式>$` の後ろに続きが付く形だけ当てる。
+# `[1-9]` は 1 桁の方式(`$1$`・`$5$`・`$6$` など)。長い方式を先に並べる(`argon2id` を `argon2i` と取り違えない)
+CRYPT_HASH_SCHEMES: tuple[str, ...] = (
+    "pbkdf2-sha512",
+    "pbkdf2-sha256",
+    "pbkdf2-sha1",
+    "pbkdf2",
+    "argon2id",
+    "argon2i",
+    "argon2d",
+    "scrypt",
+    "apr1",
+    "sha1",
+    "md5",
+    "gy",
+    "y",
+    "2a",
+    "2b",
+    "2x",
+    "2y",
+    "[1-9]",
+)
+_HASH_TAIL = r"[A-Za-z0-9./+=,-]"
+
+
+def _crypt_hash_regex(schemes: tuple[str, ...]) -> str:
+    """方式の一覧から、ハッシュの形を作る。`$<方式>$` + (`$` を含む続き) + 最後の `$` の後ろが 8 文字以上。
+
+    前の文字が英数字と `_` でない(行の頭も含む。ADR-0221 決定2)。最後の先読みで続きの終わりで切る(最後の部分が 8 文字未満の `$1$x$abc` は
+    当たらない)。当たった全体(`$<方式>$…`)を 1 つの記号にする。
+    """
+    return (
+        r"(?<![A-Za-z0-9_])\$(?P<scheme>"
+        + "|".join(schemes)
+        + r")\$(?:"
+        + _HASH_TAIL
+        + r"*\$)+"
+        + _HASH_TAIL
+        + r"{8,}(?![A-Za-z0-9./+=,$-])"
+    )
+
+
+CRYPT_HASH = _crypt_hash_regex(CRYPT_HASH_SCHEMES)
+
 _FORM_ID = re.compile(r"UNS-\d{2,}")
 _GATE_HEAD_ID = re.compile(r"GH-\d{2,}")
+_LOG_PREFIX_ID = re.compile(r"LP-\d{2,}")
 
 
 @lru_cache(maxsize=None)
@@ -1321,6 +1436,83 @@ def validate_gate_heads(
             raise ValueError(f"{head_id}: 場所の条件が空か、前後に空白があります")
 
 
+def validate_log_prefixes(prefixes: tuple[tuple[str, str, str], ...] = LOG_PREFIXES) -> None:
+    """ログの行の頭の形を検査する。ID の形・重複、正規表現が読めること、空の文字列に当たらないこと、種類が3つのどれかであること。"""
+    seen: set[str] = set()
+    for prefix_id, regex, kind in prefixes:
+        if not _LOG_PREFIX_ID.fullmatch(prefix_id):
+            raise ValueError(f"ログの行の頭の形の ID の形が不正です: {prefix_id}")
+        if prefix_id in seen:
+            raise ValueError(f"ログの行の頭の形の ID が重複しています: {prefix_id}")
+        seen.add(prefix_id)
+        try:
+            pattern = compiled(regex)
+        except re.error as exc:
+            raise ValueError(f"{prefix_id}: 正規表現が読めません: {exc}") from exc
+        if pattern.match("") is not None:
+            raise ValueError(f"{prefix_id}: 空の文字列に当たる形は外す手順が進みません")
+        if kind not in LOG_PREFIX_KINDS:
+            raise ValueError(f"{prefix_id}: 種類は time・after_time・any のどれかにしてください: {kind!r}")
+
+
+def validate_midline_names(
+    header_names: tuple[str, ...] = SECRET_HEADER_NAMES,
+    schemes: tuple[str, ...] = AUTH_SCHEMES,
+    options: tuple[tuple[str, str, str, bool], ...] = COMMAND_SECRET_OPTIONS,
+) -> None:
+    """ヘッダーの名前・認証の方式の語・コマンドの秘密の引数の一覧を検査する(ADR-0219 決定6)。
+
+    名前と語は空でなく、空白を含まず、大文字・小文字を無視して重ならないこと。引数は `-` で始まり、伏せ方が3つのどれかで、
+    続け書きは短い引数(`--` で始まらないもの)だけ、(コマンド, 引数)が重ならないこと。
+    """
+    for label, names in (("ヘッダーの名前", header_names), ("認証の方式の語", schemes)):
+        folded = [name.lower() for name in names]
+        if any(not name or name != name.strip() or len(name.split()) != 1 for name in names):
+            raise ValueError(f"{label}は空白を含まない1語にしてください")
+        if len(set(folded)) != len(folded):
+            raise ValueError(f"{label}が重複しています(大文字・小文字は区別しません)")
+    for name in header_names:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", name):
+            raise ValueError(f"ヘッダーの名前の形が不正です: {name}")
+    seen: set[tuple[str, str]] = set()
+    for command, option, mode, attached in options:
+        if not command or command != command.strip() or len(command.split()) != 1 or "/" in command:
+            raise ValueError(f"コマンドの名前の形が不正です: {command!r}")
+        if not re.fullmatch(r"-[A-Za-z]|--[A-Za-z][\w-]*", option):
+            raise ValueError(f"引数は `-` で始まる形にしてください: {option!r}")
+        if mode not in OPTION_MASK_MODES:
+            raise ValueError(f"{command} {option}: 伏せ方は all・after-colon・if-equals のどれかにしてください: {mode!r}")
+        if attached and option.startswith("--"):
+            raise ValueError(f"{command} {option}: 続け書きは短い引数だけに認めます")
+        if (command, option) in seen:
+            raise ValueError(f"コマンドの引数が重複しています: {command} {option}")
+        seen.add((command, option))
+
+
+def validate_crypt_hash(schemes: tuple[str, ...] = CRYPT_HASH_SCHEMES, regex: str | None = None) -> None:
+    """ハッシュの方式の一覧と形を検査する(ADR-0220 決定8)。
+
+    方式は空でなく、空白を含まず、重ならないこと。形は読めて、空の文字列に当たらず、例のハッシュに当たり、短い形(`$1$2`)に当たらないこと。
+    regex が None のときは、schemes から作り直した形で調べる。
+    """
+    if any(not scheme or scheme != scheme.strip() or len(scheme.split()) != 1 for scheme in schemes):
+        raise ValueError("ハッシュの方式は空白を含まない1語にしてください")
+    if len(set(schemes)) != len(schemes):
+        raise ValueError("ハッシュの方式が重複しています")
+    if regex is None:
+        regex = _crypt_hash_regex(schemes)
+    try:
+        pattern = compiled(regex)
+    except re.error as exc:
+        raise ValueError(f"ハッシュの形の正規表現が読めません: {exc}") from exc
+    if pattern.search("") is not None:
+        raise ValueError("ハッシュの形が空の文字列に当たります")
+    if pattern.search("x:$6$EXAMPLEsalt$EXAMPLEONLYhash") is None:
+        raise ValueError("ハッシュの形が例のハッシュに当たりません")
+    if pattern.search("$1$2") is not None:
+        raise ValueError("ハッシュの形が短い形(最後の部分が 8 文字未満)に当たります")
+
+
 def validate_forms(
     forms: tuple[tuple[str, str], ...] = UNSENT_FORMS, heads: tuple[tuple[str, str], ...] = UNSENT_FORM_HEADS
 ) -> None:
@@ -1365,7 +1557,7 @@ def masking_fingerprint(patterns: tuple[MaskPattern, ...] | None = None) -> Mask
     """id / scope / match / kind を表の順序のまま並べてハッシュする(ADR-0011 の指紋と同じ考え方)。
 
     形の一覧(id / 正規表現 / 場所の条件)もいつも含める(ADR-0137 決定3)。形の頭(id / 正規表現)も、かたまりの判定が
-    変わるため含める(REQ-198)。行の頭の形(id / 正規表現 / 場所の条件。ADR-0198)も含める。count は表の件数。example / source / note は含めない(例や備考の修正で指紋を動かさない)。
+    変わるため含める(REQ-198)。行の頭の形(id / 正規表現 / 場所の条件。ADR-0198)も含める。ログの行の頭の形と決まりの版(ADR-0215)、ヘッダーの名前・方式の語・コマンドの秘密の引数(ADR-0219)も含める。count は表の件数。example / source / note は含めない(例や備考の修正で指紋を動かさない)。
     """
     table = MASK_PATTERNS if patterns is None else patterns
     items = [[p.id, p.scope, p.match, p.kind] for p in table]
@@ -1376,10 +1568,25 @@ def masking_fingerprint(patterns: tuple[MaskPattern, ...] | None = None) -> Mask
     document["secret_show_commands"] = list(SECRET_SHOW_COMMANDS)
     document["secret_show_match"] = SECRET_SHOW_MATCH  # 秘密の一覧の照らし方(ADR-0202 決定3)
     document["gate_heads"] = gate_heads  # 行の頭の形は判定を変えるため含める(ADR-0198 決定2。REQ-277)
+    # ログの行の頭の形と、頭を外す決まりの版は判定を変えるため含める(ADR-0215 決定5。REQ-306)。count は変えない
+    document["log_prefixes"] = [[prefix_id, regex, kind] for prefix_id, regex, kind in LOG_PREFIXES]
+    document["log_line_rules"] = LOG_LINE_RULES
+    # ヘッダーの名前・方式の語・コマンドの秘密の引数は判定を変えるため含める(ADR-0219 決定6。REQ-315)。count は変えない
+    document["secret_header_names"] = list(SECRET_HEADER_NAMES)
+    document["auth_schemes"] = list(AUTH_SCHEMES)
+    # ハッシュの方式の一覧と形も判定を変えるため含める(ADR-0220 決定8。REQ-316)。count は変えない
+    document["crypt_hash_schemes"] = list(CRYPT_HASH_SCHEMES)
+    document["crypt_hash"] = CRYPT_HASH
+    document["command_secret_options"] = [
+        [command, option, mode, attached] for command, option, mode, attached in COMMAND_SECRET_OPTIONS
+    ]
     text = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
     return MaskingFingerprint(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], len(table))
 
 
 validate_gate_heads()
+validate_log_prefixes()
+validate_midline_names()
+validate_crypt_hash()
 validate()
 validate_forms()

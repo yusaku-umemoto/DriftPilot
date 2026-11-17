@@ -5,7 +5,7 @@ from collections import Counter
 from hier_config import HConfig
 from hier_config.exceptions import DuplicateChildError
 
-from driftpilot.config_parser import IR, FlatTree, parse_config_with_tree, top_level_merged_lines
+from driftpilot.config_parser import IR, FlatTree, field_conflicts, parse_config_with_tree, top_level_merged_lines
 from driftpilot.config_parser.tree import duplicate_path
 from driftpilot.diff_engine.compare import compare
 from driftpilot.diff_engine.normalization import NormalizationRule, builtin_rules, load_rules
@@ -46,6 +46,8 @@ def compare_configs(before_text: str, after_text: str, platform: str | None = No
         *_merged_warnings(after_text, platform, "after"),
         *_duplicate_warnings(before_tree, "before"),
         *_duplicate_warnings(after_tree, "after"),
+        *_conflict_warnings(before_text, platform, "before"),
+        *_conflict_warnings(after_text, platform, "after"),
         *check_empty_categories(before_tree, before_ir, "before"),
         *check_empty_categories(after_tree, after_ir, "after"),
         *check_tree_mismatch(before_tree, after_tree, diffs),
@@ -92,7 +94,7 @@ def _duplicate_line_numbers(text: str, scope: tuple[str, ...], line: str) -> tup
 
 
 def _merged_warnings(text: str, platform: str | None, side: Side) -> list[SafetyWarning]:
-    """XR と見立てて最上位の同じ見出し・同じ行を 1 つにまとめたら、その知らせを 1 つ返す(ADR-0211 決定4)。
+    """XR か ASA と見立てて最上位の同じ見出し・同じ行を 1 つにまとめたら、その知らせを 1 つ返す(ADR-0211 決定4、ADR-0214 決定3)。
 
     行番号は text(前処理の前)の 1 始まり。parse と同じ前処理(top_level_merged_lines)で求める。detail に行の中身は入れない。
     """
@@ -103,6 +105,23 @@ def _merged_warnings(text: str, platform: str | None, side: Side) -> list[Safety
         SafetyWarning(
             kind="top_level_merged", side=side, category=None, detail={"lines": list(lines), "count": len(lines)}
         )
+    ]
+
+
+def _conflict_warnings(text: str, platform: str | None, side: Side) -> list[SafetyWarning]:
+    """AOS-Switch のポートの VLAN の所属・trunk の食い違い(同じ項目に違う値)を、重複の警告にする(ADR-0228 の追記、REQ-334)。
+
+    parse と同じ読み方の記録(field_conflicts)から作る。AOS-Switch と見立てない config は空。detail は scope(`interface 13`)・
+    lines(空。A型の木は元の行番号を持たない)・count(値を書いた行の数)・item(`untagged_vlan` か `channel_group`)だけで、値を含めない。
+    """
+    return [
+        SafetyWarning(
+            kind="duplicate_line",
+            side=side,
+            category=None,
+            detail={"scope": " > ".join(c.scope), "lines": [], "count": c.count, "item": c.item},
+        )
+        for c in field_conflicts(text, platform)
     ]
 
 

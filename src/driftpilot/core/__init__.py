@@ -70,6 +70,7 @@ from driftpilot.core.compare_all import (
     whole_sections,
 )
 from driftpilot.core.compare_all import overall_status as multi_overall_status
+from driftpilot.core.config_facts import FactsError, FactsOutcome, config_facts
 from driftpilot.core.masked_payload import MaskedPayload, masked_all, masked_single
 from driftpilot.core.types import (
     SCHEMA_VERSION,
@@ -130,6 +131,8 @@ __all__ = [
     "CompareRequest",
     "ComparisonExclusion",
     "Conversation",
+    "FactsError",
+    "FactsOutcome",
     "Job",
     "JobInputError",
     "JobResult",
@@ -164,6 +167,7 @@ __all__ = [
     "choose_platform",
     "combined_summary",
     "compare_all",
+    "config_facts",
     "final_results",
     "gave_up_count",
     "is_failed_with_payload",

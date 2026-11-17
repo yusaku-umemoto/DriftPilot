@@ -16,6 +16,7 @@ XR の config は Cisco 系(A型)の読み方で読む。機種の選択肢は�
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from driftpilot.config_parser.tree import banner_line_kinds, is_dropped_line
@@ -117,8 +118,14 @@ def _looks_like_iosxr(lines: list[str]) -> bool:
     return False
 
 
-def _merge_top_level(numbered: list[Numbered]) -> tuple[list[Numbered], tuple[int, ...]]:
-    """最上位の同じ見出しの塊を、最初の塊にまとめる。(行番号つきの行, 消した見出しの行番号) を返す。"""
+def merge_top_level(
+    numbered: list[Numbered], quiet: Callable[[str, list[str]], bool] | None = None
+) -> tuple[list[Numbered], tuple[int, ...]]:
+    """最上位の同じ見出しの塊を、最初の塊にまとめる。(行番号つきの行, 消した見出しの行番号) を返す。
+
+    quiet は「まとめるが、消した見出しの行番号に入れない」を決める関数で、後の塊の見出しの行と子の行(空の行・
+    木にする前に消える行を含む)を受け取る。XR は渡さない。ASA(asa.py。REQ-303)が使う。
+    """
     lines = [line for _, line in numbered]
     # 最上位の塊に分ける。塊の子は、後に続く行頭が空白の行・空の行・木にする前に消える字下げの無い行。
     # バナーは本文を含めて1つの塊にして、見出しとして扱わない
@@ -140,7 +147,8 @@ def _merge_top_level(numbered: list[Numbered]) -> tuple[list[Numbered], tuple[in
             key = _normalize(heading[1])
             if key in position:
                 kept[position[key]][1].extend(children)
-                merged.append(heading[0])
+                if quiet is None or not quiet(heading[1], [line for _, line in children]):
+                    merged.append(heading[0])
                 continue
             position[key] = len(kept)
         kept.append((heading, children))
@@ -155,7 +163,7 @@ def prepare_iosxr(text: str) -> IosxrPrep:
     iosxr = blocks > 0 or _looks_like_iosxr(lines) or _looks_like_iosxr([line for _, line in numbered])
     merged: tuple[int, ...] = ()
     if iosxr:
-        numbered, merged = _merge_top_level(numbered)
+        numbered, merged = merge_top_level(numbered)
     if blocks == 0 and not merged:
         return IosxrPrep(text, iosxr, ())
     result = "\n".join(line for _, line in numbered)

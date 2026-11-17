@@ -11,7 +11,22 @@ hier_config のノードの hash/eq は行の文字列と子の内容で決ま�
 IR に写せた行だけを mark する。
 """
 
+from dataclasses import dataclass
+
 from hier_config import HConfig, HConfigChild
+
+
+@dataclass(frozen=True)
+class FieldConflict:
+    """同じ項目に違う値が書かれていた記録(HPE Aruba AOS-Switch の VLAN の所属と trunk。ADR-0228 の追記、REQ-334)。
+
+    scope は項目のあるインターフェース(`("interface 13",)`)、item は `untagged_vlan` か `channel_group`、count は
+    そのポートにその項目の値を書いた行の数。値と行番号は持たない(Cisco 系の木は元の行番号を持たない。ADR-0030 決定 5)。
+    """
+
+    scope: tuple[str, ...]
+    item: str
+    count: int
 
 
 class InterpretedLines:
@@ -24,6 +39,8 @@ class InterpretedLines:
         # 出現ごとの記録。id(node) → (node, パターンの ID)。ID が None の行は未解釈に残す(REQ-178)。
         # node も持つのは、記録の間に id が別のノードに使い回されないようにするため
         self._occurrences: dict[int, tuple[HConfigChild, str | None]] = {}
+        # 同じ項目に違う値が書かれていた記録。AOS-Switch と見立てた config のポートの所属と trunk のときだけ入る(REQ-334)
+        self.conflicts: list[FieldConflict] = []
 
     def mark(self, node: HConfigChild, pattern_id: str) -> None:
         """node の行を pattern_id として解釈済みと記録する。子行は含めない。

@@ -207,6 +207,10 @@ def save_caution() -> str:
     return "This contains the input's setting values as they are. Treat it the same as the original config (confidential)."
 
 
+# Display names for detail["item"] of duplicate_line (AOS-Switch port conflicts. REQ-334)
+_CONFLICT_ITEM = {"untagged_vlan": "untagged VLAN", "channel_group": "trunk group"}
+
+
 def warning_message(w: SafetyWarning) -> str:
     if w.kind == "empty_category":
         return (
@@ -216,6 +220,14 @@ def warning_message(w: SafetyWarning) -> str:
     if w.kind == "duplicate_line":
         # Values are not included (detail has only the scope and line numbers)
         scope = w.detail["scope"] or "the top level"
+        if w.detail.get("item") is not None:
+            # A port's VLAN membership or trunk on AOS-Switch (ADR-0228 addendum, REQ-334). Values are not included
+            item = _CONFLICT_ITEM.get(w.detail["item"], w.detail["item"])
+            return (
+                f"In {_SIDE_LABEL[w.side or 'before']}, {scope} has different values for the same item ({item}) in "
+                f"{w.detail.get('count', 2)} places (line numbers are not available with this reading method). "
+                "The IR uses the value from the later line."
+            )
         if not w.detail["lines"]:
             # A-type trees do not keep the original line numbers (ADR-0030 decision 5)
             return (
@@ -267,7 +279,9 @@ def warning_message(w: SafetyWarning) -> str:
 
 
 # Display names for device types (ADR-0151 decision 7). None means not specified (the Cisco-family reading). The detection result "a" is shown with the same name
-PLATFORM_LABEL: dict[str | None, str] = {"fortinet": "FortiGate", "fujitsu_sir": "Si-R", None: "Cisco family / Arista"}
+PLATFORM_LABEL: dict[str | None, str] = {
+    "fortinet": "FortiGate", "fujitsu_sir": "Si-R", "juniper_junos": "Juniper Junos", "paloalto_panos": "Palo Alto PAN-OS", "yamaha": "Yamaha RTX", None: "Cisco family / Arista",
+}
 AUTO_PLATFORM_LABEL = "Auto"
 
 
@@ -349,7 +363,7 @@ def route_detail_note(vendor_specific: dict[str, Any]) -> str:
 
 # Names of the guesses made by safety net 5 (REQ-25), and descriptions of the clues (IDs in the table of docs/notes/platform-sniff.md)
 _HINT_LABEL = {"a": "a Cisco-style or Arista config", "d": "a FortiGate config"}
-_HINT_RULE = {"SNF-01": "first line starts with #config-version=", "SNF-02": "config ... and end come in pairs", "SNF-03": "lines for interface, hostname and !"}
+_HINT_RULE = {"SNF-01": "first line starts with #config-version=", "SNF-02": "config ... and end come in pairs", "SNF-03": "lines for interface, hostname and !", "SNF-04": "only FortiOS-style lines"}
 
 
 def _platform_mismatch_message(w: SafetyWarning) -> str:
@@ -4184,7 +4198,7 @@ CLI_HELP = {
     "compare.kind": "Kind of input. auto decides from the content (default: config)",
     "compare.platform": (
         "For a config, choose a parser family other than the default. fujitsu_sir uses the flat config parser, "
-        "and fortinet uses the FortiGate parser "
+        "fortinet uses the FortiGate parser, yamaha uses the Yamaha RTX parser, juniper_junos uses the Juniper Junos parser, and paloalto_panos uses the Palo Alto PAN-OS parser "
         "(--show-command is not needed. Leaving it out, or any other name, means the Cisco family, which needs no option). "
         "For a show output, give the device type as an ntc-templates platform name (e.g. cisco_ios), together with --show-command. "
         "auto decides the device type from the content of the config (--show-command is not needed. A show output is compared as plain text without a device type)"
@@ -4239,11 +4253,11 @@ CLI_HELP = {
         "If there is no such name, it ends without comparing or sending"
     ),
     "patterns.help": "Output the list of what the config parser supports (the pattern table)",
-    "patterns.platform": "Output the table of the flat config or FortiGate parser (default: the Cisco family table. docs/notes/flat-patterns.md, fortinet-patterns.md)",
+    "patterns.platform": "Output the table of the flat config, FortiGate, Yamaha RTX, Juniper Junos or Palo Alto PAN-OS parser (default: the Cisco family table. docs/notes/flat-patterns.md, fortinet-patterns.md, yamaha-patterns.md, junos-patterns.md, panos-patterns.md)",
     "coverage.help": "Measure the coverage of the config parser",
     "coverage.paths": "Config files, or directories of split files (reads _index.tsv)",
     "coverage.exposure": "Category when files are given directly (default: normal). For a directory it is decided by the command column of _index.tsv",
-    "coverage.platform": "Measure with the flat config or FortiGate parser (default: the Cisco family parser)",
+    "coverage.platform": "Measure with the flat config, FortiGate, Yamaha RTX, Juniper Junos or Palo Alto PAN-OS parser (default: the Cisco family parser)",
     "coverage.top": "Number of top entries for unparsed shapes and for blocks with many lines of the generic FortiGate shape (default: {default})",
     "coverage.files": "Number of file lines shown in text (default: {default})",
     "coverage_show.help": "Measure the coverage of the show side (identification rate and template coverage)",
@@ -4265,6 +4279,11 @@ CLI_HELP = {
     "pilot_call.compare": (
         "Read a request file, compare the two inputs, and write the results to files in output_dir "
         "(stops when standard input is closed. Exit codes: no difference 0, difference 1, error 2, selection needed 3, stopped 130)"
+    ),
+    "pilot_call.config_facts": (
+        "Read a request file, turn one config into a list of path-and-value facts, and write result.json (not masked) and "
+        "masked_facts.json (the form to hand to an AI) to output_dir "
+        "(stops when standard input is closed. Exit codes: success 0, error 2, stopped 130)"
     ),
     "pilot_call.request": "The request JSON file (UTF-8)",
 }
@@ -4288,6 +4307,12 @@ PILOT_CALL_MESSAGES = {
     "write_failed": "Could not write the result file: {path} ({reason})",
     "cancelled": "Standard input was closed, so the comparison was stopped",
     "internal_error": "Stopped by an unexpected error: {error_type}",
+    # config-facts (ADR-0223. REQ-319). Only a segment count or an exception type name is included
+    "unsupported_operation_facts": "Only the config-facts operation is accepted",
+    "invalid_inputs_facts": "inputs must be an array with exactly one item whose role is config, and path must be an absolute path string",
+    "multiple_segments": "The config contains {count} segments. Pass a config that has a single segment",
+    "parse_failed": "The config could not be read: {error_type}",
+    "cancelled_facts": "Standard input was closed, so building the list was stopped",
 }
 
 # --- Error texts of the commands (after "Error: ". REQ-258) ---

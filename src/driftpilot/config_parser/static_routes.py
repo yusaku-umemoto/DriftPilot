@@ -22,6 +22,7 @@ class _Ctx:
     routes: list[StaticRoute] = field(default_factory=list)
     details: list[dict[str, Any]] = field(default_factory=list)
     scope_vrf: str | None = None
+    asa: bool = False
 
 
 def _address(token: str, version: int) -> IPv4Address | IPv6Address | None:
@@ -140,6 +141,46 @@ def _route(m: re.Match[str], ctx: _Ctx, version: int) -> bool:
     return True
 
 
+def _asa_route(m: re.Match[str], ctx: _Ctx, version: int) -> bool:
+    """ASA の `route <nameif> …`・`ipv6 route <nameif> …`。ASA と見立てた config だけ読む(REQ-304)。"""
+    if not ctx.asa:
+        return False
+    groups = m.groupdict()
+    try:
+        if version == 4:
+            # マスクは IPv4 のアドレスの形だけ読む(`24` のような長さは未解釈。今の `ip route` の `_route` と同じ確かめ方)
+            if _address(groups["mask"], 4) is None:
+                return False
+            destination = ip_network(f"{groups['dest']}/{groups['mask']}", strict=False)
+        else:
+            destination = ip_network(groups["dest"], strict=False)
+    except ValueError:
+        return False
+    if destination.version != version:
+        return False
+    next_hop = _address(groups["hop"], version)
+    if next_hop is None:
+        return False
+    distance = groups["distance"]
+    ctx.routes.append({
+        "destination": destination, "next_hop": next_hop, "interface": groups["nameif"],
+        "vrf": None, "distance": int(distance) if distance else None, "enabled": None,
+    })
+    detail: dict[str, Any] = {"name": None, "tag": None, "track": None}
+    if groups.get("track"):
+        detail["track_object"] = int(groups["track"])
+    ctx.details.append(detail)
+    return True
+
+
+def _asa_ipv4(m: re.Match[str], ctx: _Ctx) -> bool:
+    return _asa_route(m, ctx, 4)
+
+
+def _asa_ipv6(m: re.Match[str], ctx: _Ctx) -> bool:
+    return _asa_route(m, ctx, 6)
+
+
 def _ipv4(m: re.Match[str], ctx: _Ctx) -> bool:
     return _route(m, ctx, 4)
 
@@ -182,11 +223,25 @@ PATTERNS: tuple[Pattern, ...] = (
             r"ipv6 route (?P<body>[0-9a-fA-F:]+/[0-9]+(?: .+)?)", "static_routes[]",
             "ipv6 route ::/0 2001:db8::2", _ipv6,
             note="見出しの VRF 名を経路に写す。見出しもこのパターン ID で解釈済みにする"),
+    Pattern("static_routes.asa_route", "top",
+            r"route (?P<nameif>\S+) (?P<dest>\S+) (?P<mask>\S+) (?P<hop>\S+)"
+            r"(?: (?P<distance>[0-9]+))?(?: track (?P<track>[0-9]+))?",
+            "static_routes[]", "route outside 0.0.0.0 0.0.0.0 192.0.2.1 1", _asa_ipv4,
+            note=(
+                "ASA と見立てた config だけ。interface は nameif(インターフェースとは結び付けない)、vrf は None。"
+                "track <数> は機種固有値 track_object。tunneled など語が続く行・次のアドレスが読めない行は未解釈"
+            )),
+    Pattern("static_routes.asa_ipv6_route", "top",
+            r"ipv6 route (?P<nameif>\S+) (?P<dest>[^\s/]+/[0-9]+) (?P<hop>\S+)(?: (?P<distance>[0-9]+))?",
+            "static_routes[]", "ipv6 route outside ::/0 2001:db8::1", _asa_ipv6,
+            note="ASA と見立てた config だけ。interface は nameif、vrf は None。次のアドレスが読めない行は未解釈"),
 )
 
 
-def extract_static_routes(tree: HConfig, interpreted: InterpretedLines) -> tuple[list[StaticRoute], list[dict[str, Any]]]:
-    ctx = _Ctx()
+def extract_static_routes(
+    tree: HConfig, interpreted: InterpretedLines, asa: bool = False
+) -> tuple[list[StaticRoute], list[dict[str, Any]]]:
+    ctx = _Ctx(asa=asa)
     for block in tree.children:
         ctx.scope_vrf = None
         if (pattern := apply_first(PATTERNS, "top", block.text, ctx)) is not None:
