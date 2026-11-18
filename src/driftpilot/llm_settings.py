@@ -141,6 +141,16 @@ AUTO_SEND_LLM_KEY = "auto_send_llm"
 CHARACTER_KEY = "character"
 # 起動したときに新しい版を確かめるか(ADR-0188 決定2。真偽値。書かれていなければ偽。読めなければ偽)
 AUTO_UPDATE_CHECK_KEY = "auto_update_check"
+# 音声入力(ADR-0233 決定6。[voice] の enabled・press と、[series] の partspilot_cli)。読み方は voice_settings_of
+VOICE_SECTION = "voice"
+SERIES_SECTION = "series"
+VOICE_ENABLED_KEY = "enabled"
+VOICE_PRESS_KEY = "press"
+VOICE_LLM_CORRECT_KEY = "llm_correct"
+SERIES_CLI_KEY = "partspilot_cli"
+PRESS_TOGGLE = "toggle"
+PRESS_HOLD = "hold"
+PRESS_MODES = (PRESS_TOGGLE, PRESS_HOLD)
 # 画面の色(ADR-0189。"system"・"light"・"dark"。書かれていない・ほかの値・文字でないときは "system")
 THEME_KEY = "theme"
 THEME_SYSTEM = "system"
@@ -176,6 +186,7 @@ CONFIG_TEMPLATE = f"""\
 
 # プロンプトは、設定画面の「プロンプト」の枠でプロファイルとして編集できます。差分を入れる印 {{{{diff}}}} が要ります
 # 比較の画面で、ファイルが2つそろったら自動で比較を始めるか（[gui] の auto_compare。書かなければ始めます）は、設定画面の「設定ファイル」の枠で変えられます
+# 音声入力（[voice] の enabled・press・llm_correct。書かなければ enabled は true、press は "toggle"、llm_correct は false）と、PartsPilot の CLI の場所（[series] の partspilot_cli。書かなければ自動で探します）は、設定画面の「音声入力」のタブで変えられます
 # 画面の言語（[gui] の language。"en"・"ja"・"system"。書かなければ "en"）は、設定画面の「表示」のタブで変えられます
 # 画面の色（[gui] の theme。"system"・"light"・"dark"。書かなければ "system"）は、設定画面の「表示」のタブで変えられます
 # 起動したときに新しい版を確かめるか（[gui] の auto_update_check。書かなければ確かめません）は、設定画面の「更新」のタブで変えられます
@@ -547,6 +558,56 @@ def auto_update_check_enabled(
     except SettingsError:
         return False
     return auto_update_check_of(data)
+
+
+@dataclass(frozen=True)
+class VoiceSettings:
+    """音声入力の設定(ADR-0233 決定6)。
+
+    enabled は [voice] enabled(無い・真偽値でないときは真)、press は "toggle" か "hold"(無い・ほかの値は "toggle")、
+    cli は [series] partspilot_cli(空白を除いた空でない文字だけ。無ければ空)。
+    llm_correct は [voice] llm_correct(LLM で文脈を踏まえて直すか。無い・真偽値でないときは偽。ADR-0233 決定4・6)。
+    """
+
+    enabled: bool = True
+    press: str = PRESS_TOGGLE
+    cli: str = ""
+    llm_correct: bool = False
+
+
+def voice_settings_of(data: bytes | None) -> VoiceSettings:
+    """設定ファイルのバイト列から音声入力の設定を読む。無い・読めない・型が違う値は、その項目だけ既定にする。"""
+    if data is None:
+        return VoiceSettings()
+    try:
+        parsed = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return VoiceSettings()
+    voice = parsed.get(VOICE_SECTION, {})
+    series = parsed.get(SERIES_SECTION, {})
+    voice = voice if isinstance(voice, dict) else {}
+    series = series if isinstance(series, dict) else {}
+    enabled = voice.get(VOICE_ENABLED_KEY, True)
+    press = voice.get(VOICE_PRESS_KEY, PRESS_TOGGLE)
+    cli = series.get(SERIES_CLI_KEY, "")
+    llm_correct = voice.get(VOICE_LLM_CORRECT_KEY, False)
+    return VoiceSettings(
+        enabled=enabled if isinstance(enabled, bool) else True,
+        press=press if isinstance(press, str) and press in PRESS_MODES else PRESS_TOGGLE,
+        cli=cli.strip() if isinstance(cli, str) else "",
+        llm_correct=llm_correct if isinstance(llm_correct, bool) else False,
+    )
+
+
+def voice_settings(
+    *, env: Mapping[str, str] | None = None, platform: str | None = None, home: Path | None = None
+) -> VoiceSettings:
+    """利用者ごとの設定ファイルの音声入力の設定。読めなければ既定(入・押すたびに・場所は自動)。"""
+    try:
+        data = read_bytes(user_config_path(platform=platform, env=env, home=home))
+    except SettingsError:
+        return VoiceSettings()
+    return voice_settings_of(data)
 
 
 def theme_of(data: bytes | None) -> str:

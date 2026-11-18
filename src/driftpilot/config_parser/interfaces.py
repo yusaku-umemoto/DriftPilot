@@ -15,6 +15,7 @@ from hier_config.platforms.functions import expand_range
 
 from driftpilot.config_parser.aos_switch_ports import AosPorts, expand_ports, expand_vlans, parse_vlan_number
 from driftpilot.config_parser.device_settings import has_mask_word, has_secret
+from driftpilot.config_parser.huawei import vlan_list
 from driftpilot.config_parser.ir import Interface, InterfaceType, Vrrp, new_interface
 from driftpilot.config_parser.isis import is_key_form
 from driftpilot.config_parser.patterns import Pattern, apply_first
@@ -28,6 +29,13 @@ _TYPE_BY_NAME_PREFIX: tuple[tuple[str, InterfaceType], ...] = (
     ("Port-Channel", "port_channel"),
     ("port-channel", "port_channel"),
     ("loopback", "loopback"),
+)
+# Huawei VRP と見立てた config だけに足す名前の先頭の判定(大文字小文字は区別する。`Vlanif` は上の `Vlan` で svi。
+# ADR-0231 決定 3、REQ-336)。見立てない config の `LoopBack…`・`Eth-Trunk…` の type は今のまま
+_HUAWEI_TYPE_BY_NAME_PREFIX: tuple[tuple[str, InterfaceType], ...] = (
+    ("LoopBack", "loopback"),
+    ("Eth-Trunk", "port_channel"),
+    ("Vbdif", "svi"),
 )
 
 
@@ -71,6 +79,13 @@ class _Ctx:
     aos_ports: AosPorts | None = None
     order: tuple[int, int] = (0, 0)
     vlan: int | None = None
+    # Huawei VRP と見立てた config か(ADR-0231 決定 3、REQ-336)。`undo shutdown`・`undo portswitch`・`portswitch`・
+    # `ip address … sub` を読み、`LoopBack`・`Eth-Trunk`・`Vbdif` の type を決める。
+    # さらに `port link-type`・`port default vlan`・`port trunk allow-pass vlan`・`port trunk pvid vlan`・`eth-trunk` を
+    # switchport・channel_group に写す(ADR-0231 決定 3(2)、REQ-337)。
+    # `port trunk allow-pass vlan all` は読まない(未解釈。REQ-338。VRP の trunk は行が無ければ VLAN 1 だけを通すので、
+    # `()`〈行が無い〉に写すと `all` の有る無しが差分に出なくなる)
+    huawei: bool = False
 
 
 def _open(m: re.Match[str], ctx: _Ctx) -> bool:
@@ -325,6 +340,99 @@ def _ip_address_secondary(m: re.Match[str], ctx: _Ctx) -> bool:
     except ValueError:
         return False
     ctx.interface["secondary_addresses"].append(address)
+    return True
+
+
+def _huawei_undo_shutdown(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `undo shutdown`。shutdown を偽にする。見立てていない config と子を持つ行は読まない(REQ-336)。"""
+    if not ctx.huawei or ctx.has_children:
+        return False
+    ctx.interface["shutdown"] = False
+    return True
+
+
+def _huawei_undo_portswitch(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `undo portswitch`(L3 のポート)。type の判定で `no switchport` と同じ入力にする(REQ-336)。"""
+    if not ctx.huawei or ctx.has_children:
+        return False
+    ctx.no_switchport = True
+    return True
+
+
+def _huawei_portswitch(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `portswitch`(L2 のポート)。`switchport` と同じく IR の値は変えない(REQ-336)。"""
+    return ctx.huawei and not ctx.has_children
+
+
+def _huawei_ip_address_sub(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `ip address <A> <マスク|長さ> sub`。secondary_addresses に足す。IPv4 として読めなければ未解釈(REQ-336)。"""
+    if not ctx.huawei or ctx.has_children:
+        return False
+    return _ip_address_secondary(m, ctx)
+
+
+def _huawei_link_type(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `port link-type access|trunk|dot1q-tunnel`。switchport.mode に写す(REQ-337)。"""
+    if not ctx.huawei or ctx.has_children:
+        return False
+    ctx.interface["switchport"]["mode"] = m["mode"]
+    return True
+
+
+def _huawei_vlan_id(word: str) -> int | None:
+    """VLAN ID の語を 1〜4094 の整数にする。範囲の外は None(huawei.py の並びの読み方と同じ)。"""
+    ids = vlan_list(word)
+    return ids[0] if ids is not None and len(ids) == 1 else None
+
+
+def _huawei_default_vlan(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `port default vlan <N>`。access_vlan に写す。1〜4094 の外は読まない(REQ-337)。"""
+    if not ctx.huawei or ctx.has_children:
+        return False
+    vlan_id = _huawei_vlan_id(m["id"])
+    if vlan_id is None:
+        return False
+    ctx.interface["switchport"]["access_vlan"] = vlan_id
+    return True
+
+
+def _huawei_trunk_pvid(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `port trunk pvid vlan <N>`。native_vlan に写す(native_vlan_none・native_vlan_tagged は偽。REQ-337)。"""
+    if not ctx.huawei or ctx.has_children:
+        return False
+    vlan_id = _huawei_vlan_id(m["id"])
+    if vlan_id is None:
+        return False
+    switchport = ctx.interface["switchport"]
+    switchport["native_vlan"] = vlan_id
+    switchport["native_vlan_none"] = False
+    switchport["native_vlan_tagged"] = False
+    return True
+
+
+def _huawei_trunk_allow_pass(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `port trunk allow-pass vlan <並び>`。今の一覧との和集合(昇順)にする。
+
+    並びが読めなければ未解釈。mode は変えない(REQ-337)。`port trunk allow-pass vlan all` は読まないので(REQ-338)、
+    前の `all` を気にしなくてよい。
+    """
+    if not ctx.huawei or ctx.has_children:
+        return False
+    switchport = ctx.interface["switchport"]
+    current = switchport["trunk_allowed_vlan"]
+    added = vlan_list(m["list"])
+    if added is None:
+        return False
+    switchport["trunk_allowed_vlan"] = tuple(sorted(set(current) | set(added)))
+    switchport["trunk_allowed_none"] = False
+    return True
+
+
+def _huawei_eth_trunk(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `eth-trunk <N>`。channel_group を `{id: N, mode: eth-trunk}` にする(AOS-CX の `lag` と同じ持ち方。REQ-337)。"""
+    if not ctx.huawei or ctx.has_children:
+        return False
+    ctx.interface["channel_group"] = {"id": int(m["id"]), "mode": "eth-trunk"}
     return True
 
 
@@ -1278,6 +1386,11 @@ def _derive_type(m: None, ctx: _Ctx) -> bool:
         if ctx.name.startswith(prefix):
             interface["type"] = type_
             return True
+    if ctx.huawei:
+        for prefix, type_ in _HUAWEI_TYPE_BY_NAME_PREFIX:
+            if ctx.name.startswith(prefix):
+                interface["type"] = type_
+                return True
     if (name_type := _aoscx_name_type(ctx.name)) is not None:
         interface["type"] = name_type
         return True
@@ -1510,7 +1623,10 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         "interfaces.ip_address", "interface", r"ip address (?P<addr>\S+) (?P<mask>\S+)", "ip_address",
         "ip address 192.0.2.1 255.255.255.0", _ip_address,
-        note="アドレスとマスクが IPv4 として読めないものは未解釈にする。secondary 付きは次の行が読む",
+        note=(
+            "アドレスとマスクが IPv4 として読めないものは未解釈にする。secondary 付きは次の行が読む。"
+            "長さの形(Huawei VRP の `ip address 192.0.2.1 24`。ADR-0231、REQ-336)も同じ持ち方で読む(見立てに関わらない)"
+        ),
     ),
     Pattern(
         "interfaces.ip_address_secondary", "interface", r"ip address (?P<addr>\S+) (?P<mask>\S+) secondary",
@@ -2220,6 +2336,87 @@ PATTERNS: tuple[Pattern, ...] = (
         ),
     ),
     Pattern(
+        "interfaces.huawei_undo_shutdown", "interface", r"undo shutdown", "shutdown", "undo shutdown",
+        _huawei_undo_shutdown,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3、REQ-336)。shutdown を偽にする(後の行が勝つ)。"
+            "見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.huawei_undo_portswitch", "interface", r"undo portswitch", "type(routed の判定にだけ使う)",
+        "undo portswitch", _huawei_undo_portswitch,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3、REQ-336)。IR のキーには写さず、type の判定"
+            "(interfaces.type)で `no switchport` と同じ入力になる。見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.huawei_portswitch", "interface", r"portswitch", "type(値は変えない)", "portswitch",
+        _huawei_portswitch,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3、REQ-336)。L2 のポートの明示。既定と同じなので IR の値は"
+            "変えない(`switchport` と同じ扱い)。見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.huawei_ip_address_sub", "interface", r"ip address (?P<addr>\S+) (?P<mask>\S+) sub",
+        "secondary_addresses", "ip address 198.51.100.1 255.255.255.0 sub", _huawei_ip_address_sub,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3、REQ-336)。今の Cisco の `ip address <A> <マスク> secondary` "
+            "と同じ持ち方で secondary_addresses に足す。マスクは `255.255.255.0` の形でも長さ(`24`)でも読む。"
+            "IPv4 として読めない行・見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.huawei_link_type", "interface", r"port link-type (?P<mode>access|trunk|dot1q-tunnel)",
+        "switchport.mode", "port link-type access", _huawei_link_type,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3(2)、REQ-337)。方式の語を switchport.mode に写す。"
+            "`port link-type hybrid` は IR に hybrid が無いので未解釈。見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.huawei_default_vlan", "interface", r"port default vlan (?P<id>\d+)", "switchport.access_vlan",
+        "port default vlan 10", _huawei_default_vlan,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3(2)、REQ-337)。access_vlan を数にする(後の行が勝つ)。"
+            "1〜4094 の外・見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.huawei_trunk_allow_pass", "interface", r"port trunk allow-pass vlan (?P<list>\d.*)",
+        "switchport.trunk_allowed_vlan・switchport.trunk_allowed_none", "port trunk allow-pass vlan 10 20 to 22",
+        _huawei_trunk_allow_pass,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3(2)、REQ-337)。並び(空白で区切った ID と "
+            "`<A> to <B>`)を、今の一覧との和集合(昇順のタプル)にする。"
+            "読めない並び・見立てていない config・子を持つ行は未解釈。読めたら trunk_allowed_none を偽にする(mode は変えない)。"
+            "`port trunk allow-pass vlan all`(REQ-338 で未解釈に改めた)と `undo port trunk allow-pass vlan …` は未解釈のまま"
+            "(VRP の trunk は行が無ければ VLAN 1 だけを通すので、`()`〈行が無い〉に写したり一覧から引いたりすると、"
+            "`all` や `undo` の有る無しが差分に出なくなる)"
+        ),
+    ),
+    Pattern(
+        "interfaces.huawei_trunk_pvid", "interface", r"port trunk pvid vlan (?P<id>\d+)",
+        "switchport.native_vlan・switchport.native_vlan_none・switchport.native_vlan_tagged",
+        "port trunk pvid vlan 10", _huawei_trunk_pvid,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3(2)、REQ-337)。native_vlan を数にし、"
+            "native_vlan_none・native_vlan_tagged を偽にする(後の行が勝つ)。1〜4094 の外・見立てていない config・"
+            "子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "interfaces.huawei_eth_trunk", "interface", r"eth-trunk (?P<id>\d+)", "channel_group", "eth-trunk 1",
+        _huawei_eth_trunk,
+        note=(
+            "手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3(2)、REQ-337)。channel_group を "
+            "`{id: 数, mode: eth-trunk}` にする(AOS-CX の `lag` と同じ持ち方。2回あれば後の行)。"
+            "見立てていない config・子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
         "interfaces.port_options", "interface",
         r"(?:no )?(?:switchport block|switchport protected|switchport vepa|switchport private-vlan"
         r"|switchport trunk pruning|snmp trap|cdp|lldp|mvrp|macsec|mka|ethernet oam|autonomic|cts|bgp-policy"
@@ -2270,6 +2467,8 @@ PATTERNS: tuple[Pattern, ...] = (
             "Port-channel・Port-Channel・port-channel → port_channel。大文字小文字は区別する)、"
             "AOS-CX の名前(`lag <数>` と、後ろに空白と語が続く `lag <数> …` → port_channel、`vlan <数>`・`vlan<数>` → svi。"
             "`lagX`・`vlan10a`・`vlan abc` は当たらない。ADR-0210 決定2、REQ-294)、"
+            "Huawei と見立てた config の `LoopBack` → loopback・`Eth-Trunk` → port_channel・`Vbdif` → svi(大文字小文字は区別する。"
+            "`Vlanif` は `Vlan` で svi。ADR-0231 決定 3、REQ-336)、"
             "AOS-Switch と見立てた config の `Trk<数>` → port_channel(大文字小文字は区別する。ADR-0228 決定 3、REQ-332)、"
             "ASA と見立てた config で、塊の中に switchport で始まる行(no switchport を含む)が無ければ routed"
             "(ADR-0214 決定 5、REQ-304。ASA 5505・Firepower 1010 のポートは switchport の行があるので次へ進む)、"
@@ -2428,6 +2627,7 @@ def extract_interfaces(
     awplus: bool = False,
     asa: bool = False,
     aos_switch: bool = False,
+    huawei: bool = False,
 ) -> dict[str, Interface]:
     """tree のトップレベルの interface 行から、名前をキーにした Interface の辞書を返す。
 
@@ -2439,11 +2639,15 @@ def extract_interfaces(
     見立てたときは、さらに VLAN の所属(`untagged`・`tagged`)と最上位の `trunk` を集め、ポートの switchport・channel_group に写す
     (無いポートと `Trk<数>` は作る)。同じ項目に違う値が書かれていたら、後の行の値を使い、interpreted.conflicts に記録する。
     ADR-0228 の追記、REQ-334。
+    huawei は、Huawei VRP と見立てた config か(`undo shutdown`・`undo portswitch`・`portswitch`・`ip address … sub` を読み、
+    `LoopBack…`・`Eth-Trunk…`・`Vbdif…` の type を決める。ADR-0231 決定 3、REQ-336)。
+    さらに、ポートの L2(`port link-type`・`port default vlan`・`port trunk allow-pass vlan`・`port trunk pvid vlan`・
+    `eth-trunk <N>`)を switchport・channel_group に写す(ADR-0231 決定 3(2)、REQ-337)。
     """
     interfaces: dict[str, Interface] = {}
     aos_ports = AosPorts() if aos_switch else None
     for block_index, block in enumerate(tree.children):
-        ctx = _Ctx(awplus=awplus, asa=asa, aos_switch=aos_switch, aos_ports=aos_ports)
+        ctx = _Ctx(awplus=awplus, asa=asa, aos_switch=aos_switch, aos_ports=aos_ports, huawei=huawei)
         heading = apply_first(PATTERNS, "top", block.text, ctx)
         if heading is None:
             continue

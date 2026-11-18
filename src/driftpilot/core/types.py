@@ -105,8 +105,8 @@ class ComparisonExclusion:
 class AutoPlatform:
     """機種を自動にしたときの判定(ADR-0151 決定1・2)。
 
-    used は比較に使った系統(fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos。None は指定なし=Cisco 系)。before・after は片側ごとの判定
-    (fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos・a・None=判定なし)。conflict は両側の判定が違ったこと(AI に送らない)。
+    used は比較に使った系統(fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos・checkpoint_gaia・f5_bigip。None は指定なし=Cisco 系)。before・after は片側ごとの判定
+    (fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos・checkpoint_gaia・f5_bigip・a・None=判定なし)。conflict は両側の判定が違ったこと(AI に送らない)。
     """
 
     used: str | None

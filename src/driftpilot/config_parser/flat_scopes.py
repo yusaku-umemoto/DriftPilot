@@ -77,6 +77,37 @@ SIR_SCOPES: tuple[FlatScope, ...] = (
     ),
 )
 
+# Check Point Gaia(ADR-0234 決定 1・2)。`show configuration` の字下げの無い `set <対象> …`・`add <対象> …` の行を、
+# 動詞(set・add)を除いた対象でスコープに分ける。動詞はスコープ名に入れない(`set interface eth1 state on` と
+# `add interface eth1 vlan 100` は同じ `interface eth1` の下に入る)。`delete …`・形に合わない行は表に当たらず、未解釈になる。
+GAIA_SCOPES: tuple[FlatScope, ...] = (
+    FlatScope(
+        "FLAT-11", "checkpoint_gaia", r"(?:set|add) interface (?P<name>\S+)", "interface {name}",
+        "set interface eth1 state on",
+        note="`set`・`add` の動詞はスコープ名に入れない。同じインターフェースの `set`・`add` の行は同じスコープに入る",
+    ),
+    FlatScope(
+        "FLAT-12", "checkpoint_gaia", r"set static-route (?P<dest>\S+)", "static-route {dest}",
+        "set static-route default nexthop gateway address 192.0.2.254 on",
+        note="宛先(`default` か `<アドレス>/<長さ>`)が添字。`add static-route` は表にないので、最後の汎用のスコープ(FLAT-15)に入る",
+    ),
+    FlatScope(
+        "FLAT-13", "checkpoint_gaia", r"(?:set|add) user (?P<name>\S+)", "user {name}",
+        "add user monitor uid 1001 homedir /home/monitor",
+        note="利用者の名前が添字。`password-hash` の行などの送らない行は、写しの段で入れない",
+    ),
+    FlatScope(
+        "FLAT-14", "checkpoint_gaia", r"(?:set|add) bonding group (?P<n>\d+)", "bonding group {n}",
+        "add bonding group 1 interface eth2",
+        note="スコープの語が 2 語(`bonding group`)。添字はグループの番号",
+    ),
+    FlatScope(
+        "FLAT-15", "checkpoint_gaia", r"(?:set|add) (?P<w>[a-z][a-z0-9-]*)", "{w}", "set hostname gw-test1",
+        note="添字の無い対象。`set`・`add` の後ろの語そのものがスコープ名になる(`set dns primary 192.0.2.53` はスコープ `dns` の子 "
+        "`primary 192.0.2.53`)。最後に置く(先に当てると上の個別のスコープが当たらない)",
+    ),
+)
+
 
 def _fields(template: str) -> set[str]:
     return {name for _, name, _, _ in string.Formatter().parse(template) if name}
@@ -111,3 +142,4 @@ def validate(scopes: tuple[FlatScope, ...] = SIR_SCOPES) -> None:
 
 
 validate()
+validate(GAIA_SCOPES)

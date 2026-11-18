@@ -15,8 +15,9 @@ const $ = (id) => document.getElementById(id);
 const status = $("status");
 const keyInput = $("key-input");
 // 窓のタブ（ADR-0154 / REQ-214）。id は settings-tab-○○、面は settings-panel-○○
-// 「単純比較」（raw。REQ-227 §12）は「比較と自動の動き」と「設定ファイル」の間。「表示」（display。REQ-256 §4）は「設定ファイル」の次、「更新」（update。REQ-252 §4）は最後
-const TABS = ["profiles", "prompt", "auto", "raw", "file", "display", "update"];
+// 「単純比較」（raw。REQ-227 §12）は「比較と自動の動き」と「設定ファイル」の間。「表示」（display。REQ-256 §4）は「設定ファイル」の次、
+// 「音声入力」（voice。REQ-341）は「表示」の次、「更新」（update。REQ-252 §4）は最後
+const TABS = ["profiles", "prompt", "auto", "raw", "file", "display", "voice", "update"];
 
 let view = null; // いま描いている状態
 // 描いた状態の番号と、欄を入れ直した番号・キーの欄を空にした番号（変わったときだけ入れ直す）
@@ -30,7 +31,9 @@ const shown = {
   fillRaw: null,
   fillUpdate: null,
   fillDisplay: null,
+  fillVoice: null,
 };
+let voiceAsked = false; // 「音声入力」のタブを初めて開いたときに、PartsPilot を探す（1 回だけ）
 
 // data-text の鍵の文を messages.py から取って入れる（HTML には文を書かない）。取れなければ false。
 // <html lang> に入れる言語の鍵（ADR-0190。"en"・"ja"）
@@ -385,6 +388,7 @@ function render(next) {
   renderShape(next.response_shape);
   renderUpdate(next.update);
   renderDisplay(next.display);
+  renderVoice(next.voice);
   // 開くタブ（比較の窓・一括比較の窓の知らせの「更新…」。REQ-252 §5）。Python が 1 回だけ返す
   if (next.open_tab && TABS.includes(next.open_tab)) {
     selectTab(next.open_tab);
@@ -404,6 +408,35 @@ function renderDisplay(display) {
     }
   }
   $("save-display").disabled = !display.can_save;
+}
+
+// 「音声入力」のタブ（REQ-341 / ADR-0233 決定6）。欄は番号が変わったときだけ、設定ファイルの値で入れ直す（窓を開いたとき・保存の後）。
+// 状態の行は Python が決めた文を textContent だけで描く（見つけた場所・版・案内。探している間は「探し直す」を押せない）
+function renderVoice(voice) {
+  if (voice.fill !== shown.fillVoice) {
+    shown.fillVoice = voice.fill;
+    $("voice-enabled").checked = voice.enabled;
+    for (const radio of document.querySelectorAll('input[name="voice-press"]')) {
+      radio.checked = radio.value === voice.press;
+    }
+    $("voice-cli").value = voice.cli;
+    $("voice-llm-correct").checked = voice.llm_correct === true;
+  }
+  $("voice-status-text").hidden = voice.status === null;
+  text($("voice-status-text"), voice.status);
+  $("refind-voice").disabled = voice.searching;
+  $("save-voice").disabled = !voice.can_save;
+}
+
+// 欄の今の値（Python が形を確かめる）。押し方は何も選ばれていなければ "toggle"
+function voiceValues() {
+  const radio = document.querySelector('input[name="voice-press"]:checked');
+  return {
+    enabled: $("voice-enabled").checked,
+    press: radio === null ? "toggle" : radio.value,
+    cli: $("voice-cli").value,
+    llm_correct: $("voice-llm-correct").checked,
+  };
 }
 
 // 選んでいる画面の色（何も選ばれていなければ "system"）。Python が 3 つ以外を断る
@@ -553,9 +586,19 @@ function selectTab(name) {
   }
 }
 
+// 「音声入力」のタブを初めて開いたとき、欄の今の値で PartsPilot を探す（裏のスレッド。結果は settings.view の知らせで描く）。
+// タブの切り替え（selectTab）は Python を呼ばない決まりなので、タブのボタンの押しに別に付ける
+function findVoiceOnFirstOpen() {
+  if (!voiceAsked && view !== null && view.voice.status === null && !view.voice.searching) {
+    voiceAsked = true;
+    act("find_partspilot", $("voice-cli").value);
+  }
+}
+
 for (const tab of TABS) {
   bind(`settings-tab-${tab}`, () => selectTab(tab));
 }
+bind("settings-tab-voice", findVoiceOnFirstOpen);
 
 $("profile-list-wrap").addEventListener("keydown", (event) => {
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -604,6 +647,23 @@ bind("save-raw", async () => {
 // 「表示」のタブ（REQ-256 §4・REQ-257 §4）。「保存」は [gui] の theme と language を書き、開いている窓すべてに色を当てる（言語は開き直すと効く）。
 // 「更新」のタブの「保存」と同じく form() も渡す（ほかのタブの打ちかけの欄を残すため）。選んだ値は form() に入れず別の引数で渡す
 bind("save-display", () => act("save_display_settings", chosenTheme(), chosenLanguage()));
+// 「音声入力」のタブ（REQ-341）。「保存」は [voice] の enabled・press と [series] の partspilot_cli だけを書く（「更新」のタブと同じく、
+// form() も渡してほかのタブの打ちかけを残し、欄の値は別の引数で渡す）。「参照…」は選んだ場所を欄に入れるだけ（保存は「保存」）
+bind("save-voice", () => act("save_voice_settings", voiceValues()));
+bind("refind-voice", () => act("find_partspilot", $("voice-cli").value));
+bind("choose-voice-cli", async () => {
+  if (view === null) {
+    return;
+  }
+  const result = await call("choose_partspilot_cli", form());
+  if (result.ok && typeof result.chosen === "string") {
+    $("voice-cli").value = result.chosen;
+  }
+  await handle(result);
+  if (result.ok && typeof result.chosen === "string") {
+    act("find_partspilot", result.chosen);
+  }
+});
 // 「更新」のタブ（REQ-252 §4）。確かめと「Releases のページを開く」は欄の値を渡さない（開く URL は Python が決める）。
 // 「保存」は [gui] の auto_update_check だけを書く（今の 2 つの「保存」とは別）。ほかの操作と同じく form() も渡すので、
 // ほかのタブで打ちかけた欄は保存の後も残る（タブの切り替えは Python を呼ばないため、渡さないと Python が打ちかけを知らない）

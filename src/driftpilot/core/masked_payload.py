@@ -51,6 +51,7 @@ def _section(request: CompareRequest, outcome: CompareOutcome, command: str | No
             before_source=inputs.before_source,
             after_source=inputs.after_source,
             show_command=inputs.show_command,
+            platform=inputs.platform,
         ),
     )
 

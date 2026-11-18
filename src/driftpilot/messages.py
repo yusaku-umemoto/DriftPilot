@@ -273,7 +273,7 @@ def warning_message(w: SafetyWarning) -> str:
 
 # 機種の表示名(ADR-0151 決定7)。None は指定なし(Cisco 系の読み方)。判定の a も同じ名前で出す
 PLATFORM_LABEL: dict[str | None, str] = {
-    "fortinet": "FortiGate", "fujitsu_sir": "Si-R", "juniper_junos": "Juniper Junos", "paloalto_panos": "Palo Alto PAN-OS", "yamaha": "ヤマハ RTX", None: "Cisco 系・Arista",
+    "fortinet": "FortiGate", "fujitsu_sir": "Si-R", "juniper_junos": "Juniper Junos", "paloalto_panos": "Palo Alto PAN-OS", "yamaha": "ヤマハ RTX", "checkpoint_gaia": "Check Point Gaia", "f5_bigip": "F5 BIG-IP", None: "Cisco 系・Arista",
 }
 AUTO_PLATFORM_LABEL = "自動"
 
@@ -4144,7 +4144,7 @@ CLI_HELP = {
     "compare.kind": "入力の種類。auto は内容から判定する(既定: config)",
     "compare.platform": (
         "config では、既定でないパーサーの系統を選ぶ。fujitsu_sir を指定すると平坦 config のパーサー、"
-        "fortinet を指定すると FortiGate のパーサー、yamaha を指定するとヤマハ RTX のパーサー、juniper_junos を指定すると Juniper Junos のパーサー、paloalto_panos を指定すると Palo Alto PAN-OS のパーサーを使う"
+        "fortinet を指定すると FortiGate のパーサー、yamaha を指定するとヤマハ RTX のパーサー、juniper_junos を指定すると Juniper Junos のパーサー、paloalto_panos を指定すると Palo Alto PAN-OS のパーサー、checkpoint_gaia を指定すると Check Point Gaia のパーサー、f5_bigip を指定すると F5 BIG-IP のパーサーを使う"
         "(--show-command は不要。省略や他の名前は Cisco 系で、指定は要らない)。"
         "show では、機種を ntc-templates の platform 名で指定する(例: cisco_ios)。--show-command と一緒に指定する。"
         "auto は config の中身から機種を決める(--show-command は不要。show では機種なしの単純比較になる)"
@@ -4199,11 +4199,11 @@ CLI_HELP = {
         "無い名前なら比較も送信もせずに終わる"
     ),
     "patterns.help": "config パーサーの対応一覧(パターン表)を出力する",
-    "patterns.platform": "平坦 config・FortiGate・ヤマハ RTX・Juniper Junos・Palo Alto PAN-OS の表を出す(省略時は Cisco 系の表。docs/notes/flat-patterns.md、fortinet-patterns.md、yamaha-patterns.md、junos-patterns.md、panos-patterns.md)",
+    "patterns.platform": "平坦 config・FortiGate・ヤマハ RTX・Juniper Junos・Palo Alto PAN-OS・Check Point Gaia の表を出す(省略時は Cisco 系の表。docs/notes/flat-patterns.md、fortinet-patterns.md、yamaha-patterns.md、junos-patterns.md、panos-patterns.md、gaia-patterns.md)",
     "coverage.help": "config パーサーの被覆率を測る",
     "coverage.paths": "config のファイル、または切り出し済みのディレクトリ(_index.tsv を読む)",
     "coverage.exposure": "ファイルを直接渡したときの区分(既定: normal)。ディレクトリは _index.tsv の command 列で決まる",
-    "coverage.platform": "平坦 config・FortiGate・ヤマハ RTX・Juniper Junos・Palo Alto PAN-OS のパーサーで測る(省略時は Cisco 系のパーサー)",
+    "coverage.platform": "平坦 config・FortiGate・ヤマハ RTX・Juniper Junos・Palo Alto PAN-OS・Check Point Gaia のパーサーで測る(省略時は Cisco 系のパーサー)",
     "coverage.top": "未解釈の形と、FortiGate の汎用の形の行が多いブロックの上位件数(既定: {default})",
     "coverage.files": "text に出すファイル行の件数(既定: {default})",
     "coverage_show.help": "show 側の被覆率(特定率とテンプレート保有率)を測る",
@@ -4256,6 +4256,14 @@ PILOT_CALL_MESSAGES = {
     "multiple_segments": "config の中に区間が {count} 件あります。区間を 1 つにした config を渡してください",
     "parse_failed": "config を読み取れませんでした: {error_type}",
     "cancelled_facts": "標準入力が閉じられたため、一覧の作成を止めました",
+    # 呼び出しの合意 v1.1(ADR-0232。REQ-340)の文。パスと上限の数だけを入れる
+    "request_not_found": "依頼のファイルがありません(普通のファイルではないか、読めません): {path}",
+    "request_too_large": "依頼のファイルが {limit} バイトを超えています",
+    "request_bom": "依頼のファイルが BOM で始まっています。BOM の無い UTF-8 にしてください",
+    "invalid_correlation_id": "caller.correlation_id は、英数字と . _ : - だけの 1〜128 文字の文字列にしてください",
+    "unknown_operation": "操作は capabilities・compare・config-facts のどれかにしてください",
+    "invalid_arguments": "pilot-call の引数が正しくありません",
+    "interrupted": "中断の合図(Ctrl+C)を受けたため、止めました",
 }
 
 # --- コマンドの誤りの文(「エラー: 」の後ろ。REQ-258) ---
@@ -4820,6 +4828,116 @@ def device_split_not_opened(folder: Path) -> str:
 
 
 GUI_WEB_TEXTS.update({"compare.split_devices": DEVICE_SPLIT_BUTTON})
+
+
+# --- AI の欄の音声入力(PartsPilot の voice-serve を呼ぶ。ADR-0233 / REQ-341) ---
+# 文に入れるのは確かめた code だけ。PartsPilot の message の中身・話した文字は入れない(決定5)
+VOICE_BUTTON = "音声入力"
+VOICE_PREPARING = "音声入力を準備しています"
+VOICE_TRANSCRIBING = "文字にしています"
+VOICE_LIMIT_NOTE = "60 秒で録音を止めました"
+VOICE_TITLE_IDLE_TOGGLE = "押すと録音を始め、もう一度押すと止めます"
+VOICE_TITLE_IDLE_HOLD = "押している間だけ録音します"
+VOICE_TITLE_RECORDING_TOGGLE = "もう一度押すと録音を止めます（Esc で取り消し）"
+VOICE_TITLE_RECORDING_HOLD = "離すと録音を止めます（Esc で取り消し）"
+VOICE_NOT_SUPPORTED = "PartsPilot の窓で音声入力を追加してください"
+VOICE_MODEL_NOT_FOUND = "PartsPilot の窓で音声入力のモデルを追加してください"
+
+
+def voice_stopped(code: str) -> str:
+    """子が error で終わった(operation_not_supported・model_not_found 以外)・思わず終わったとき。"""
+    return f"音声入力が止まりました（code: {code}）。比較の窓を開き直すと、もう一度準備します"
+
+
+def voice_mic_unavailable(system: str) -> str:
+    """text_failed の microphone_unavailable。Windows はマイクの許可の場所を足す。"""
+    base = "マイクを使えません。マイクがつながっているか、ほかのソフトが使っていないか確かめてください"
+    if system == "windows":
+        return f"{base}。Windows の設定 → プライバシーとセキュリティ → マイクで、デスクトップ アプリのアクセスを許可しているか確かめてください"
+    return base
+
+
+def voice_mic_silent(system: str) -> str:
+    """text_failed の microphone_silent。Mac はマイクの許可の場所を足す。"""
+    base = "音が入っていません"
+    if system == "mac":
+        return f"{base}。システム設定 → プライバシーとセキュリティ → マイクで、DriftPilot を許可してください"
+    return base
+
+
+def voice_text_failed(code: str) -> str:
+    """text_failed のほかの code。"""
+    return f"文字にできませんでした（code: {code}）"
+
+
+# 設定の窓の「音声入力」のタブ(決定6)。「保存」の文は「更新」のタブと同じ settings.button.save_config
+SETTINGS_TAB_VOICE = "音声入力"
+VOICE_SETTINGS_ENABLED = "音声入力を使う"
+# LLM で文脈を踏まえて直す(ADR-0233 決定4・6 / REQ-342)。既定は切
+VOICE_SETTINGS_LLM_CORRECT = "LLM で文脈を踏まえて直す"
+VOICE_SETTINGS_LLM_CORRECT_NOTE = (
+    "入にすると、AI の答えの後に話した文字と、それまでのやり取り（比べた config は含みません）を、"
+    "やり取りの送り先の AI に送って直します。最初の送信の前と、送り先を変えたときは直しません"
+)
+# 入力欄の近くの文(話した文字を LLM で直している間・直した後・断ったとき)
+VOICE_CORRECTING = "LLM で直しています"
+VOICE_CORRECT_REFUSED = "伏せる対象があるため、LLM で直しませんでした"
+VOICE_REVERT = "直す前に戻す"
+VOICE_USE_CORRECTION = "LLM の直しを使う"
+VOICE_SETTINGS_PRESS = "ボタンの押し方"
+VOICE_SETTINGS_PRESS_TOGGLE = "押すたびに始める・止める"
+VOICE_SETTINGS_PRESS_HOLD = "押している間だけ録る"
+VOICE_SETTINGS_CLI = "PartsPilot の CLI の場所"
+VOICE_SETTINGS_CLI_NOTE = "空なら自動で探します。PartsPilot が見つからなければ、入でもボタンは出ません"
+VOICE_SETTINGS_BROWSE = "参照…"
+VOICE_SETTINGS_REFIND = "探し直す"
+VOICE_SETTINGS_STATUS = "PartsPilot の状態"
+VOICE_SETTINGS_SEARCHING = "探しています…"
+VOICE_SETTINGS_NOTE = "音声入力は、比較の窓を開いたときに準備します。保存すると、開いている比較の窓にも反映します（押し方は次の録音から）"
+VOICE_STATUS_NOT_FOUND = "PartsPilot が見つかりません。CLI の場所を設定するか、PartsPilot を入れてください"
+VOICE_STATUS_NOT_PARTSPILOT = "見つかった CLI は PartsPilot のものではありません。CLI の場所を確かめてください"
+VOICE_STATUS_NO_VOICE_SERVE = "PartsPilot の窓で音声入力を追加してください"
+VOICE_FOUND_BY = {
+    "settings": "設定の場所",
+    "beside_app": "DriftPilot の隣",
+    "applications": "アプリの置き場所",
+    "mdfind": "Spotlight の検索",
+}
+
+
+def voice_status_found(path: str, order: str, version: str, component_version: str, *, voice_serve: bool) -> str:
+    """見つかったときの状態の文(見つけた場所・PartsPilot の版・音声入力の版)。voice-serve が無ければ案内を足す。"""
+    lines = [f"見つけた場所: {path}（{VOICE_FOUND_BY.get(order, order)}）"]
+    if version:
+        lines.append(f"PartsPilot の版: {version}")
+    if voice_serve:
+        lines.append(f"音声入力の版: {component_version}" if component_version else "音声入力: 使えます")
+    else:
+        lines.append(VOICE_STATUS_NO_VOICE_SERVE)
+    return "\n".join(lines)
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "voice.button": VOICE_BUTTON,
+        "settings.tab.voice": SETTINGS_TAB_VOICE,
+        "settings.voice.enabled": VOICE_SETTINGS_ENABLED,
+        "settings.voice.llm_correct": VOICE_SETTINGS_LLM_CORRECT,
+        "settings.voice.llm_correct.note": VOICE_SETTINGS_LLM_CORRECT_NOTE,
+        "voice.revert": VOICE_REVERT,
+        "voice.use_correction": VOICE_USE_CORRECTION,
+        "settings.voice.press": VOICE_SETTINGS_PRESS,
+        "settings.voice.press.toggle": VOICE_SETTINGS_PRESS_TOGGLE,
+        "settings.voice.press.hold": VOICE_SETTINGS_PRESS_HOLD,
+        "settings.voice.cli": VOICE_SETTINGS_CLI,
+        "settings.voice.cli.note": VOICE_SETTINGS_CLI_NOTE,
+        "settings.voice.browse": VOICE_SETTINGS_BROWSE,
+        "settings.voice.refind": VOICE_SETTINGS_REFIND,
+        "settings.voice.status": VOICE_SETTINGS_STATUS,
+        "settings.voice.searching": VOICE_SETTINGS_SEARCHING,
+        "settings.voice.note": VOICE_SETTINGS_NOTE,
+    }
+)
 
 
 # --- 英語の版(ADR-0190 決定2)。言語が "en" のとき、messages_en.py の同じ名前の値でこのモジュールの名前を置き換える ---

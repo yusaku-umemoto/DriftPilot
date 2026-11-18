@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from driftpilot import i18n
+from driftpilot.config_parser.gaia import first_not_plain, joined_line
+from driftpilot.config_parser.platforms import FLAT_PLATFORMS
 from driftpilot.diff_engine import CompareResult, RawCompareResult, ShowCompareResult
 from driftpilot.diff_engine.raw import RawOptionsRecord
 from driftpilot.diff_engine.types import Diff
@@ -125,6 +127,8 @@ class LlmInputs:
     before_source: list[str]
     after_source: list[str]
     show_command: str | None = None
+    # config として比べた機種の系統(行頭スコープ表で読む機種 checkpoint_gaia・fujitsu_sir の未解釈の行だけが使う。ほかは None)。追加の質問で送る内容を作り直すときも同じ判定にする
+    platform: str | None = None
 
 
 @dataclass(frozen=True)
@@ -299,6 +303,34 @@ def _name_in_block(diff: Diff, sides: _Sides, rec: _Recorder) -> bool:
     return False
 
 
+# 未解釈の行を 2 つの判定で通す機種: 行頭スコープ表で読む機種(FLAT_PLATFORMS の scopes が空でないもの。checkpoint_gaia・fujitsu_sir)。
+# 木の祖先が「行頭の語と添字」を切り出したものなので、秘密を示す語が祖先の側にあると祖先の中では見られない。この表で読む機種が増えれば自動で入る
+_JOINED_LINE_PLATFORMS = frozenset(name for name, flat in FLAT_PLATFORMS.items() if flat.scopes)
+
+
+def joined_line_unsent(
+    parents: Sequence[str], text: str, platform: str | None, masker: Masker, rec: _Recorder
+) -> bool:
+    """未解釈の行(祖先の行から順に parents、最後が text)を、行頭スコープ表で読む機種のときだけ送らないか。送らなければ記録して真。
+
+    行頭スコープ表で読む機種(checkpoint_gaia・fujitsu_sir)の行は、残りの部分をスコープの名前を祖先にして判定した結果と、
+    スコープの名前と残りをつないだ 1 行を祖先なしで判定した結果の両方が「そのまま送る」のときだけ送る
+    (config_parser.gaia.first_not_plain。読み方と同じ判定)。語 `snmp`・`authentication` のように秘密を示す語が
+    スコープの名前の側にある行を、祖先の中では見られずに送ってしまうのを防ぐ。
+    ほかの機種(platform が上の機種でない・None)と、祖先の無い行は何もしない(今までと同じ結果)。
+    """
+    if platform not in _JOINED_LINE_PLATFORMS or not parents:
+        return False
+    ancestors = tuple(p.strip() for p in parents)
+    judged = first_not_plain(masker, text, ancestors)
+    if judged is None:
+        return False
+    # 「伏せる」の判定には形が無い。空の形を記録しないよう、つないだ 1 行の判定の形、それも無ければ場所だけの形にする(値を含まない)
+    shape = judged.shape or masker.judge_alone(joined_line(ancestors, text), ()).shape or f"[{scope_label(ancestors)}] …"
+    rec.line(shape)
+    return True
+
+
 def _judge_line(
     text: str, ancestors: tuple[str, ...], masker: Masker, sides: _Sides, rec: _Recorder, *, partial: bool = False
 ) -> str | _Drop:
@@ -393,11 +425,13 @@ def _value_path(diff: Diff, value: Any) -> str:
     return base
 
 
-def _structured_line(diff: Diff, masker: Masker, sides: _Sides, rec: _Recorder) -> str | None:
+def _structured_line(diff: Diff, masker: Masker, sides: _Sides, rec: _Recorder, platform: str | None = None) -> str | None:
     op = diff["op"]
     if diff["category"] == "unparsed":
         line_path = diff["before"] if op == "removed" else diff["after"]
         *parents, text = line_path
+        if joined_line_unsent(parents, text, platform, masker, rec):
+            return None
         masked = _judge_line(text, tuple(p.strip() for p in parents), masker, sides, rec)
         if masked is _DROP:
             return None
@@ -418,11 +452,13 @@ def _structured_line(diff: Diff, masker: Masker, sides: _Sides, rec: _Recorder) 
     return f"[{op}] {where}{' / ' + item if item else ''}: {_dump(before)} -> {_dump(after)}"
 
 
-def _structured_body(diffs: list[Diff], masker: Masker, sides: _Sides, rec: _Recorder) -> tuple[list[str], int]:
+def _structured_body(
+    diffs: list[Diff], masker: Masker, sides: _Sides, rec: _Recorder, platform: str | None = None
+) -> tuple[list[str], int]:
     out: list[str] = []
     for diff in diffs:
         lines_before = rec.lines
-        line = _structured_line(diff, masker, sides, rec)
+        line = _structured_line(diff, masker, sides, rec, platform)
         if line is None:
             continue
         dropped = rec.lines - lines_before
@@ -722,10 +758,13 @@ def build_payload(
     include_after_text: bool = False,
     show_command: str | None = None,
     prefer: Literal["structured", "raw"] | None = None,
+    platform: str | None = None,
 ) -> Payload | None:
     """送る内容を組み立てる。差分が無ければ None。打ち切りは伏せる前の件数で決める。
 
     prefer は source_of と同じ(表示中の差分への質問だけ。REQ-312)。None なら今と同じ結果。
+    platform は config として比べた機種の系統。行頭スコープ表で読む機種(checkpoint_gaia・fujitsu_sir)のときだけ、未解釈の行を 2 つの判定で通す(joined_line_unsent)。
+    None・ほかの機種は今と同じ結果。
 
     include_after_text が真なら、差分の本文を作った後に変更後の全文も作る(ADR-0158。show の比較でも作る。ADR-0182 決定2)。
     偽なら今と同じ結果。
@@ -749,7 +788,7 @@ def build_payload(
         return Payload(source, "", len(diffs), 0, len(diffs) > max_diffs, rec.result(), after_text)
     sides = _Sides(before_lines, after_lines, before_source, after_source, masker)
     if source == "structured":
-        lines, sent = _structured_body(selected, masker, sides, rec)
+        lines, sent = _structured_body(selected, masker, sides, rec, platform)
     elif source == "show":
         table_count = len(show.diffs)
         lines, sent = _show_body(selected[:table_count], masker, rec)
@@ -839,6 +878,8 @@ class WholeSection:
     before_source: Sequence[str] | None
     after_source: Sequence[str] | None
     show_command: str | None = None
+    # config として比べた機種の系統(LlmInputs.platform と同じ)
+    platform: str | None = None
 
 
 @dataclass(frozen=True)
@@ -928,6 +969,7 @@ def whole_body(
             masker=masker,
             max_diffs=max_diffs,
             show_command=section.show_command,
+            platform=section.platform,
         )
         if payload is None:
             if section.raw is not None and section.raw.diffs:
@@ -1030,6 +1072,7 @@ def masked_body(sections: Sequence[MaskedSection], *, extra_words: Sequence[str]
             masker=masker,
             max_diffs=max(1, len(found[1]) if found is not None else 1),
             show_command=section.show_command,
+            platform=section.platform,
         )
         if payload is None:
             continue
@@ -1063,7 +1106,9 @@ class FactMasker:
     判定器は 1 つ(同じ値は同じ <secret:N>)。lines は区間を選んだ後の本文の行(割れた秘密の行のかたまり・PEM のブロックを求める)。
     """
 
-    def __init__(self, lines: Sequence[str], extra_words: Sequence[str] = ()) -> None:
+    def __init__(self, lines: Sequence[str], extra_words: Sequence[str] = (), platform: str | None = None) -> None:
+        # platform は読んだ機種の系統。行頭スコープ表で読む機種(checkpoint_gaia・fujitsu_sir)のときだけ、読めなかった行を 2 つの判定で通す(joined_line_unsent)
+        self._platform = platform
         self._masker = Masker(secret_words=normalize_words(extra_words))
         self._sides = _Sides((), lines, (), lines, self._masker)
         self._rec = _Recorder()
@@ -1098,6 +1143,8 @@ class FactMasker:
         if not lines:
             return None
         *parents, text = lines
+        if joined_line_unsent(parents, text, self._platform, self._masker, self._rec):
+            return None
         masked = _judge_line(text, tuple(p.strip() for p in parents), self._masker, self._sides, self._rec)
         if masked is _DROP:
             return None

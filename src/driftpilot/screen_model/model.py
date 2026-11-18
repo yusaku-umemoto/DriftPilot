@@ -34,6 +34,7 @@ from driftpilot.core import (
     CompareCancelled,
     CompareOutcome,
     CompareRequest,
+    config_platform_used,
     Conversation,
     MultiCompareOutcome,
     MultiStatus,
@@ -2434,6 +2435,7 @@ def pair_report(
     before_name: str = "",
     after_name: str = "",
     first_request: str | None = None,
+    platform: str | None = None,
 ) -> ReportPair:
     """1 組の出力。比較が失敗した組と選択待ちの組は状態だけ(差分の行・件数の文・答えを出さない)。
 
@@ -2471,6 +2473,7 @@ def pair_report(
         after_body=bodies["after"],
         raw_rows=table,
         secret_words=words,
+        platform=platform,
     )
     llm = outcome.llm
     answer = llm.answer if llm is not None and llm.status == "done" and isinstance(llm.answer, str) else None
@@ -2511,7 +2514,11 @@ def compare_report(
     first_request: str | None = None,
 ) -> Report:
     """比較の窓の 1 組の出力。turns は追加の質問のやり取り (質問, 回答)、first_request は最初の依頼の文(ADR-0179 決定1)。"""
-    pair = pair_report("", outcome, words, turns=turns, first_request=first_request)
+    pair = pair_report(
+        "", outcome, words, turns=turns, first_request=first_request,
+        # inp は ScreenInput(platform を持つ)。機種を持たない簡単な入力でも動くよう、無ければ機種なしとして扱う
+        platform=config_platform_used(getattr(inp, "platform", None), outcome.kind, outcome.auto_platform),
+    )
     return Report(
         EXPORT_TITLE_COMPARE,
         pair.status,
@@ -2548,6 +2555,7 @@ def multi_report(
             words,
             turns=turns.get(k, ()),
             first_request=first_requests.get(k),
+            platform=config_platform_used(pair.request.platform, pair.outcome.kind, pair.outcome.auto_platform),
         )
         for k, pair in enumerate(whole_pair_results(outcome))
     )

@@ -15,10 +15,13 @@ show 出力の書式判定(`format_detect.sniff`)とは別物である。
   SR-S も Si-R として読む(確かめていない。ADR-0151 決定1)
 - 次に、ヤマハの手がかりの行の割合(yamaha_share)が YAMAHA_SHARE_MIN 以上なら yamaha とする(ADR-0213 決定6。
   表と根拠の件数は docs/notes/platform-sniff.md)。Si-R の判定を先に見る
-- 次に、Junos の手がかり(junos_hint。ADR-0225 決定1)と PAN-OS の手がかり(panos_hint。ADR-0227 決定1)を見る。
-  両方当たれば判定しない(None)。片方だけなら、family_hint が None ならその機種(juniper_junos・paloalto_panos)、
+- 次に、Junos の手がかり(junos_hint。ADR-0225 決定1)・PAN-OS の手がかり(panos_hint。ADR-0227 決定1)・
+  Check Point Gaia の手がかり(gaia_hint。ADR-0234 決定4)を見る。
+  2 つ以上当たれば判定しない(None)。1 つだけなら、family_hint が None ならその機種(juniper_junos・paloalto_panos・checkpoint_gaia)、
   d なら判定しない、a なら A型の手がかりが `!` の行だけ(字下げを除いて `interface `・`hostname ` で始まる行が無い)ときだけ
   その機種、あれば判定しない(ADR-0227 決定3。ADR-0225 決定2 を改めた)
+- F5 BIG-IP の手がかり(f5_hint。ADR-0235 決定4)も同じ ③ で見る。F5 だけは、imish の部分を除いた本文に字下げの無い
+  `interface `・`hostname ` の行が無ければ(family_hint が d でなければ)f5_bigip とする
 - family_hint は Junos を見立てない(系統の見立て SNF-01〜04 と安全網5 は変えない)
 """
 
@@ -30,7 +33,7 @@ from driftpilot.config_parser.flat_scopes import SIR_SCOPES, compiled
 
 Family = Literal["a", "d"]
 Rule = Literal["SNF-01", "SNF-02", "SNF-03", "SNF-04"]
-DetectedPlatform = Literal["fujitsu_sir", "yamaha", "fortinet", "juniper_junos", "paloalto_panos", "a"]
+DetectedPlatform = Literal["fujitsu_sir", "yamaha", "fortinet", "juniper_junos", "paloalto_panos", "checkpoint_gaia", "f5_bigip", "a"]
 
 # 機種を中身から決める指定(--platform auto、組のファイルの platform: auto。ADR-0151 決定4)
 AUTO_PLATFORM = "auto"
@@ -108,6 +111,58 @@ PANOS_SET_MIN = 3
 PANOS_BRACE_BLOCKS = ("deviceconfig", "mgt-config", "rulebase", "network", "shared")
 PANOS_BRACE_KINDS_MIN = 2
 _PANOS_BRACE_LINE = re.compile(r" {0,4}(\S+) \{")
+
+# Check Point Gaia の手がかり(ADR-0234 決定4。表と根拠の件数は docs/notes/platform-sniff.md)
+# 先頭 GAIA_LANGUAGE_WINDOW 文字のうちに、字下げなしでこの前置きで始まる行がある、または
+# 次の GAIA_HINTS(行頭から当てる。字下げのある行は数えない)のうち GAIA_HINT_KINDS_MIN 種類以上に当たる
+GAIA_LANGUAGE_HEAD = "# Language version: "
+GAIA_LANGUAGE_WINDOW = 2000
+GAIA_HINTS = (
+    re.compile(r"set clienv "),
+    re.compile(r"set expert-password-hash "),
+    re.compile(r"set static-route \S+ nexthop (?:gateway|blackhole|reject)"),
+    re.compile(r"add allowed-client "),
+    re.compile(r"set installer policy "),
+    re.compile(r"set net-access "),
+    re.compile(r"set core-dump "),
+    re.compile(r"set max-path-splitting "),
+    re.compile(r"set password-controls "),
+    re.compile(
+        r"set interface \S+ (?:state on|state off|ipv4-address \S+ mask-length \d+|comments |auto-negotiation on|auto-negotiation off|link-speed )"
+    ),
+    re.compile(r"add bonding group \d+"),
+    re.compile(r"set grub2-password-hash "),
+    re.compile(r"add rba "),
+    re.compile(r"set ipv6-state "),
+)
+GAIA_HINT_KINDS_MIN = 2
+
+# F5 BIG-IP の手がかり(ADR-0235 決定4。表と根拠の件数は docs/notes/platform-sniff.md)
+# 先頭 F5_TMSH_WINDOW 文字のうちに、字下げなしでこの前置きで始まる行がある、または
+# 字下げの無い `<モジュール> <語>[ <語>…] {`(行の終わりの `{` の後ろは空白だけ)の行がある。
+# 1 つ目の語は英小文字で始まり英小文字・数字・`-` が続く語。2 つ目から後ろの語は空白を含まない語
+F5_TMSH_HEAD = "#TMSH-VERSION: "
+F5_TMSH_WINDOW = 2000
+F5_MODULES = (
+    "ltm",
+    "gtm",
+    "apm",
+    "asm",
+    "afm",
+    "pem",
+    "ilx",
+    "cm",
+    "auth",
+    "net",
+    "sys",
+    "security",
+    "cli",
+    "analytics",
+    "wom",
+)
+F5_HEADING = re.compile(r"(?:" + "|".join(F5_MODULES) + r") [a-z][a-z0-9-]*(?: \S+)* \{\s*")
+# F5 の config の後ろに付く imish(Cisco 風の行)の始まり。字下げを除いてこの前置きで始まる行から後ろは見ない
+F5_IMISH_START = "!!! imish configuration starts here"
 
 _CONFIG = re.compile(r"config [a-z]")
 _A_LINE = re.compile(r"interface \S|hostname \S|!")
@@ -259,6 +314,49 @@ def panos_hint(text: str) -> bool:
     return set_lines >= PANOS_SET_MIN or len(blocks) >= PANOS_BRACE_KINDS_MIN
 
 
+def gaia_hint(text: str) -> bool:
+    """Check Point Gaia の手がかり(ADR-0234 決定4)が当たるか。
+
+    先頭 GAIA_LANGUAGE_WINDOW 文字のうちに `# Language version: ` で始まる行があるか、GAIA_HINTS のうち
+    GAIA_HINT_KINDS_MIN 種類以上(同じ種類は何行あっても 1 種類)に当たれば真。
+    字下げのある行は数えない。splitlines で分けるので CRLF でも同じに判定する。
+    """
+    if any(line.startswith(GAIA_LANGUAGE_HEAD) for line in text[:GAIA_LANGUAGE_WINDOW].splitlines()):
+        return True
+    kinds: set[int] = set()
+    for line in text.splitlines():
+        for index, pattern in enumerate(GAIA_HINTS):
+            if pattern.match(line):
+                kinds.add(index)
+                break
+    return len(kinds) >= GAIA_HINT_KINDS_MIN
+
+
+def f5_hint(text: str) -> bool:
+    """F5 BIG-IP の手がかり(ADR-0235 決定4)が当たるか。
+
+    先頭 F5_TMSH_WINDOW 文字のうちに字下げなしで F5_TMSH_HEAD で始まる行があるか、字下げの無い行が F5_HEADING に当たれば真。
+    splitlines で分けるので CRLF でも同じに判定する。
+    """
+    if any(line.startswith(F5_TMSH_HEAD) for line in text[:F5_TMSH_WINDOW].splitlines()):
+        return True
+    return any(F5_HEADING.fullmatch(line) for line in text.splitlines())
+
+
+def _f5_has_interface_or_hostname_line(text: str) -> bool:
+    """imish の部分を除いた本文に、字下げの無い `interface `・`hostname ` で始まる行があるか(ADR-0235 決定4)。
+
+    字下げを除いて F5_IMISH_START で始まる最初の行から後ろは、全部除く。F5 は `sys global-settings` の下に字下げ付きの
+    `hostname` を書くので、字下げ付きの行は数えない。
+    """
+    for line in text.splitlines():
+        if line.lstrip().startswith(F5_IMISH_START):
+            return False
+        if line.startswith(("interface ", "hostname ")):
+            return True
+    return False
+
+
 def _has_interface_or_hostname_line(text: str) -> bool:
     """字下げを除いて `interface `・`hostname ` で始まる行があるか(A型の手がかりが `!` の行だけかを見分ける。ADR-0227 決定3)。"""
     return any(line.lstrip().startswith(("interface ", "hostname ")) for line in text.splitlines())
@@ -268,8 +366,10 @@ def detect_platform(text: str) -> DetectedPlatform | None:
     """片側の機種の判定(ADR-0151 決定1、ADR-0213 決定6、ADR-0225 決定2、ADR-0227 決定2・3)。値は返さず、読み方も呼ばない。
 
     ① sir_share が SIR_SHARE_MIN 以上 → fujitsu_sir ② yamaha_share が YAMAHA_SHARE_MIN 以上 → yamaha
-    ③ junos_hint と panos_hint が両方真 → None。片方だけ真なら family_hint が None → その機種(juniper_junos・paloalto_panos)、
-       d → None、a → `interface `・`hostname ` の行が無いときだけその機種、あれば None
+    ③ junos_hint・panos_hint・gaia_hint・f5_hint のうち 2 つ以上が真 → None。1 つだけ真なら family_hint が None → その機種
+       (juniper_junos・paloalto_panos・checkpoint_gaia)、d → None、a → `interface `・`hostname ` の行が無いときだけその機種、あれば None。
+       f5_hint だけが真のときは、d → None、それ以外(None・a)は imish の部分を除いた本文に字下げの無い `interface `・`hostname ` の
+       行が無ければ f5_bigip、あれば None(ADR-0235 決定4)
     ④ family_hint が d → fortinet、a → a、無ければ None。
     """
     if sir_share(text) >= SIR_SHARE_MIN:
@@ -277,12 +377,23 @@ def detect_platform(text: str) -> DetectedPlatform | None:
     if yamaha_share(text) >= YAMAHA_SHARE_MIN:
         return "yamaha"
     hint = family_hint(text)
-    junos = junos_hint(text)
-    panos = panos_hint(text)
-    if junos and panos:
+    matched: list[DetectedPlatform] = []
+    if junos_hint(text):
+        matched.append("juniper_junos")
+    if panos_hint(text):
+        matched.append("paloalto_panos")
+    if gaia_hint(text):
+        matched.append("checkpoint_gaia")
+    if f5_hint(text):
+        matched.append("f5_bigip")
+    if len(matched) >= 2:
         return None
-    if junos or panos:
-        platform: DetectedPlatform = "juniper_junos" if junos else "paloalto_panos"
+    if matched == ["f5_bigip"]:
+        if hint is not None and hint.family == "d":
+            return None
+        return None if _f5_has_interface_or_hostname_line(text) else "f5_bigip"
+    if matched:
+        platform = matched[0]
         if hint is None:
             return platform
         if hint.family == "a" and not _has_interface_or_hostname_line(text):

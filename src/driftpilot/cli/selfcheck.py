@@ -94,6 +94,7 @@ GUI_WEB_FILES = (
     "static/js/raw_options.js",
     "static/js/character.js",
     "static/js/theme.js",
+    "static/js/voice.js",  # 入力欄の横のマイクのボタン(ADR-0233 / REQ-341)
     # キャラクターの絵と、元の名前との対応の説明(ADR-0174 決定4)
     "static/character/README.md",
     "static/character/ai-thinking.png",

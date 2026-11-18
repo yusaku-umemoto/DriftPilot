@@ -47,6 +47,7 @@
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-raw" aria-controls="settings-panel-raw" aria-selected="false" data-text="settings.tab.raw"></button>
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-file" aria-controls="settings-panel-file" aria-selected="false" data-text="settings.tab.file"></button>
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-display" aria-controls="settings-panel-display" aria-selected="false" data-text="settings.tab.display"></button>
+      <button type="button" class="pilot-tab" role="tab" id="settings-tab-voice" aria-controls="settings-panel-voice" aria-selected="false" data-text="settings.tab.voice"></button>
       <button type="button" class="pilot-tab" role="tab" id="settings-tab-update" aria-controls="settings-panel-update" aria-selected="false" data-text="settings.tab.update"></button>
     </div>
 
@@ -572,6 +573,52 @@
         <div class="pilot-row">
           <span class="pilot-spacer"></span>
           <button type="button" class="pilot-button pilot-button--secondary" id="save-display" data-text="settings.button.save_config"></button>
+        </div>
+      </section>
+    </div>
+
+    <!-- 「音声入力」のタブ（REQ-341 / ADR-0233 決定6）。「音声入力を使う」・ボタンの押し方・PartsPilot の CLI の場所と「参照…」・
+         状態の行（見つけた場所・版・案内。Python が決めた文を textContent で描く）と「探し直す」。
+         この「保存」（save-voice）は [voice] の enabled・press・llm_correct と [series] の partspilot_cli だけを書く（「更新」のタブと同じ形。
+         欄の値は form() に入れず、別の引数で渡す） -->
+    <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-voice" aria-labelledby="settings-tab-voice" hidden>
+      <section class="pilot-group">
+        <h2 class="pilot-group-title" data-text="settings.tab.voice"></h2>
+        <div class="pilot-row">
+          <span class="pilot-radio">
+            <input id="voice-enabled" class="pilot-check" type="checkbox">
+            <label for="voice-enabled" data-text="settings.voice.enabled"></label>
+          </span>
+        </div>
+        <div class="pilot-row">
+          <span class="pilot-radio">
+            <input id="voice-llm-correct" class="pilot-check" type="checkbox">
+            <label for="voice-llm-correct" data-text="settings.voice.llm_correct"></label>
+          </span>
+        </div>
+        <p class="pilot-note pilot-lines" data-text="settings.voice.llm_correct.note"></p>
+        <h3 class="pilot-section-title" id="voice-press-title" data-text="settings.voice.press"></h3>
+        <div class="pilot-row" role="radiogroup" aria-labelledby="voice-press-title">
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="voice-press" id="voice-press-toggle" value="toggle"><span data-text="settings.voice.press.toggle"></span></label>
+          <label class="pilot-radio"><input class="pilot-check" type="radio" name="voice-press" id="voice-press-hold" value="hold"><span data-text="settings.voice.press.hold"></span></label>
+        </div>
+        <div class="pilot-field">
+          <label for="voice-cli" data-text="settings.voice.cli"></label>
+          <div class="pilot-row">
+            <input id="voice-cli" class="pilot-input pilot-grow" type="text" autocomplete="off" spellcheck="false">
+            <button type="button" class="pilot-button pilot-button--secondary" id="choose-voice-cli" data-text="settings.voice.browse"></button>
+          </div>
+        </div>
+        <p class="pilot-note pilot-lines" data-text="settings.voice.cli.note"></p>
+        <h3 class="pilot-section-title" data-text="settings.voice.status"></h3>
+        <p class="pilot-lines" id="voice-status-text" role="status" hidden></p>
+        <div class="pilot-row">
+          <button type="button" class="pilot-button pilot-button--secondary" id="refind-voice" data-text="settings.voice.refind"></button>
+        </div>
+        <p class="pilot-note pilot-lines" data-text="settings.voice.note"></p>
+        <div class="pilot-row">
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="save-voice" data-text="settings.button.save_config"></button>
         </div>
       </section>
     </div>

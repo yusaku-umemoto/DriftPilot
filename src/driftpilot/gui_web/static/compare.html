@@ -447,7 +447,26 @@
         <div class="pilot-ai-busy" id="ai-busy" aria-hidden="true" hidden><span class="pilot-spinner pilot-spinner--small" id="ai-busy-spinner"></span><img src="character/ai-thinking.png" alt="" aria-hidden="true" class="pilot-character pilot-character--motion" id="character-ai-thinking" hidden><img src="character/ai-thinking-still.png" alt="" aria-hidden="true" class="pilot-character pilot-character--still" id="character-ai-thinking-still" hidden><span class="pilot-lines" id="ai-busy-text"></span></div>
       </div>
       <div class="pilot-ai-controls">
-        <textarea id="follow-up-question" class="pilot-input pilot-wide" rows="2" spellcheck="false" data-label="compare.ai.input" data-placeholder="compare.ai.input.hint"></textarea>
+        <!-- 入力欄の横のマイクのボタン（ADR-0233 / REQ-341）。音声入力が使えないときは出さない（hidden）。状態・押せるか・文は Python が決める。
+             録音中は音量の棒と経過の秒を出す。文字は入力欄のカーソルの位置に入れるだけで、送らない -->
+        <div class="pilot-voice-row">
+          <textarea id="follow-up-question" class="pilot-input pilot-wide" rows="2" spellcheck="false" data-label="compare.ai.input" data-placeholder="compare.ai.input.hint"></textarea>
+          <button type="button" class="pilot-icon-button pilot-voice-button" id="voice-button" data-label="voice.button" aria-pressed="false" hidden disabled>
+            <svg class="pilot-voice-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+          </button>
+        </div>
+        <div class="pilot-voice-status" id="voice-status" hidden>
+          <span class="pilot-voice-level" aria-hidden="true"><span class="pilot-voice-level-bar" id="voice-level-bar"></span></span>
+          <span id="voice-elapsed" aria-hidden="true"></span>
+        </div>
+        <p class="pilot-note pilot-lines" id="voice-note" role="status" hidden></p>
+        <p class="pilot-note" id="voice-limit-note" role="status" hidden></p>
+        <!-- LLM の直し（REQ-342）。入力欄の近くの小さなボタン。最初は隠す。「直す前に戻す」は置き換えた後、「LLM の直しを使う」は
+             直している間に欄を書き換えたときに出す。次の録音・送信・自分以外の入力で消す -->
+        <div class="pilot-voice-correct">
+          <button type="button" class="pilot-button pilot-button--secondary" id="voice-revert" data-text="voice.revert" hidden></button>
+          <button type="button" class="pilot-button pilot-button--secondary" id="voice-use-correction" data-text="voice.use_correction" hidden></button>
+        </div>
         <!-- 「差分＋全文を送る」（ADR-0158 決定1・9・10）。既定はオフ。押せるか・オンの間の案内は Python が決める -->
         <!-- 押せない理由・全文を付ける組（ADR-0175 決定1・2）はすぐ下の注記と title に出す。文は Python が決める -->
         <span class="pilot-radio">

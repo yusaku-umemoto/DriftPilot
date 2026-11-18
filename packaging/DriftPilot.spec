@@ -24,6 +24,11 @@ ICON_MAC = f"{ICONS}/DriftPilot.icns"      # Mac の .app（ADR-0173 決定5）
 # 同梱するデータ（ADR-0036 決定4）。driftpilot の表と、show の読み取りのテンプレート。
 # pywebview の画面の static/（REQ-103）も、pyproject.toml の package-data に書いたので collect_data_files("driftpilot") で入る
 datas = collect_data_files("driftpilot") + collect_data_files("ntc_templates")
+# Mac のマイクの許可の理由(ADR-0233 決定7)。英語は下の BUNDLE の info_plist(NSMicrophoneUsageDescription)に、
+# 日本語は ja.lproj/InfoPlist.strings に入れる(datas の行き先 "ja.lproj" は、PyInstaller 6 の .app では Contents/Resources の下になる。
+# ビルドで入ったかは窓での確かめの手順に書いた)
+if sys.platform == "darwin":
+    datas += [(f"{HERE}/mac/ja.lproj/InfoPlist.strings", "ja.lproj")]
 # 起動時に自分の版を読む部品があるので、版の情報（メタデータ）も入れる（試しのビルドで ntc_templates が起動しなかった）
 # pywebview は selfcheck が版を読む（webview に __version__ が無い。REQ-103）
 for dist in ("keyring", "ntc_templates", "driftpilot", "hier_config", "textfsm", "openai", "pywebview"):
@@ -80,4 +85,9 @@ if sys.platform == "darwin":
         name="DriftPilot.app",
         bundle_identifier="io.github.yusaku-umemoto.driftpilot",
         icon=ICON_MAC,
+        # マイクの許可の理由(ADR-0233 決定7 / REQ-341)。録音は PartsPilot の子プロセスが行うが、許可は DriftPilot のものとして扱われる。
+        # 日本語の文は packaging/mac/ja.lproj/InfoPlist.strings(上の datas で入れる)
+        info_plist={
+            "NSMicrophoneUsageDescription": "DriftPilot uses the microphone for voice input in the AI chat (recorded by PartsPilot).",
+        },
     )

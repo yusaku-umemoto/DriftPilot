@@ -8,6 +8,7 @@ from hier_config import HConfig
 from driftpilot.config_parser.acls import extract_acls
 from driftpilot.config_parser.aos_switch import prepare_aos_switch
 from driftpilot.config_parser.asa import prepare_asa
+from driftpilot.config_parser.huawei import prepare_huawei
 from driftpilot.config_parser.asa_nat import extract_asa_nat
 from driftpilot.config_parser.awplus import looks_like_awplus, split_port_ranges
 from driftpilot.config_parser.bfd import extract_bfd
@@ -195,28 +196,37 @@ def parse_config_traced(text: str, platform: str | None = None) -> tuple[IR, HCo
     # XR の閉じの語の対を見て閉じの語の行を消し、XR と見立てたときは最上位の同じ見出しの塊をまとめる(ADR-0211、REQ-296)。
     # XR でなく ASA と見立てたときは、`:` の行・1 行ずつのバナー・access-list・最上位の塊を直す(ADR-0214、REQ-303)
     # どちらでもなければ、AOS-Switch と見立てたときだけ、`;` の行・1 行のバナー・`exit` の行を直す(ADR-0228、REQ-332)
-    prepared, asa, _, aos_switch = _prepare_a_type(text)
-    tree = build_tree(split_port_ranges(prepared) if awplus else prepared)
+    # どれでもなければ、Huawei VRP と見立てたときだけ、`#` の塊ごとの字下げ・`[V…]` の行・`return` を直し、
+    # `sysname` と `undo shutdown` などを読む(ADR-0231 決定 1・2・3、REQ-336)
+    prepared, asa, _, aos_switch, huawei = _prepare_a_type(text)
+    # Huawei と見立てたときは、`banner ` で始まる行(`banner enable` など)をバナーの始まりとして扱わない
+    # (ADR-0231 の追記、REQ-343。ライブラリが最後までバナーとみなして止まるのを避ける)
+    tree = build_tree(split_port_ranges(prepared) if awplus else prepared, banners=not huawei)
     repair_indentation(tree)
     interpreted = InterpretedLines()
 
     ir = new_ir()
-    ir["interfaces"] = extract_interfaces(tree, interpreted, awplus=awplus, asa=asa, aos_switch=aos_switch)
-    ir["vlans"] = extract_vlans(tree, interpreted, aos_switch=aos_switch)
+    ir["interfaces"] = extract_interfaces(
+        tree, interpreted, awplus=awplus, asa=asa, aos_switch=aos_switch, huawei=huawei
+    )
+    # Huawei と見立てたときは `vlan batch` を読み、`name` は後の行が勝つ(ADR-0231 決定 3(2)、REQ-337)
+    ir["vlans"] = extract_vlans(tree, interpreted, aos_switch=aos_switch, huawei=huawei)
     ir["acls"], ir["ipv6_acls"], ir["mac_acls"] = extract_acls(tree, interpreted, asa=asa)
-    ir["ospf"] = extract_ospf(tree, interpreted)
+    # Huawei と見立てたときは最上位の `ospf <番号>` の塊も読む(ADR-0231 決定 3(3)、REQ-338)
+    ir["ospf"] = extract_ospf(tree, interpreted, huawei=huawei)
     ir["ospfv3"] = extract_ospfv3(tree, interpreted)
     ir["bgp"] = extract_bgp(tree, interpreted)
     ir["spanning_tree"] = extract_spanning_tree(tree, interpreted)
     ir["vrfs"] = extract_vrfs(tree, interpreted)
-    ir["static_routes"], route_vendor = extract_static_routes(tree, interpreted, asa=asa)
+    # Huawei と見立てたときは `ip route-static`・`ipv6 route-static` も読む(REQ-338)
+    ir["static_routes"], route_vendor = extract_static_routes(tree, interpreted, asa=asa, huawei=huawei)
     if route_vendor:
         vendor = "arista_eos" if platform == "arista_eos" else "cisco"
         ir["vendor_specific"][vendor] = {"static_routes": route_vendor}
     ir["lines"], line_vendor = extract_lines(tree, interpreted)
     if line_vendor:
         ir["vendor_specific"].setdefault("cisco", {})["lines"] = line_vendor
-    ir["global"] = extract_global(tree, interpreted, asa=asa)
+    ir["global"] = extract_global(tree, interpreted, asa=asa, huawei=huawei)
     ir["qos"] = extract_qos(tree, interpreted)
     ir["eigrp"] = extract_eigrp(tree, interpreted)
     ir["ipsec"] = extract_ipsec(tree, interpreted)
@@ -237,21 +247,26 @@ def parse_config_traced(text: str, platform: str | None = None) -> tuple[IR, HCo
     return ir, tree, interpreted
 
 
-def _prepare_a_type(text: str) -> tuple[str, bool, tuple[int, ...], bool]:
-    """A型の、木にする前の前処理。(木にする文字列, ASA と見立てたか, まとめて消した見出しの行番号, AOS-Switch と見立てたか) を返す。
+def _prepare_a_type(text: str) -> tuple[str, bool, tuple[int, ...], bool, bool]:
+    """A型の、木にする前の前処理。(木にする文字列, ASA と見立てたか, まとめて消した見出しの行番号, AOS-Switch と見立てたか,
+    Huawei と見立てたか) を返す。
 
     XR(prepare_iosxr)を先に当て、XR と見立てなければ ASA(prepare_asa)を当て、どちらでもなければ AOS-Switch
-    (prepare_aos_switch。ADR-0228、REQ-332)を当てる。XR・ASA と見立てた config は AOS-Switch と見立てない。
+    (prepare_aos_switch。ADR-0228、REQ-332)を当て、それでもなければ Huawei(prepare_huawei。ADR-0231、REQ-336)を当てる。
+    前のどれかに見立てた config は、後ろの機種と見立てない。
     parse_config_traced と top_level_merged_lines が同じ関数を使うので、parse と警告の行番号は食い違わない。
     """
     prep = prepare_iosxr(text)
     if prep.iosxr:
-        return prep.text, False, prep.merged_lines, False
+        return prep.text, False, prep.merged_lines, False, False
     asa = prepare_asa(prep.text)
     if asa.asa:
-        return asa.text, True, asa.merged_lines, False
+        return asa.text, True, asa.merged_lines, False, False
     aos = prepare_aos_switch(asa.text)
-    return aos.text, False, (), aos.aos_switch
+    if aos.aos_switch:
+        return aos.text, False, (), True, False
+    huawei = prepare_huawei(aos.text)
+    return huawei.text, False, (), False, huawei.huawei
 
 
 def top_level_merged_lines(text: str, platform: str | None = None) -> tuple[int, ...]:
@@ -285,7 +300,8 @@ def _parse_flat_traced(text: str, flat: FlatPlatform) -> tuple[IR, FlatTree, Int
     route_maps・prefix_lists・ipv6_prefix_lists・global(hostname・dns・ntp_options)は D型(FortiGate)だけが写す。
     B型(Si-R・ヤマハ)は ospf・sdwan・route_maps・prefix_lists・ipv6_prefix_lists がいつも空の辞書、ipsec がいつも None、global がいつも
     new_global()。Junos は bgp・route_maps・prefix_lists・acls も写す(REQ-325)。acls は Junos だけが写し、ほかの機種ではいつも空の辞書。
-    vlans は D型の FortiSwitch(最上位の `config switch vlan`。REQ-299)だけが写す。B型と FortiGate の config ではいつも空の辞書。
+    vlans は D型の FortiSwitch(最上位の `config switch vlan`。REQ-299)と、B型の F5 BIG-IP(`net vlan` の `tag`。REQ-350)だけが写す。
+    ほかの B型と FortiGate の config ではいつも空の辞書。
     値の食い違いは tree.warnings に足す。
 
     B型は行頭スコープ表で、D型は機種の build(終端記号の対)で木を組む。ヤマハ(yamaha。B型の系統)も機種の build

@@ -6,6 +6,15 @@
 
 （なし）
 
+## 0.2.8
+
+- **安全の修正:** F5 BIG-IP の iRule（Tcl）の `set <変数> <値>` の行で、変数の名前に `token`・`secret`・`password` などが入る形（`set api_token "…"` など）を、値を伏せずに AI に送っていました。行を送らないようにしました
+- **安全の修正:** Huawei VRP の平文で入れる鍵の形（`… plain <鍵>`・`area-authentication-mode simple <鍵>`・`security-key simple <鍵>`）と、SNMP の `snmp-agent target-host … securityname <コミュニティ名>`・`snmp-agent usm-user v3 … authentication-mode <方式> <鍵>` を、伏せるか送らないようにしました。富士通 Si-R の行頭の範囲の中の読めない行は、範囲の名前とつないだ 1 行でも秘密の語を確かめてから送るようにしました
+- 新しく読める機種: Huawei VRP（Cisco の形の読み方に Huawei の見立てと前処理を足しました。ホスト名・インターフェース・VLAN・ポートの L2・スタティックルート・OSPF の `network`・NTP・DNS・ログの送り先・SNMP の場所と連絡先）、Check Point Gaia（`checkpoint_gaia`。インターフェース・ボンディング・スタティックルート・全体の設定）、F5 BIG-IP（`f5_bigip`。ホスト名・管理 IP・インターフェース・Self IP・VLAN・経路・NTP・DNS・syslog・SNMP の場所と連絡先）。Gaia と F5 は機種の自動判定にも足しました
+- 端末のログの区切りに、Huawei のプロンプト（`<名前>`・`[名前]`・`[~名前]` など）とページ送りの印、F5 の tmsh と bash のプロンプトを足しました。F5 は括弧の中の状態（`Active`・`Standby` など）が変わっても、同じホスト名なら同じプロンプトとして区切ります
+- AI の欄の入力欄に、PartsPilot の音声入力を呼ぶマイクのボタンを足しました（PartsPilot が入っているときだけ使えます）。設定の「音声入力」タブで、使うかどうか・ボタンの押し方・PartsPilot の場所を選べます。「LLM で文脈を踏まえて直す」（既定は切）を入にすると、話した文字を、それまでのやり取りを踏まえて AI に直させます
+- ほかの Pilot から呼ぶ入口 `pilot-call` を、呼び出しの合意 v1.1 に合わせました（誤りの code・`correlation_id` に使える文字・止められたときの code）
+
 ## 0.2.7
 
 - **安全の修正:** `snmp-server host` の行で、コミュニティ名の前に別の語が付く形（Aruba AOS-CX の `… trap version v2c community <値>`、AOS-Switch の `… community "<値>"`、Cisco IOS-XR の `… encrypted <値>`・`… clear <値>`、`use-vrf`・`source-interface`・`udp-port` などの語が前に来る形）では、コミュニティ名を構造化比較の差分の欄に入れて AI に送っていました。コミュニティ名を伏せるか、行を送らないようにしました

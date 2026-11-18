@@ -306,7 +306,7 @@ def config_facts(
     }
 
     # 伏せた一覧: 判定器は 1 つ。facts → vendor_specific → unparsed の順に通す(同じ値は同じ <secret:N>)
-    masker = FactMasker(body.splitlines(), words)
+    masker = FactMasker(body.splitlines(), words, used)
     cache: dict[tuple[str, str], bool] = {}
     kept_facts, unsent = _masked_facts(facts, masker, cache)
     kept_vendor, unsent_vendor = _masked_facts(vendor, masker, cache)

@@ -425,6 +425,16 @@ class WebSession:
                 changed()
             except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
                 pass
+        # 音声入力の設定(「音声入力」のタブ。enabled・場所・押し方)を、開いている比較の窓へ知らせる(ADR-0233 決定6)。
+        # 比較の窓だけが持つ。公開の名前は足さない(_ で始まる口。失敗は捨てる)
+        with self.lock:
+            compare = self._compare[1] if self._compare is not None and not self._compare_closed else None
+        voice_changed = getattr(compare, "_voice_settings_changed", None)
+        if voice_changed is not None:
+            try:
+                voice_changed()
+            except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
+                pass
 
     def _on_settings_closed(self, window: Any, api: Any = None) -> None:
         """設定の窓が閉じた(画面の「閉じる」でも、窓の上の × でも)。記録を外し、Python の側の _on_closed をロックの外で呼ぶ。

@@ -711,8 +711,91 @@ body {
   padding: var(--pilot-space-2) 0 0;
 }
 
-.pilot-ai-controls > textarea.pilot-input {
+.pilot-ai-controls textarea.pilot-input {
   resize: none;
+}
+
+/*
+ * 音声入力のマイクのボタン（ADR-0233 決定3 / REQ-341）。AI の面の入力欄（.pilot-voice-row）の右に置く。
+ * 使えないとき（hidden）は形を持たない。録音中は赤い印（警告の色 --pilot-color-danger）と音量の棒・経過の秒を出す。
+ * 色はどれも変数（ダークモードでも切り替わる）。音量の棒の幅は JS が CSSOM で入れる
+ */
+.pilot-voice-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--pilot-space-1);
+}
+
+.pilot-voice-row > textarea.pilot-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pilot-voice-button {
+  flex: none;
+  border-color: var(--pilot-color-border);
+  background: var(--pilot-color-button);
+  color: var(--pilot-color-text);
+}
+
+.pilot-voice-button:disabled {
+  background: var(--pilot-color-disabled);
+  color: var(--pilot-color-disabled-text);
+  cursor: default;
+}
+
+.pilot-voice-button--recording,
+.pilot-voice-button--recording:hover {
+  border-color: var(--pilot-color-danger);
+  background: var(--pilot-color-danger);
+  color: var(--pilot-color-danger-text);
+}
+
+.pilot-voice-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.pilot-voice-status {
+  display: flex;
+  align-items: center;
+  gap: var(--pilot-space-2);
+  color: var(--pilot-color-danger);
+  font-size: var(--pilot-font-size-small);
+}
+
+.pilot-voice-level {
+  display: inline-block;
+  flex: none;
+  width: 96px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-border);
+}
+
+.pilot-voice-level-bar {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--pilot-color-danger);
+}
+
+#voice-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+/* LLM の直し（REQ-342）の小さなボタン「直す前に戻す」「LLM の直しを使う」。入力欄の近くに置き、色は既存のボタンの変数のまま */
+.pilot-voice-correct {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pilot-space-1);
+}
+
+.pilot-voice-correct > .pilot-button {
+  padding: 0 var(--pilot-space-2);
+  font-size: var(--pilot-font-size-small);
 }
 
 .pilot-ai-row {

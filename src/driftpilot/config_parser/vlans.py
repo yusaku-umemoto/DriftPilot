@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from hier_config import HConfig, HConfigChild
 from hier_config.platforms.functions import expand_range
 
+from driftpilot.config_parser.huawei import vlan_list
 from driftpilot.config_parser.ir import Vlan, new_vlan
 from driftpilot.config_parser.patterns import Pattern, apply_first
 from driftpilot.config_parser.tracking import InterpretedLines
@@ -41,6 +42,8 @@ class _Ctx:
     has_children: bool = False
     # HPE Aruba AOS-Switch と見立てた config か(ADR-0228 決定 3、REQ-332)。`name "<名前>"` の引用符を外す
     aos_switch: bool = False
+    # Huawei VRP と見立てた config か(ADR-0231 決定 3(2)、REQ-337)。`vlan batch` を読み、`name` は後の行が勝つ
+    huawei: bool = False
 
 
 def _definition(m: re.Match[str], ctx: _Ctx) -> bool:
@@ -92,9 +95,25 @@ def _database_vlan(m: re.Match[str], ctx: _Ctx) -> bool:
     return _database_ids(m["range"], ctx)
 
 
+def _huawei_batch(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei VRP の `vlan batch <並び>`。各 ID の VLAN を、無ければ既定値で作る(あれば何も変えない)。
+
+    見立てていない config・子を持つ行・並びが読めない行は読まない(どの ID も作らない)。作った ID は defined に入れない
+    (後の `vlan <N>` の塊が項目を入れる。`vlan database` と同じ扱い。REQ-337)。
+    """
+    if not ctx.huawei or ctx.has_children:
+        return False
+    ids = vlan_list(m["list"])
+    if ids is None:
+        return False
+    for vlan_id in ids:
+        ctx.vlans.setdefault(str(vlan_id), new_vlan(vlan_id))
+    return True
+
+
 def _name(m: re.Match[str], ctx: _Ctx) -> bool:
-    """最初の name だけを読む。二度目以降は上書きせず読まない。"""
-    if ctx.name is not None:
+    """最初の name だけを読む。二度目以降は上書きせず読まない(Huawei と見立てたときは後の行が勝つ)。"""
+    if ctx.name is not None and not ctx.huawei:
         return False
     text = m["text"]
     if ctx.aos_switch and len(text) >= 2 and text.startswith('"') and text.endswith('"'):
@@ -164,12 +183,19 @@ PATTERNS: tuple[Pattern, ...] = (
         "展開できない・空の一覧、子を持つ行は未解釈(ADR-0206 決定2、REQ-289)",
     ),
     Pattern(
+        "vlans.huawei_batch", "top", r"vlan batch (?P<list>.+)", "vlans[id]", "vlan batch 10 20 to 22", _huawei_batch,
+        note="手続き。Huawei VRP と見立てた config だけ(ADR-0231 決定 3(2)、REQ-337)。並び(空白で区切った ID と "
+        "`<A> to <B>`。ID は 1〜4094、A ≤ B)の各 ID の VLAN を既定値で作る(すでにあれば何も変えない)。"
+        "後の `vlan <N>` の塊の項目はその VLAN に入る。2 行以上あれば ID を足し合わせる。"
+        "形に合わない語・範囲の外の ID・A > B を含む行・見立てていない config・子を持つ行は、行ごと未解釈",
+    ),
+    Pattern(
         "vlans.definition", "top", r"vlan (?P<range>\d[\d,\-]*)", "vlans[id]", "vlan 10", _definition,
         note="手続き。範囲(10,20-22)は展開し、全 ID に同じ name を付ける。定義済みの ID と重なる行は読まない",
     ),
     Pattern(
         "vlans.name", "vlan", r"name (?P<text>.+)", "vlans[id].name", "name USERS", _name,
-        note="最初の name だけを読む。HPE Aruba AOS-Switch と見立てた config だけ、名前の前後の `\"` を外す"
+        note="最初の name だけを読む(Huawei VRP と見立てた config だけ、後の行が勝つ。REQ-337)。HPE Aruba AOS-Switch と見立てた config だけ、名前の前後の `\"` を外す"
         "(`name \"users\"` → `users`。ADR-0228 決定 3、REQ-332)",
     ),
     Pattern(
@@ -198,16 +224,20 @@ PATTERNS: tuple[Pattern, ...] = (
 )
 
 
-def extract_vlans(tree: HConfig, interpreted: InterpretedLines, *, aos_switch: bool = False) -> dict[str, Vlan]:
+def extract_vlans(
+    tree: HConfig, interpreted: InterpretedLines, *, aos_switch: bool = False, huawei: bool = False
+) -> dict[str, Vlan]:
     """tree の `vlan` 行から、VLAN ID の文字列をキーにした Vlan の辞書を返す。
 
     すでに定義されたIDと重なる行は上書きせず、その行と子行を unparsed に残す。
     aos_switch は、HPE Aruba AOS-Switch と見立てた config か(`name "<名前>"` の引用符を外す。ADR-0228 決定 3、REQ-332)。
+    huawei は、Huawei VRP と見立てた config か(`vlan batch <並び>` を読み、`name` は後の行が勝つ。ADR-0231 決定 3(2)、REQ-337)。
     """
     vlans: dict[str, Vlan] = {}
     defined: set[str] = set()
     for block in tree.children:
-        ctx = _Ctx(vlans, defined, aos_switch=aos_switch)
+        ctx = _Ctx(vlans, defined, aos_switch=aos_switch, huawei=huawei)
+        ctx.has_children = bool(block.children)  # 見出しの判定に使うのは `vlan batch` だけ(子を持てば読まない。REQ-337)
         heading = apply_first(PATTERNS, "top", block.text, ctx)
         if heading is None:
             continue

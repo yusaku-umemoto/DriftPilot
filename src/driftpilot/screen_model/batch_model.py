@@ -40,6 +40,7 @@ from driftpilot.core import (
     JobResult,
     ManifestError,
     approved_payloads,
+    config_platform_used,
     final_results,
     job_pair_results,
     llm_preview,
@@ -649,11 +650,13 @@ def batch_report(results: Sequence[JobResult], words: Sequence[str]) -> Report:
             "after_name": file_label(str(job.after.path), words),
         }
         if result.multi is None:
-            pairs.append(pair_report(job_name(job), result.outcome, words, **names))
+            platform = config_platform_used(result.request.platform, result.outcome.kind, result.outcome.auto_platform)
+            pairs.append(pair_report(job_name(job), result.outcome, words, platform=platform, **names))
             continue
         group = redact_text(job_name(job), words)
         for pair in job_pair_results(result.multi):
-            shown = pair_report(multi_pair_name(job_name(job), pair.command), pair.outcome, words, **names)
+            platform = config_platform_used(pair.request.platform, pair.outcome.kind, pair.outcome.auto_platform)
+            shown = pair_report(multi_pair_name(job_name(job), pair.command), pair.outcome, words, platform=platform, **names)
             # コマンドは組の名前の形に頼らず別に持つ(出力の小見出しに出す。ADR-0190)
             command = redact_text(pair.command, words) if pair.command is not None else ""
             pairs.append(replace(shown, group=group, command=command))

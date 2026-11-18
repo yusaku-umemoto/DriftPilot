@@ -728,7 +728,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
     except SystemExit as exc:
-        return exc.code if isinstance(exc.code, int) else EXIT_ERROR
+        code = exc.code if isinstance(exc.code, int) else EXIT_ERROR
+        if code != 0:  # pilot-call の下の引数の誤りは、error の 1 行も標準出力に書く(ADR-0232 決定3)
+            from driftpilot.cli import pilot_call
+
+            words = sys.argv[1:] if argv is None else argv
+            if pilot_call.is_pilot_call_argv(words):
+                return pilot_call.argument_error(words)
+        return code
     try:
         return _run(args)
     except (CliError, ValueError) as exc:

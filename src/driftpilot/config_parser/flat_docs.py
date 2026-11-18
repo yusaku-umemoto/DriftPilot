@@ -8,6 +8,9 @@ Juniper Junos(juniper_junos。REQ-321・REQ-322・REQ-324)も同じ形で出す(
 この機種のもの)。
 Palo Alto PAN-OS(paloalto_panos。REQ-327・REQ-329)も同じ形で出す(docs/notes/panos-patterns.md。XML・set・brace の見分けと 2 段の文の木の規則の要約は
 この機種のもの)。
+Check Point Gaia(checkpoint_gaia。REQ-344)は、木の組み立ての関数(build)と行頭スコープ表の両方を持つ。行頭スコープ表・指紋の行(スコープ表の件数も出す)・
+写しの表を出す(docs/notes/gaia-patterns.md)。
+F5 BIG-IP(f5_bigip。REQ-349)は、行頭スコープ表を持たず、PAN-OS と同じ形で出す(docs/notes/f5-patterns.md。F5 用の木の規則の要約はこの機種のもの)。
 """
 
 import json
@@ -16,7 +19,9 @@ from typing import Any
 from driftpilot import i18n
 from driftpilot.config_parser.flat_scopes import FlatScope
 from driftpilot.config_parser.brace_tree import TREE_VERSION as BRACE_TREE_VERSION
+from driftpilot.config_parser.f5_tree import TREE_VERSION as F5_TREE_VERSION
 from driftpilot.config_parser.fortinet_tree import EMBEDDED, HASH_INPUT_VERSION
+from driftpilot.config_parser.gaia import TREE_VERSION as GAIA_TREE_VERSION
 from driftpilot.config_parser.junos_set_tree import TREE_VERSION as SET_TREE_VERSION
 from driftpilot.config_parser.junos_tree import TREE_VERSION as JUNOS_TREE_VERSION
 from driftpilot.config_parser.panos_tree import TREE_VERSION as PANOS_TREE_VERSION
@@ -29,6 +34,8 @@ FORTINET_GENERATE_COMMAND = "driftpilot patterns --platform fortinet --output do
 YAMAHA_GENERATE_COMMAND = "driftpilot patterns --platform yamaha --output docs/notes/yamaha-patterns.md"
 JUNOS_GENERATE_COMMAND = "driftpilot patterns --platform juniper_junos --output docs/notes/junos-patterns.md"
 PANOS_GENERATE_COMMAND = "driftpilot patterns --platform paloalto_panos --output docs/notes/panos-patterns.md"
+GAIA_GENERATE_COMMAND = "driftpilot patterns --platform checkpoint_gaia --output docs/notes/gaia-patterns.md"
+F5_GENERATE_COMMAND = "driftpilot patterns --platform f5_bigip --output docs/notes/f5-patterns.md"
 
 _HEADER_JA = f"""<!-- 自動生成。手で編集しない。 -->
 # パーサー対応一覧(平坦 config: {{platform}})
@@ -909,6 +916,326 @@ _PANOS_MAP_EN = (
 
 _PANOS_MAP = i18n.choose(_PANOS_MAP_JA, _PANOS_MAP_EN)
 
+_GAIA_HEADER_JA = f"""<!-- 自動生成。手で編集しない。 -->
+# パーサー対応一覧(Check Point Gaia: checkpoint_gaia)
+
+> **自動生成。手で編集しない。** 行頭スコープ表(`src/driftpilot/config_parser/flat_scopes.py` の `GAIA_SCOPES`)と
+> 写しの表(`src/driftpilot/config_parser/gaia.py` の `PATTERNS`)、木の組み立ての版(`gaia.py` の `TREE_VERSION`)から作る。
+> 再生成: `{GAIA_GENERATE_COMMAND}`
+> 表を変えたのにこのファイルがずれていると、テストが失敗する。
+
+Gaia の config(ADR-0234。`show configuration` の出力)は、字下げの無い `set <対象> …`・`add <対象> …` の行の並びで、Si-R と同じ
+行頭スコープ表の平らな読み方(ADR-0024)で木にする。hier_config は使わない。
+
+- `#` で始まる行(前の空白は可)と空の行は木に入れない(`# Configuration of …`・`# Language version: …`・`# Exported by … on <日時>` など)。
+  行番号はもとの行のまま。日時だけ違う 2 つの config の比較に差分は出ない
+- 動詞(`set`・`add`)はスコープ名に入れない。`set interface eth1 state on` と `add interface eth1 vlan 100` は同じ `interface eth1` の下に入る。
+  最後のスコープは、`set`・`add` の後ろの語そのものがスコープ名になる(`set dns primary 192.0.2.53` はスコープ `dns` の子 `primary 192.0.2.53`)
+- `delete …` で始まる行と、`set`・`add` の後ろの語が無い・形に合わない行は、どのスコープにも当たらず、行全体が最上位の 1 つのノードになる(未解釈)
+- 同じスコープの下で同じ行が 2 回以上ある、または同じ項目に違う値が書かれていると、警告(`duplicate_line`)を出す。どちらの行も捨てない
+- 範囲・列挙の展開はしない。木の組み立ての版 `{GAIA_TREE_VERSION}` は `#` の行の外し方の版で、表の指紋に入る(外し方を変えたら上げる)
+- 表の行の備考と写し先は開発者向けのメモで、日本語のまま出す
+"""
+
+_GAIA_HEADER_EN = f"""<!-- Generated automatically. Do not edit by hand. -->
+# Parser coverage list (Check Point Gaia: checkpoint_gaia)
+
+> **Generated automatically. Do not edit by hand.** It is made from the line-head scope table (`GAIA_SCOPES` of `src/driftpilot/config_parser/flat_scopes.py`),
+> the mapping table (`PATTERNS` of `src/driftpilot/config_parser/gaia.py`) and the version of the tree building (`TREE_VERSION` of `gaia.py`).
+> Regenerate: `{GAIA_GENERATE_COMMAND}`
+> If the table is changed but this file is not, the test fails.
+
+A Gaia config (ADR-0234; the output of `show configuration`) is a series of lines without indentation, `set <object> …` and `add <object> …`.
+It is made into a tree by the same flat reading as Si-R, with a line-head scope table (ADR-0024). hier_config is not used.
+
+- Lines that start with `#` (spaces before it are allowed) and empty lines are not put in the tree (`# Configuration of …`, `# Language version: …`, `# Exported by … on <date and time>`, and so on).
+  Line numbers stay those of the original lines. Comparing two configs that differ only in the date and time gives no difference
+- The verb (`set`, `add`) is not put in the scope name. `set interface eth1 state on` and `add interface eth1 vlan 100` go under the same `interface eth1`.
+  For the last scope, the word after `set` or `add` is the scope name itself (`set dns primary 192.0.2.53` is `primary 192.0.2.53` under the scope `dns`)
+- A line that starts with `delete …`, and a line with no word after `set` or `add` or in a form that does not fit, matches no scope, and the whole line becomes one top-level node (uninterpreted)
+- If the same line appears twice or more under the same scope, or different values are written for the same item, a warning (`duplicate_line`) is given. Neither line is dropped
+- Ranges and lists are not expanded. The tree building version `{GAIA_TREE_VERSION}` is the version of how the `#` lines are removed, and it goes into the table fingerprint (raise it if the way is changed)
+- The notes and targets of the table rows are memos for developers, and are shown in Japanese as they are
+"""
+
+_GAIA_HEADER = i18n.choose(_GAIA_HEADER_JA, _GAIA_HEADER_EN)
+
+_GAIA_MAP_JA = (
+    "**共通スキーマへの写し(ADR-0234 決定 3。REQ-345)**: 葉ごとに 2 段で読む。まず、よく使う葉を IR の写しの表(下の `interfaces.gaia…`・`static_routes.gaia…`・`global.gaia…`)で、"
+    "最上位のスコープの種類(`interface <名前>`・`bonding group <N>`・`static-route <宛先>`・`hostname`・`domainname`・`timezone`・`dns`・`ntp`・`syslog`・`snmp`)に合わせて写す。"
+    "写せた葉は解釈済みにし、汎用の形には入れない(REQ-344・347 の二重の判定によらず入る。写す欄に秘密は無く、AI に送るときの欄の伏せ方は IR の欄の決まりに従う)。"
+    "写せなかった葉(書式に合わない・範囲の外の数・アドレスとして読めない値・写す対象でないスコープ)は、後の「汎用の形」のパターンで読み直す(二重の判定つき)。"
+    "IR の欄は足さない。`user`・`aaa`・`bgp`・`ospf`・`ipv6 static-route` などは汎用の形のまま。\n",
+    "**インターフェースとボンディング**: スコープ `interface <名前>` 1 つに Interface を 1 つ作る(名前の初出の順)。`state on|off` は shutdown(偽・真。行が無ければ既定の偽)、"
+    "`ipv4-address <A> mask-length <N>` は ip_address(`<A>/<N>`。N は 0〜32)、`comments <文>` は description(両端の `\"` を外す)、`mtu <N>` は mtu、"
+    "`link-speed <語>` は speed(語の原文)。`vlan <N>`(`add interface <名前> vlan <N>`。N は 1〜4094)は Interface `<名前>.<N>` を作り(無ければ)、parent_interface を `<名前>` にする。"
+    "type は名前で決める: `.` を含む名前は routed(Cisco のサブインターフェースと同じ)、`bond` + 数字で始まる名前は port_channel、`lo` で始まる名前(`loopback` を含む)は loopback、ほかは routed。"
+    "スコープ `bonding group <N>` があれば `bond<N>`(port_channel)を作り、`interface <名前>` の葉でその名前の Interface(無ければ作る)の channel_group を `{\"id\": N, \"mode\": \"bond\"}` にする。"
+    "`auto-negotiation …`・`security-zone …`・`ipv6-address …`・`mode …`・`lacp-rate …`・`mii-interval …` などほかの葉と、形に合わない葉は汎用の形のまま。\n",
+    "**スタティックルート(スコープ `static-route <宛先>`)**: 宛先は `default`(0.0.0.0/0)か、ホストの部分が 0 の IPv4 の `<A>/<長さ>`。読めない宛先のスコープは全部の葉を汎用の形のままにする。"
+    "葉 1 つを経路 1 本にする(スコープの順、その中の葉の順)。`nexthop gateway address <A> [priority <N>] on|off` は next_hop = A・interface = None・distance = N(無ければ None)・enabled = `on` なら真・`off` なら偽、"
+    "`nexthop gateway logical <名前> [priority <N>] on|off` は next_hop = None・interface = 名前でほかは同じ、`nexthop blackhole|reject` は next_hop = None・interface = `blackhole`・`reject`・distance = None・enabled = None。"
+    "vrf はいつも None。`priority <N>` は Gaia の同じ宛先の次の候補の優先度(1〜8)で、IR に欄が無いので distance に持つ。"
+    "`off` だけの葉(経路そのものを止める)・ほかの形は汎用の形のまま。経路の機種固有値(route_vendor の形)は置かない。\n",
+    "**全体(IR の global)**: `hostname` は global.hostname、`domainname` は global.domain_name、`timezone` は global.timezone(葉の原文。空白は 1 つにする)、"
+    "`dns` の `primary|secondary|tertiary <A>` は global.dns.servers に「`<A>`(正規の書き方) `<欄>`」(FortiGate と同じ形。欄ごとに後の行の値、文字列の昇順)、"
+    "`ntp` の `server primary|secondary <A または名前> [<残り>]` は global.ntp_servers に「`<A または名前>` `<欄>`[ `<残り>`]」、"
+    "`syslog` の `log-remote-address <A> [<残り>]` は global.logging_hosts に「`<A>`[ `<残り>`]」(NTP・syslog は出た順で、同じ文字列は重ねない。Cisco と同じ)、"
+    "`snmp` の `location <文>`・`contact <文>` は global.snmp.location・contact(両端の `\"` を外す)。`ntp active on|off`・`syslog` のほかの葉・`snmp` のほかの葉"
+    "(`community`・`usm user`・`traps` など)は写さない(汎用の形か、送らない行は未解釈のまま)。\n",
+    "**値の食い違いと SNMP の場所・連絡先**: 値を 1 つしか持てない欄(ホスト名・ドメイン名・タイムゾーン・SNMP の場所・連絡先・DNS の各欄・インターフェースの shutdown・ip_address・description・mtu・speed・channel_group)に"
+    "違う値が 2 回書かれたら、後の行の値を使い、両方の行番号を重複の警告(`duplicate_line`)に出す(値は出さない。木が見つけた記録と行を共有すれば 1 件にまとまる。"
+    "Junos・PAN-OS・FortiGate と同じで、Cisco のホスト名などの「最初の行を使う」とは逆)。"
+    "SNMP の場所・連絡先は、REQ-344 ではつないだ 1 行(`snmp location …`)が語 `snmp` で送らない側になり AI に送っていなかったが、IR に写すと Cisco の `snmp-server location`・`contact` と同じ扱い"
+    "(IR の欄の伏せ方。場所・連絡先は伏せない)になり、AI に送る。Cisco と同じ扱いにそろえるもので、新しく送る側に緩める決まりではない。\n",
+    "**汎用の形(ADR-0234 決定 2。REQ-344)**: 木の全部のノードを `vendor_specific.checkpoint_gaia.config` に、スコープごとの葉の集合で写す。"
+    "形は `{\"lines\": [葉のテキストの昇順。同じ文字列は 1 つ], \"blocks\": {\"<スコープの名前>\": {\"lines\": […], \"blocks\": {…}}}}`(Junos と同じ形)。"
+    "スコープの名前は行頭スコープ表の name(`interface eth1`・`hostname`・`static-route default` など。`set`・`add` の動詞は入らない)。"
+    "最上位の葉は表に当たらない行で、未解釈のままなので、最上位の `lines` はいつも空。"
+    "`lines` は並びを無視して要素ごとの追加・削除で比べる。共通スキーマに写せた葉は入れず、写さなかった葉だけが入る。\n",
+    "scope は、汎用の形では `scope`(スコープのノード)・`leaf`(スコープの子の葉)。書式は行全体に対する正規表現。"
+    "葉が 1 つ以上入ったスコープ(か、残りの語の無い実在の行のスコープ)に鍵を置く。暗黙のノード(実在の行でない)は何も置かない。"
+    "葉が全部送らない側だったスコープは鍵ごと置かない。スコープだけの行の 2 回目以降は写さない(木の位置が 1 回目と同じなので、解釈済みの記録は 1 回目のまま)。\n",
+    "**送らない行は入れない(ADR-0224 決定 6 と同じ。Gaia は判定を 2 つにする)**: 葉ごとに、AI に送る側の判定(`Masker().judge_alone`)を 2 回行う。"
+    "(1) 残りの部分(葉のテキスト)を、スコープの名前(外側から順)を祖先にして判定する。"
+    "(2) スコープの名前と残りをつないだ 1 行(例 `snmp usm user …`。動詞 `set`・`add` は付けない)を、祖先なしで判定する。"
+    "(1)(2) の両方が「そのまま送る」(plain)のときだけ入れ、どちらかが plain でない葉(送らない・伏せる)は入れず、未解釈のままにする。"
+    "(2) は、語 `snmp` のように秘密を示す語がスコープの名前の側にあるとき、祖先の中では判定で見られず、SNMPv3 の合言葉・ハッシュ"
+    "(`add snmp usm user … auth-pass-phrase …`・`privacy-pass-hash …`)が入ってしまうのを防ぐ。このため汎用の形には `set snmp location`・`contact` なども"
+    "入らない(この 2 つの葉は、先に共通スキーマの snmp に写すので解釈済みになる)。AI に送る内容・人に渡す伏せた出力・config-facts の AI に渡す一覧でも、機種が Gaia の未解釈の行に同じ 2 つの判定を当てる。"
+    "利用者が設定で足した語は使わない。`delete …` など表に当たらない行も未解釈のまま。"
+    "未解釈の行は木の位置(`('user admin', 'password-hash <値>')`)で IR の `unparsed` に入る。\n",
+)
+
+_GAIA_MAP_EN = (
+    "**Mapping to the common schema (ADR-0234 decision 3. REQ-345)**: each leaf is read in two steps. First, the commonly used leaves are mapped by the mapping table for the IR (`interfaces.gaia…`, `static_routes.gaia…` and `global.gaia…` below), "
+    "according to the kind of the top-level scope (`interface <name>`, `bonding group <N>`, `static-route <destination>`, `hostname`, `domainname`, `timezone`, `dns`, `ntp`, `syslog`, `snmp`). "
+    "A leaf that was mapped is marked as interpreted and is not put in the generic form (it goes into the IR without the double judgment of REQ-344 and REQ-347; the fields have no secrets, and how the fields are hidden when sent to the AI follows the rules of the IR fields). "
+    "A leaf that could not be mapped (a different form, a number out of range, a value that cannot be read as an address, or a scope that is not mapped) is read again by the patterns of the generic form below (with the double judgment). "
+    "No IR field is added. `user`, `aaa`, `bgp`, `ospf`, `ipv6 static-route` and the like stay in the generic form.\n",
+    "**Interfaces and bonding**: one Interface is made for each scope `interface <name>` (in the order of first appearance). `state on|off` is shutdown (false or true; false by default if there is no line), "
+    "`ipv4-address <A> mask-length <N>` is ip_address (`<A>/<N>`; N is 0 to 32), `comments <text>` is description (the `\"` at both ends is removed), `mtu <N>` is mtu, "
+    "and `link-speed <word>` is speed (the word as written). `vlan <N>` (`add interface <name> vlan <N>`; N is 1 to 4094) makes the Interface `<name>.<N>` (if there is none) and sets its parent_interface to `<name>`. "
+    "The type is decided by the name: a name that has `.` is routed (the same as a Cisco subinterface), a name that starts with `bond` and a digit is port_channel, a name that starts with `lo` (including `loopback`) is loopback, and the others are routed. "
+    "If there is a scope `bonding group <N>`, `bond<N>` (port_channel) is made, and a leaf `interface <name>` sets channel_group of the Interface of that name (made if there is none) to `{\"id\": N, \"mode\": \"bond\"}`. "
+    "Other leaves such as `auto-negotiation …`, `security-zone …`, `ipv6-address …`, `mode …`, `lacp-rate …` and `mii-interval …`, and leaves in a form that does not fit, stay in the generic form.\n",
+    "**Static routes (scope `static-route <destination>`)**: the destination is `default` (0.0.0.0/0) or an IPv4 `<A>/<length>` whose host part is 0. All the leaves of a scope with an unreadable destination stay in the generic form. "
+    "One leaf is one route (in the order of scopes, and of leaves within a scope). `nexthop gateway address <A> [priority <N>] on|off` is next_hop = A, interface = None, distance = N (None if absent), and enabled = true for `on` and false for `off`; "
+    "`nexthop gateway logical <name> [priority <N>] on|off` is next_hop = None, interface = the name, and the others the same; `nexthop blackhole|reject` is next_hop = None, interface = `blackhole` or `reject`, distance = None and enabled = None. "
+    "vrf is always None. `priority <N>` is the priority of the next candidate of the same destination in Gaia (1 to 8); the IR has no field for it, so it is held in distance. "
+    "A leaf of only `off` (it stops the route itself) and other forms stay in the generic form. The vendor-specific values of a route (the form of route_vendor) are not put.\n",
+    "**Global (global of the IR)**: `hostname` is global.hostname, `domainname` is global.domain_name, `timezone` is global.timezone (the leaf as written, with one space), "
+    "`primary|secondary|tertiary <A>` of `dns` is put in global.dns.servers as \"`<A>` (the normal form) `<field>`\" (the same form as Fortinet; the value of the later line for each field, in ascending order of the strings), "
+    "`server primary|secondary <A or name> [<rest>]` of `ntp` is put in global.ntp_servers as \"`<A or name>` `<field>`[ `<rest>`]\", "
+    "`log-remote-address <A> [<rest>]` of `syslog` is put in global.logging_hosts as \"`<A>`[ `<rest>`]\" (NTP and syslog are in the order they appear, and the same string is not put twice; the same as Cisco), "
+    "and `location <text>` and `contact <text>` of `snmp` are global.snmp.location and contact (the `\"` at both ends is removed). `ntp active on|off`, other leaves of `syslog`, and other leaves of `snmp` "
+    "(`community`, `usm user`, `traps` and the like) are not mapped (the generic form, or uninterpreted if on the not-sent side).\n",
+    "**Different values written twice, and the SNMP location and contact**: if different values are written twice for a field that holds only one value (the hostname, domain name, timezone, SNMP location and contact, each field of DNS, "
+    "and shutdown, ip_address, description, mtu, speed and channel_group of an interface), the value of the later line is used, and the line numbers of both are put in the duplicate warning (`duplicate_line`; the value is not put. "
+    "If it shares a line with a record the tree found, they become one. The same as Junos, PAN-OS and Fortinet, and the opposite of \"the first line is used\" for the hostname and the like of Cisco). "
+    "In REQ-344 the one joined line of the SNMP location and contact (`snmp location …`) was on the not-sent side because of the word `snmp` and was not sent to the AI; when mapped to the IR, they are treated the same as the `snmp-server location` and `contact` of Cisco "
+    "(the rule of hiding IR fields; the location and contact are not hidden) and are sent to the AI. It only matches the treatment to Cisco, and is not a rule that loosens what is sent.\n",
+    "**Generic form (ADR-0234 decision 2. REQ-344)**: every node of the tree is mapped to `vendor_specific.checkpoint_gaia.config` as a set of leaves for each scope. "
+    "The form is `{\"lines\": [texts of the leaves in ascending order; the same string once], \"blocks\": {\"<scope name>\": {\"lines\": […], \"blocks\": {…}}}}` (the same form as Junos). "
+    "The scope name is the name of the line-head scope table (`interface eth1`, `hostname`, `static-route default`, and so on; the verb `set` or `add` is not in it). "
+    "A top-level leaf is a line that matches no scope and stays uninterpreted, so the top-level `lines` is always empty. "
+    "`lines` is compared by adding and removing each element, ignoring the order. A leaf that could be mapped to the common schema is not put in; only the leaves that were not mapped are.\n",
+    "scope in the generic form is `scope` (a scope node) or `leaf` (a leaf under a scope). The form is a regular expression for the whole line. "
+    "A key is put for a scope that got one or more leaves (or a scope of a real line with no remaining words). An implicit node (not a real line) puts nothing. "
+    "A scope whose leaves were all on the not-sent side gets no key. The second and later lines of a scope-only line are not mapped (their tree position is the same as the first, so the record of being interpreted stays that of the first).\n",
+    "**A line that is not sent is not put in (the same as ADR-0224 decision 6; Gaia uses two judgments)**: for each leaf, the judgment of the side that sends to the AI (`Masker().judge_alone`) is made twice. "
+    "(1) The remaining part (the text of the leaf) is judged with the scope names (from the outside) as the ancestors. "
+    "(2) The one line made by joining the scope names and the remaining part (for example `snmp usm user …`; the verb `set` or `add` is not added) is judged without ancestors. "
+    "A leaf is put in only when both (1) and (2) are \"sent as it is\" (plain); a leaf for which either is not plain (not sent, or masked) is not put in and stays uninterpreted. "
+    "(2) covers the case where a word that shows a secret, such as `snmp`, is on the side of the scope name, where the judgment does not look at it among the ancestors, "
+    "and the passphrases and hashes of SNMPv3 (`add snmp usm user … auth-pass-phrase …`, `privacy-pass-hash …`) would get in. For this reason `set snmp location`, `contact` and the like are not put in the generic form either "
+    "(these two leaves are mapped to snmp of the common schema first, so they are interpreted). The same two judgments are applied to the uninterpreted lines of a Gaia config in the content sent to the AI, in the masked output given to people, and in the list that config-facts gives to the AI. "
+    "Words the user added in the settings are not used. A line that matches no table, such as `delete …`, also stays uninterpreted. "
+    "An uninterpreted line enters `unparsed` of the IR by its tree position (`('user admin', 'password-hash <value>')`).\n",
+)
+
+_GAIA_MAP = i18n.choose(_GAIA_MAP_JA, _GAIA_MAP_EN)
+
+_F5_HEADER_JA = f"""<!-- 自動生成。手で編集しない。 -->
+# パーサー対応一覧(F5 BIG-IP: f5_bigip)
+
+> **自動生成。手で編集しない。** 写しの表(`src/driftpilot/config_parser/f5.py` の `PATTERNS`)と
+> 木の組み立ての版(`src/driftpilot/config_parser/f5_tree.py` の `TREE_VERSION`)から作る。
+> 再生成: `{F5_GENERATE_COMMAND}`
+> 表を変えたのにこのファイルがずれていると、テストが失敗する。
+
+F5 BIG-IP の config(ADR-0235。`tmsh list`・`tmsh show running-config`・`bigip.conf`)は、`<モジュール> <種類> <名前> {{` … `}}` の波かっこの入れ子だが、
+1 行の中に波かっこを書く(`/Common/http {{ }}`・`vlans {{ /Common/a /Common/b }}`)ので、Junos・PAN-OS の波かっこの木(1 行 1 文)では読めない。
+iRule・iApp のテンプレートの本文は Tcl の文で、波かっこの決まりでは読めない。そのため **F5 用の木の組み立て(`f5_tree.py`)** で読む。hier_config は使わない。
+字下げは、Tcl の塊の終わりの確かめにだけ使う。
+
+- 字句: 引用符は `"`(`\\"` では閉じない)。引用符の中の `{{`・`}}`・`#` は区切りにしない。行の終わりまでに閉じない引用符は、閉じの引用符のある行まで続けて 1 つの値として読む
+  (改行を含む値は、行数と SHA-256 の頭 16 字だけの 1 語にする。PAN-OS と同じ)。ファイルの終わりまで閉じなければ構造のエラー `quote`(開いた行)。
+  Tcl の塊の外で、最初の空白でない字が `#` の行(`#TMSH-VERSION: …`)と、空の行は木に入れない(版の行だけ違う 2 つの config の比較に差分は出ない)
+- 1 行の入れ子: `{{` の前の語の並び(全体)が見出しのテキスト。`<語>… {{ }}` は子の無い見出し 1 つ、`<語>… {{ <語> <語> … }}`(対が 1 組だけ)は見出し 1 つと中の語 1 つずつの葉。
+  ほかの `{{`・`}}` を含む行(`members {{ /Common/a {{ address 192.0.2.1 }} }}`)は、左から順に見出しを開き、`}}` の前の語の並びを 1 つの葉にして見出しを閉じる。
+  行の終わりで開いたままの見出しは次の行に続く。閉じの `}}` が足りない・多いときは構造のエラー `unbalanced`(推測で閉じない)
+- 最上位の 1 行のまとまり: 最上位(今開いている見出しが無い)の行で、`{{`・`}}` が行の中で全部対になる行
+  (`ltm monitor http /Common/m1 {{ … }}`・`auth user … {{ … partition-access {{ … }} … }}`・`ltm rule /Common/r1 {{ when … {{ … }} }}`・中が空の `ltm pool /Common/p1 {{ }}`)は、
+  見出しと葉に分けず、前後の空白を落とした行全体(語の間の空白は 1 つ)を最上位の葉 1 つにする。**中身は構造化しない**(値が 1 つ変わると、その行の削除と追加になる)。
+  最上位の葉なので、重複の警告は出ない
+- 入れ子の段の 1 行の形: 見出しの中の、`{{`・`}}` が行の中で全部対になる行は、行全体を AI に送る側の判定(`Masker().judge_alone`。祖先は今開いている見出しのテキスト)にかけ、
+  「そのまま送る」でなければ行全体を葉 1 つにする(`credentials {{ password … }}`・`cert-key-chain {{ default {{ description x passphrase … }} }}`・`recv {{ a }} description x password …` など、
+  中の語 1 つずつや `}}` の前の語の並びに分けると秘密が漏れる行)。「そのまま送る」のときだけ上の分け方をする(`vlans {{ /Common/a /Common/b }}` は葉 2 つ、`members {{ … {{ address … }} }}` は見出し → 見出し → 葉)。
+  前の行から続く `}}` や次の行へ続く `{{` を含む行は、この判定を当てずに分ける。行全体の判定が「そのまま通す」(pass)になる行(`description` で始まる行など)は、ここでは防げない
+  (複数行の形で単独の `description` の行を送るのと同じ扱い)
+- 名前の無い項目: 前に語の無い `{{`(`cm device` の `unicast-address {{ {{ effective-ip … }} }}`・APM の `rules {{ {{ … }} }}`)は、名前の無い見出し `{{}}` として開く。
+  同じ親の下の同じテキストの見出しは 1 つのノードにまとまるので、名前の無い項目も 1 つの `{{}}` にまとまる(どの葉がどの項目に属していたかは分からなくなる。行は失わない)
+- Tcl の塊(行のまま持つ。中を文として読まない): 最上位の見出しが `ltm rule `・`gtm rule `・`pem irule `・`sys icall script ` で始まるもの、と、
+  どの段でも見出しのテキストが `implementation`・`presentation`・`html-help`・`definition`・`macro` のもの。塊が始まるのは、見出しを開く `{{` が行の最後の字のときだけ
+  (同じ行の中で閉じる形は普通の文。行の途中で開いて閉じないまま行が終わるときは構造のエラー `tcl_inline`)。次の行から、`\\` の付かない `{{` を +1、`}}` を −1 と数え
+  (引用符・`#` は区別しない。Tcl の決まり)、数が 0 に戻った行で閉じる。その行が、開いた行と同じ字下げの `}}` だけの行でない・数が 0 より下がったときは構造のエラー `tcl_close`、
+  ファイルの終わりまで 0 に戻らなければ `tcl_open`(開いた行)。中の行は、空の行を除き、前後の空白を落とした行を 1 行ずつ葉にする(`#` の行も葉にする)
+- imish の部分: `!!! imish configuration starts here` の行から後ろの行(空の行を除く)は、F5 の木として読まず、最上位の葉(未解釈)にする。Cisco 系の読み方は当てない。
+  `!!! imish configuration ends here` で始まる行があれば、その行までを imish とし、後ろは F5 の木に戻る
+- 重複の警告(`duplicate_line`): F5 の見出しの直下で同じテキストの葉が 2 つ以上あるときだけ出す。Tcl の塊の中・最上位の行・名前の無い見出し `{{}}` の下(入れ子の下も)では出さない。
+  どの行も捨てない。警告に値は入らない(見出しの道すじと行番号だけ)
+- 木の組み立ての版 `{F5_TREE_VERSION}` は、この規則の版で、表の指紋に入る(規則を変えたら上げる)
+- 表の行の備考と写し先は開発者向けのメモで、日本語のまま出す
+"""
+
+_F5_HEADER_EN = f"""<!-- Generated automatically. Do not edit by hand. -->
+# Parser coverage list (F5 BIG-IP: f5_bigip)
+
+> **Generated automatically. Do not edit by hand.** It is made from the mapping table (`PATTERNS` of `src/driftpilot/config_parser/f5.py`) and
+> the version of the tree building (`TREE_VERSION` of `src/driftpilot/config_parser/f5_tree.py`).
+> Regenerate: `{F5_GENERATE_COMMAND}`
+> If the table is changed but this file is not, the test fails.
+
+An F5 BIG-IP config (ADR-0235; `tmsh list`, `tmsh show running-config` and `bigip.conf`) is nested braces, `<module> <kind> <name> {{` … `}}`, but
+braces are also written inside one line (`/Common/http {{ }}`, `vlans {{ /Common/a /Common/b }}`), so the brace tree of Junos and PAN-OS (one statement per line) cannot read it.
+The bodies of iRules and iApp templates are Tcl statements, which the brace rules cannot read. So it is read by **the tree building for F5 (`f5_tree.py`)**. hier_config is not used.
+Indentation is used only to check the end of a Tcl block.
+
+- Lexing: the quotation mark is `"` (`\\"` does not close it). A `{{`, `}}` or `#` inside quotation marks is not a delimiter. A quotation mark not closed by the end of the line continues to the line with the closing one as one value
+  (a value with a newline becomes one word of the line count and the first 16 characters of the SHA-256, the same as PAN-OS). If it is not closed by the end of the file, it is a structure error `quote` (the line where it was opened).
+  Outside a Tcl block, a line whose first non-space character is `#` (`#TMSH-VERSION: …`) and an empty line are not put in the tree (comparing two configs that differ only in the version line gives no difference)
+- Nesting in one line: the whole run of words before a `{{` is the text of the heading. `<words>… {{ }}` is one heading without children, and `<words>… {{ <word> <word> … }}` (only one pair) is one heading with each inner word as a leaf.
+  Any other line with `{{` or `}}` (`members {{ /Common/a {{ address 192.0.2.1 }} }}`) is read from left to right: a heading is opened, the words before a `}}` become one leaf, and the heading is closed.
+  A heading still open at the end of a line continues on the next line. A missing or extra `}}` is a structure error `unbalanced` (nothing is closed by guessing)
+- A top-level one-line group: a line at the top level (no heading is open) whose `{{` and `}}` all pair up within the line
+  (`ltm monitor http /Common/m1 {{ … }}`, `auth user … {{ … partition-access {{ … }} … }}`, `ltm rule /Common/r1 {{ when … {{ … }} }}`, and an empty `ltm pool /Common/p1 {{ }}`)
+  is not split into a heading and leaves; the whole line, with the surrounding spaces removed (one space between words), becomes one top-level leaf. **The inside is not structured**
+  (when one value changes, it shows as the removal and the addition of that line). Being a top-level leaf, it gives no duplicate warning
+- A one-line form at a nested level: a line inside a heading whose `{{` and `}}` all pair up within the line is passed whole to the judgment of the side that sends to the AI (`Masker().judge_alone`; the ancestors are the texts of the headings now open),
+  and if it is not "sent as it is", the whole line becomes one leaf (a line that would leak a secret if split into one word per leaf or into the words before a `}}`, such as `credentials {{ password … }}`,
+  `cert-key-chain {{ default {{ description x passphrase … }} }}` and `recv {{ a }} description x password …`). Only when it is "sent as it is" is it split as above (`vlans {{ /Common/a /Common/b }}` is two leaves,
+  `members {{ … {{ address … }} }}` is heading → heading → leaf). A line with a `}}` continuing from a previous line or a `{{` continuing to the next line is split without this judgment.
+  A line whose whole-line judgment is "pass" (such as a line starting with `description`) cannot be prevented here (the same treatment as sending a lone `description` line in a multi-line form)
+- Unnamed items: a `{{` with no word before it (`unicast-address {{ {{ effective-ip … }} }}` of `cm device`, `rules {{ {{ … }} }}` of APM) is opened as an unnamed heading `{{}}`.
+  Headings with the same text under the same parent are put together into one node, so unnamed items also become one `{{}}` (which leaf belonged to which item is no longer known. No line is lost)
+- Tcl blocks (kept as lines; the inside is not read as statements): a top-level heading starting with `ltm rule `, `gtm rule `, `pem irule ` or `sys icall script `, and, at any level, a heading whose text is
+  `implementation`, `presentation`, `html-help`, `definition` or `macro`. A block starts only when the `{{` that opens the heading is the last character of the line
+  (a form closed in the same line is an ordinary statement; if it is opened in the middle of a line and the line ends with it still open, it is a structure error `tcl_inline`). From the next line, a `{{` without a `\\` counts +1 and a `}}` counts −1
+  (quotation marks and `#` are not distinguished, which is the Tcl rule), and the block closes at the line where the count returns to 0. If that line is not a line holding only `}}` at the same indentation as the opening line, or the count goes below 0, it is a structure error `tcl_close`,
+  and if it does not return to 0 by the end of the file, `tcl_open` (the line where it was opened). Each inner line, except empty ones, becomes one leaf with the surrounding spaces removed (a `#` line also becomes a leaf)
+- The imish part: the lines (except empty ones) from the line `!!! imish configuration starts here` are not read as the F5 tree; each becomes a top-level leaf (uninterpreted). No Cisco-family reading is applied.
+  If there is a line starting with `!!! imish configuration ends here`, the imish part runs to that line and the F5 tree resumes after it
+- Duplicate warning (`duplicate_line`): given only when two or more leaves with the same text are directly under an F5 heading. It is not given inside a Tcl block, for top-level lines, or under an unnamed heading `{{}}` (including nested ones).
+  No line is dropped. The warning holds no values (only the path of the heading and the line numbers)
+- The tree building version `{F5_TREE_VERSION}` is the version of these rules and goes into the table fingerprint (raise it when the rules change)
+- The notes and targets of the table rows are memos for developers, and are shown in Japanese as they are
+"""
+
+_F5_HEADER = i18n.choose(_F5_HEADER_JA, _F5_HEADER_EN)
+
+_F5_MAP_JA = (
+    "**汎用の形(ADR-0235 決定 2。REQ-349)**: 木の全部のノードを `vendor_specific.f5_bigip.config` に、見出しごとの葉の集合で写す。"
+    "形は `{\"lines\": [最上位の葉の昇順。同じ文字列は 1 つ], \"blocks\": {\"<見出しのテキスト>\": 同じ形}}`(Junos・Check Point Gaia と同じ)。"
+    "見出しは行そのもの(`ltm virtual /Common/vs-test1`・`profiles`・`/Common/http`)で、語を削らない。`lines` は並びを無視して要素ごとの追加・削除で比べる。"
+    "よく使う物は、先に共通スキーマ(IR。global・interfaces・vlans・static_routes)へ写す(下の「IR に写す物」。REQ-350)。機種の自動判定は REQ-351、端末ログは REQ-352。\n",
+    "scope は `top`(最上位の見出しで、IR に写す種類を決める行)・`<種類>`(その見出しの子の行)・`<種類>:block`(入れ子の見出しの行)・"
+    "`block`(汎用の形の見出しのノード)・`leaf`(汎用の形の葉のノード)。書式は行全体に対する正規表現。\n",
+    "**IR に写す物(ADR-0235 決定 3。REQ-350)**: 写した行は解釈済みにし、汎用の形には入れない。IR の欄は足さない。名前(`/Common/vlan-test1` など)は `/Common/` を含めた原文のまま使う。"
+    "アドレスの後ろの `%<数>`(ルートドメイン)は外した値をアドレスにし、`<数>` を vrf の欄に持つ(欄がある項目だけ。`<A>%<数>/<長さ>` と `<A>/<長さ>%<数>` の両方を受ける)。"
+    "値を 1 つしか持てない欄に違う値が 2 回あれば、後の行の値を使い、食い違った行の番号を重複の警告に出す(値は出さない。Gaia と同じ)。"
+    "写した行は、行全体の判定によらず IR に入る(IR の欄の伏せ方は今の決まり。写す欄に秘密は無い)。1 行で閉じるまとまり(木が行全体を 1 つの葉にしたもの)は写さない。"
+    "形に合わない子の行(アドレスや長さとして読めない値・範囲の外の数・ホストの部分が 0 でない宛先・宛先と gw で IPv4・IPv6 の種類が違う経路・network と gw の `%<数>` が違う経路・"
+    "vrf の欄の無い dns・syslog・管理 IP の `%` 付きのアドレス)は写さず、汎用の形か未解釈のまま。2 つの子がそろって写るもの"
+    "(Self IP の `address` と `vlan`・経路の `network` と `gw`・syslog の `host`)は、そろったときだけ写す。\n",
+    "**IR に写す物の一覧**: 全体は `sys global-settings` の hostname・`sys ntp` の servers(書かれた順。重ねない)と timezone・`sys dns` の name-servers(正規の書き方の昇順)・"
+    "`sys syslog` の remote-servers の下の host(`remote-port` があれば付ける)・`sys snmp` の sys-location・sys-contact(両端の `\"` を外す)。"
+    "管理 IP は `sys management-ip <A>/<長さ>` を Interface `mgmt`(type は routed)に、インターフェースは `net interface <名前>`(type は switchport。media-fixed → speed・mtu・description・disabled/enabled → shutdown)。"
+    "VLAN は `net vlan <名前>` の `tag` を vlans[\"<N>\"](name は名前)に、`mtu`・`description` を同じ名前の Interface(type は svi)に。"
+    "Self IP は `net self <名前>` の `address` と `vlan` を Interface `<VLAN の名前>`(type は svi)に、全部読んだあとに Self IP の名前の昇順で当てる"
+    "(floating でない IPv4 は ip_address、2 つ目からは secondary_addresses、floating は virtual_addresses、floating でない IPv6 は ipv6_addresses)。"
+    "経路は `net route <名前>` の `network`(`default`・`default-inet6` も)と `gw` を 1 本に(見出しの出た順。`gw` の無い経路は写さない)。\n",
+    "**IR に写す物の決まり(依頼書に足した決まり)**: (1) F5 で作る Interface の parent_interface はいつも None(名前の `.` から親を推定しない。FortiGate と同じ)。"
+    "(2) `net interface mgmt` と `sys management-ip` は 1 つの Interface `mgmt` にまとまり、管理 IP があれば type は書かれた順によらず routed(種類の食い違いの警告は出さない)。"
+    "(3) IPv6 の管理 IP は mgmt の ipv6_addresses に入る。(4) floating の Self IP は IPv6 でも virtual_addresses に入り、ipv6_addresses には floating でないものだけが入る。"
+    "(5) `sys snmp` の見出しは送らない側の判定なので、見出しもほかの子も未解釈のまま。sys-location・sys-contact の子だけを写す。\n",
+    "**見出しの鍵**: 見出しは、判定が通れば鍵を置く。子の葉が全部送らない側でも `{\"lines\": [], \"blocks\": {}}` で置く"
+    "(見出しは実在の行なので、子の無い見出し `/Common/http { }` の有る無しも差分に出る)。同じ親の下の同じテキストの見出しは木でまとまっているので、鍵は 1 つ。"
+    "**例外(REQ-350)**: IR に写す子を持つ見出し(`net route`・`sys ntp`・`net self` など。見出しそのものを写す `net interface`・`sys management-ip` も)は、"
+    "写さなかった子が残るとき(`traffic-group` など)だけ鍵を置き、写した行は汎用の形に入れない(見出しの行も解釈済みにする)。"
+    "子が 1 つも写らなかった見出しは、今までのとおり判定が通れば鍵を置く。残る注意: 経路・Self IP の名前は IR に欄が無いので、写した分は構造化の比べる対象から外れる"
+    "(名前だけを変えても構造化の差分は出ない。単純比較の差分には出る)。\n",
+    "**1 行のまとまり**: 最上位の 1 行のまとまり(`ltm monitor http /Common/m1 { … }` など、同じ行の中で閉じる行)は、行全体を最上位の葉 1 つにして、最上位の `lines` に入れる"
+    "(中身は構造化しない。値が変わると、行の削除と追加になる。重複の警告は出ない)。入れ子の段の 1 行の形は、行全体の判定が「そのまま送る」のときだけ見出しと葉に分け、"
+    "そうでなければ行全体を葉 1 つにして、見出しの `lines` に入れる(`credentials { password … }` など。判定が「そのまま送る」でなければ入れず、未解釈のまま)。"
+    "行全体の判定が pass になる行(`description` で始まる行など)は、木の組み立てでは防げない。\n",
+    "**iRule・iApp の本文と名前の無い項目**: Tcl の塊の行も、名前の無い見出し `{}` の中の葉も、ほかの行と同じ判定を通ってから入る。"
+    "名前の無い項目は 1 つの `{}` にまとまるので、どの葉がどの項目に属していたかは、汎用の形では分からなくなる"
+    "(例: APM の `rules` の 2 つの項目の間で葉を入れ替えても、汎用の形の差分は出ない。行は失わず、単純比較の差分には出る)。\n",
+    "**送らない行は入れない(ADR-0224 決定 6 と同じ)**: 葉のテキストを AI に送る側の判定(`Masker().judge_alone(テキスト, 祖先)`。祖先は見出しのテキストで外側から順)に"
+    "かけ、「そのまま送る」(plain)でない行(送らない・伏せる行。`auth user …` の暗号化したパスワード・`community-name`・iRule の `set api_token \"…\"`・`$M$…` の鍵など)は入れず、"
+    "未解釈のままにする。見出しのテキストも同じく判定し、plain でなければ、その中の行も読まずに未解釈に残す。"
+    "F5 の見出しは行そのもの(語を削らない)なので、行頭スコープ表の機種の二重の判定は当てない。利用者が設定で足した語は使わない。"
+    "imish の部分の最上位の葉は未解釈のまま。未解釈の行は木の位置(見出しのテキストの並び)で IR の `unparsed` に入る。\n",
+)
+
+_F5_MAP_EN = (
+    "**Generic form (ADR-0235 decision 2. REQ-349)**: every node of the tree is mapped to `vendor_specific.f5_bigip.config` as a set of leaves for each heading. "
+    "The form is `{\"lines\": [top-level leaves in ascending order, one for each distinct string], \"blocks\": {\"<heading text>\": the same form}}` (the same as Junos and Check Point Gaia). "
+    "A heading is the line itself (`ltm virtual /Common/vs-test1`, `profiles`, `/Common/http`); no word is removed. `lines` is compared by the addition and removal of each element, ignoring the order. "
+    "The commonly used items are first mapped to the common schema (the IR: global, interfaces, vlans, static_routes; see \"Items mapped to the IR\" below; REQ-350). The automatic device detection is REQ-351 and the terminal logs are REQ-352.\n",
+    "scope is `top` (a top-level heading; the row that decides the kind mapped to the IR), `<kind>` (a row for a child of that heading), `<kind>:block` (a row for a nested heading), "
+    "`block` (a heading node of the generic form) or `leaf` (a leaf node of the generic form). The form is a regular expression for the whole line.\n",
+    "**Items mapped to the IR (ADR-0235 decision 3. REQ-350)**: a mapped line is marked as interpreted and is not put in the generic form. No field is added to the IR. A name (such as `/Common/vlan-test1`) is used as written, including `/Common/`. "
+    "A `%<number>` (route domain) after an address is removed to make the address, and `<number>` goes into the vrf field (only for items that have the field; both `<A>%<number>/<length>` and `<A>/<length>%<number>` are accepted). "
+    "If a field that holds one value gets different values twice, the value of the later line is used and the numbers of the conflicting lines are given in a duplicate warning (no value is given; the same as Gaia). "
+    "A mapped line goes into the IR regardless of the whole-line judgment (the IR fields are masked by the current rules; the mapped fields hold no secret). A one-line group that closes within a line (which the tree made one leaf of the whole line) is not mapped. "
+    "A child line of a form that does not fit (a value that cannot be read as an address or a length, a number out of range, a destination whose host part is not 0, a route whose destination and gw differ in IPv4/IPv6, "
+    "a route whose `%<number>` of network and gw differ, and an address with `%` in dns, syslog or a management IP, which have no vrf field) is not mapped and stays in the generic form or uninterpreted. "
+    "Items that are mapped only when two children are present (`address` and `vlan` of a Self IP, `network` and `gw` of a route, `host` of syslog) are mapped only when they are all present.\n",
+    "**List of items mapped to the IR**: for global, hostname of `sys global-settings`, servers of `sys ntp` (in written order, without duplicates) and timezone, name-servers of `sys dns` (canonical form, ascending), "
+    "host under remote-servers of `sys syslog` (with `remote-port` if present), and sys-location and sys-contact of `sys snmp` (the `\"` at both ends removed). "
+    "A management IP is `sys management-ip <A>/<length>` to Interface `mgmt` (type routed), and an interface is `net interface <name>` (type switchport; media-fixed to speed, mtu, description, disabled/enabled to shutdown). "
+    "A VLAN is `tag` of `net vlan <name>` to vlans[\"<N>\"] (name is the name), and `mtu` and `description` to the Interface of the same name (type svi). "
+    "A Self IP is `address` and `vlan` of `net self <name>` to Interface `<VLAN name>` (type svi), applied after everything is read in ascending order of the Self IP name "
+    "(a non-floating IPv4 is ip_address, from the second secondary_addresses, a floating one is virtual_addresses, and a non-floating IPv6 is ipv6_addresses). "
+    "A route is `network` (also `default` and `default-inet6`) and `gw` of `net route <name>` as one route (in the order the headings appear; a route without `gw` is not mapped).\n",
+    "**Rules for the items mapped to the IR (rules added to the request)**: (1) parent_interface of an Interface made for F5 is always None (the parent is not guessed from a `.` in the name; the same as FortiGate). "
+    "(2) `net interface mgmt` and `sys management-ip` are put together into one Interface `mgmt`, and if there is a management IP its type is routed regardless of the written order (no warning about a conflict of types). "
+    "(3) An IPv6 management IP goes into ipv6_addresses of mgmt. (4) A floating Self IP goes into virtual_addresses even for IPv6, and ipv6_addresses holds only non-floating ones. "
+    "(5) The heading `sys snmp` is judged to be on the not-sent side, so the heading and the other children stay uninterpreted. Only the children sys-location and sys-contact are mapped.\n",
+    "**Keys of headings**: a heading gets a key when its judgment passes. Even if all its leaves are on the not-sent side it is put as `{\"lines\": [], \"blocks\": {}}` "
+    "(a heading is a real line, so whether a heading without children such as `/Common/http { }` exists also shows as a difference). Headings with the same text under the same parent are already put together by the tree, so there is one key. "
+    "**Exception (REQ-350)**: a heading that has children mapped to the IR (such as `net route`, `sys ntp` and `net self`; also `net interface` and `sys management-ip`, whose heading itself is mapped) "
+    "gets a key only when children that were not mapped remain (such as `traffic-group`), and the mapped lines are not put in the generic form (the line of the heading is interpreted too). "
+    "A heading none of whose children was mapped gets a key as before when its judgment passes. A remaining caution: the names of routes and Self IPs have no field in the IR, so the mapped ones are outside the structured comparison "
+    "(changing only a name gives no structured difference; the plain comparison shows it).\n",
+    "**One-line groups**: a top-level one-line group (a line that closes within the same line, such as `ltm monitor http /Common/m1 { … }`) becomes one top-level leaf of the whole line and goes into the top-level `lines` "
+    "(the inside is not structured; when a value changes, it is the removal and the addition of the line; no duplicate warning is given). A one-line form at a nested level is split into a heading and leaves only when the whole-line judgment is \"sent as it is\"; "
+    "otherwise the whole line becomes one leaf and goes into the `lines` of the heading (such as `credentials { password … }`; if the judgment is not \"sent as it is\" it is not put in and stays uninterpreted). "
+    "A line whose whole-line judgment is pass (such as a line starting with `description`) cannot be prevented by the tree building.\n",
+    "**Bodies of iRules and iApps, and unnamed items**: the lines of a Tcl block and the leaves inside an unnamed heading `{}` also go in after the same judgment as other lines. "
+    "Unnamed items are put together into one `{}`, so which leaf belonged to which item is no longer known in the generic form "
+    "(for example, swapping leaves between two items of `rules` of APM gives no difference in the generic form. No line is lost, and the plain comparison shows it).\n",
+    "**A line that is not sent is not put in (the same as ADR-0224 decision 6)**: the text of a leaf is passed to the judgment of the side that sends to the AI (`Masker().judge_alone(text, ancestors)`; the ancestors are the heading texts from the outside in), "
+    "and a line that is not \"sent as it is\" (plain) (a line not sent or masked, such as an encrypted password of `auth user …`, `community-name`, `set api_token \"…\"` of an iRule and a `$M$…` key) is not put in and "
+    "stays uninterpreted. The text of a heading is judged in the same way, and if it is not plain, the lines inside it are not read either and stay uninterpreted. "
+    "An F5 heading is the line itself (no word is removed), so the double judgment of the machines with a line-head scope table is not applied. Words the user added in the settings are not used. "
+    "The top-level leaves of the imish part stay uninterpreted. An uninterpreted line enters `unparsed` of the IR by its tree position (the run of heading texts).\n",
+)
+
+_F5_MAP = i18n.choose(_F5_MAP_JA, _F5_MAP_EN)
+
 # 表の上の見出し・指紋の行・列の名前(日本語のときの出力は今と同じ)
 _DOC_JA = {
     "flat_fingerprint": "表の指紋: `{digest}`({count} 件。行頭スコープ表 {scopes} 件 ＋ 写しの表 {patterns} 件)。"
@@ -923,6 +1250,10 @@ _DOC_JA = {
     "yamaha_map_title": "## IR への写し(interfaces・static_routes・vendor_specific の settings・pp・tunnel)\n",
     "junos_map_title": "## IR への写し(global・interfaces・static_routes・bgp・prefix_lists・route_maps・acls・vendor_specific の config)\n",
     "panos_map_title": "## IR への写し(global・interfaces・static_routes・vendor_specific の config)\n",
+    "gaia_map_title": "## IR への写し(global・interfaces・static_routes・vendor_specific の config)\n",
+    "f5_map_title": "## IR への写し(global・interfaces・vlans・static_routes・vendor_specific の config)\n",
+    "scoped_fingerprint": "表の指紋: `{digest}`({count} 件。行頭スコープ表 {scopes} 件 ＋ 写しの表 {patterns} 件。"
+    "木の組み立ての版 `{tree_version}` を含む)。保存した比較結果の `tools.patterns_fingerprint` と突き合わせる(docs/notes/req-14-storage.md)。\n",
 }
 _DOC_EN = {
     "flat_fingerprint": "Table fingerprint: `{digest}` ({count} rows. {scopes} line-head scope rows + {patterns} mapping rows). "
@@ -937,6 +1268,10 @@ _DOC_EN = {
     "yamaha_map_title": "## Mapping to the IR (interfaces, static_routes, and settings, pp and tunnel of vendor_specific)\n",
     "junos_map_title": "## Mapping to the IR (global, interfaces, static_routes, bgp, prefix_lists, route_maps, acls, and config of vendor_specific)\n",
     "panos_map_title": "## Mapping to the IR (global, interfaces, static_routes, and config of vendor_specific)\n",
+    "gaia_map_title": "## Mapping to the IR (global, interfaces, static_routes, and config of vendor_specific)\n",
+    "f5_map_title": "## Mapping to the IR (global, interfaces, vlans, static_routes, and config of vendor_specific)\n",
+    "scoped_fingerprint": "Table fingerprint: `{digest}` ({count} rows. {scopes} line-head scope rows + {patterns} mapping rows. "
+    "Includes the tree building version `{tree_version}`). Compare it with `tools.patterns_fingerprint` of a saved comparison result (docs/notes/req-14-storage.md).\n",
 }
 _DOC = i18n.choose(_DOC_JA, _DOC_EN)
 
@@ -947,6 +1282,8 @@ _BUILT_DOCS = {
     "yamaha": (_YAMAHA_HEADER, "yamaha_map_title", _YAMAHA_MAP),
     "juniper_junos": (_JUNOS_HEADER, "junos_map_title", _JUNOS_MAP),
     "paloalto_panos": (_PANOS_HEADER, "panos_map_title", _PANOS_MAP),
+    "checkpoint_gaia": (_GAIA_HEADER, "gaia_map_title", _GAIA_MAP),
+    "f5_bigip": (_F5_HEADER, "f5_map_title", _F5_MAP),
 }
 
 
@@ -1012,21 +1349,41 @@ def render_markdown(platform: str = "fujitsu_sir") -> str:
 
 
 def _render_built(platform: str) -> str:
-    """行頭スコープ表を持たない機種(D型・ヤマハ)の一覧。木の組み立ての規則と写しの表。見出し・案内・節の見出しは機種ごとの表で引く。"""
+    """木の組み立ての関数(build)を持つ機種(D型・ヤマハ・Junos・PAN-OS・Check Point Gaia)の一覧。木の組み立ての規則と写しの表。
+    見出し・案内・節の見出しは機種ごとの表で引く。行頭スコープ表を持つ機種(Check Point Gaia)だけ、写しの表の前にスコープ表を出す。"""
     flat = FLAT_PLATFORMS[platform]
     fp = patterns_fingerprint(platform)
     header, map_title, map_paragraphs = _BUILT_DOCS[platform]
-    out = [
-        header,
-        # 指紋の行の文は、写しの表の件数と木の組み立ての版を出す形で機種に依らない(FortiGate の出力は変えない)
-        _DOC["fortinet_fingerprint"].format(
-            digest=fp.digest, count=fp.count, patterns=len(flat.patterns), tree_version=flat.tree_version
-        ),
-        _DOC[map_title],
-        *map_paragraphs,
-        _PATTERN_DOC["table_head"],
-        "|---|---|---|---|---|---|",
-    ]
+    if flat.scopes:  # 行頭スコープ表を持つ機種(Check Point Gaia)は、指紋の行にスコープ表の件数も出し、写しの表の前にスコープ表を出す
+        out = [
+            header,
+            _DOC["scoped_fingerprint"].format(
+                digest=fp.digest, count=fp.count, scopes=len(flat.scopes), patterns=len(flat.patterns),
+                tree_version=flat.tree_version,
+            ),
+            _DOC["scope_title"],
+            _DOC["scope_head"],
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for s in flat.scopes:
+            expand = ", ".join(f"`{name}`" for name in s.expand)
+            out.append(
+                f"| `{s.id}` | {s.platform} | {_code(s.match)} | {_code(s.name)} | {s.parent or ''} | {expand} "
+                f"| {_code(s.example)} | {_cell(s.note)} |"
+            )
+        out += ["", _DOC[map_title], *map_paragraphs, _PATTERN_DOC["table_head"], "|---|---|---|---|---|---|"]
+    else:
+        out = [
+            header,
+            # 指紋の行の文は、写しの表の件数と木の組み立ての版を出す形で機種に依らない(FortiGate の出力は変えない)
+            _DOC["fortinet_fingerprint"].format(
+                digest=fp.digest, count=fp.count, patterns=len(flat.patterns), tree_version=flat.tree_version
+            ),
+            _DOC[map_title],
+            *map_paragraphs,
+            _PATTERN_DOC["table_head"],
+            "|---|---|---|---|---|---|",
+        ]
     for p in flat.patterns:
         match = _code(p.match) if p.match is not None else _PATTERN_DOC["no_line"]
         out.append(f"| `{p.id}` | {_cell(p.scope)} | {match} | {_cell(p.target)} | {_code(p.example)} | {_cell(p.note)} |")

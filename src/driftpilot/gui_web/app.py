@@ -51,6 +51,7 @@ from driftpilot.gui_web.compare_api import CompareApi
 from driftpilot.gui_web.session import WebSession
 from driftpilot.gui_web.settings_api import SettingsApi
 from driftpilot.gui_web.theme import themed_url, themed_window
+from driftpilot.gui_web.voice import VoiceHub
 from driftpilot.llm_settings import portable_settings_dir
 from driftpilot.messages import (
     COMPARE_TITLE,
@@ -86,6 +87,8 @@ WEBVIEW_STORAGE_DIR = "webview"
 # start が戻った後に、ほかの非デーモンのスレッドを待つ時間の合計の上限(秒。REQ-111)と、プロセスを終わらせる関数。
 # どちらもテストで差し替える(tests/conftest.py で _exit を何もしない関数にする)
 EXIT_WAIT_SECONDS = 2.0
+# 音声入力の子を止める処理を、終わるまで待つ時間の上限(秒。ADR-0233 決定2。止めるのは 5 秒+2 秒まで)
+VOICE_STOP_WAIT_SECONDS = 8.0
 _exit = os._exit
 
 
@@ -263,6 +266,7 @@ def run(
         "text_select": True,
         **window_geometry(screens, size=AI_PANE_SIZE),
     }
+    voice: VoiceHub | None = None
     launch_args = (
         {}
         if launch is None
@@ -301,7 +305,9 @@ def run(
             ai_window=ai_window,
             **launch_args,
         )
-        compare = CompareApi(session)
+        # 音声入力(ADR-0233)。比較の画面のときだけ持つ。子の起動・止めるのは hub(窓を閉じる処理は待たせない)
+        voice = VoiceHub()
+        compare = CompareApi(session, voice=voice)
         window = webview.create_window(
             COMPARE_TITLE,
             url=themed_url(page_url(COMPARE_PAGE), theme),
@@ -323,7 +329,12 @@ def run(
         else:
             webview.start(storage_path=str(portable / WEBVIEW_STORAGE_DIR))
     except webview.WebViewException as exc:
+        if voice is not None:
+            voice.close()
         tell(_bundle_notice() or gui_web_start_failed(type(exc).__name__))
         return 2
+    if voice is not None:
+        # 音声入力の子を止める処理(窓を閉じたときに始まっている)が終わるのを、最大 VOICE_STOP_WAIT_SECONDS 秒待つ。窓はもう無い
+        voice.shutdown(VOICE_STOP_WAIT_SECONDS)
     _finish(0)
     return 0

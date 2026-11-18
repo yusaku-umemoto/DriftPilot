@@ -31,6 +31,7 @@ from driftpilot.llm_analyzer.payload import (
     _DROP,
     CONTEXT_LINES,
     _judge_line,
+    joined_line_unsent,
     _judge_parent,
     _mask_tree,
     _raw_line,
@@ -141,11 +142,15 @@ def _omitted_diff(op: str, category: str) -> RedactedDiff:
     return RedactedDiff(op, category, OMITTED, OMITTED, OMITTED, OMITTED, True)
 
 
-def _structured_row(diff: Diff, masker: Masker, sides: _Sides, rec: _Recorder) -> RedactedDiff:
+def _structured_row(
+    diff: Diff, masker: Masker, sides: _Sides, rec: _Recorder, platform: str | None = None
+) -> RedactedDiff:
     op, category = diff["op"], diff["category"]
     if category == "unparsed":
         line_path = diff["before"] if op == "removed" else diff["after"]
         *parents, text = line_path
+        if joined_line_unsent(parents, text, platform, masker, rec):
+            return _omitted_diff(op, category)
         masked = _judge_line(text, tuple(p.strip() for p in parents), masker, sides, rec)
         if masked is _DROP:
             return _omitted_diff(op, category)
@@ -207,6 +212,7 @@ def redact_result(
     after_body: Sequence[str] | None,
     raw_rows: Sequence[_RawRowLike],
     secret_words: Iterable[str],
+    platform: str | None = None,
 ) -> RedactedResult:
     """1 組の結果を伏せる。判定器(Masker)は組ごとに 1 つ(同じ値は同じ `<secret:N>`、番号は組ごとに 1 から)。
 
@@ -228,7 +234,7 @@ def redact_result(
     rec = _Recorder()
     diffs: list[RedactedDiff] = []
     if structured is not None:
-        diffs += [_structured_row(diff, masker, sides, rec) for diff in structured.diffs]
+        diffs += [_structured_row(diff, masker, sides, rec, platform) for diff in structured.diffs]
     if show is not None and show.method in ("structured", "both"):
         diffs += [_show_row(diff, masker, rec) for diff in show.diffs]
     rows: list[RedactedRawRow] = []

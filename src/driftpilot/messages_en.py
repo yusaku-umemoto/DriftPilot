@@ -280,7 +280,7 @@ def warning_message(w: SafetyWarning) -> str:
 
 # Display names for device types (ADR-0151 decision 7). None means not specified (the Cisco-family reading). The detection result "a" is shown with the same name
 PLATFORM_LABEL: dict[str | None, str] = {
-    "fortinet": "FortiGate", "fujitsu_sir": "Si-R", "juniper_junos": "Juniper Junos", "paloalto_panos": "Palo Alto PAN-OS", "yamaha": "Yamaha RTX", None: "Cisco family / Arista",
+    "fortinet": "FortiGate", "fujitsu_sir": "Si-R", "juniper_junos": "Juniper Junos", "paloalto_panos": "Palo Alto PAN-OS", "yamaha": "Yamaha RTX", "checkpoint_gaia": "Check Point Gaia", "f5_bigip": "F5 BIG-IP", None: "Cisco family / Arista",
 }
 AUTO_PLATFORM_LABEL = "Auto"
 
@@ -4198,7 +4198,7 @@ CLI_HELP = {
     "compare.kind": "Kind of input. auto decides from the content (default: config)",
     "compare.platform": (
         "For a config, choose a parser family other than the default. fujitsu_sir uses the flat config parser, "
-        "fortinet uses the FortiGate parser, yamaha uses the Yamaha RTX parser, juniper_junos uses the Juniper Junos parser, and paloalto_panos uses the Palo Alto PAN-OS parser "
+        "fortinet uses the FortiGate parser, yamaha uses the Yamaha RTX parser, juniper_junos uses the Juniper Junos parser, paloalto_panos uses the Palo Alto PAN-OS parser, checkpoint_gaia uses the Check Point Gaia parser, and f5_bigip uses the F5 BIG-IP parser "
         "(--show-command is not needed. Leaving it out, or any other name, means the Cisco family, which needs no option). "
         "For a show output, give the device type as an ntc-templates platform name (e.g. cisco_ios), together with --show-command. "
         "auto decides the device type from the content of the config (--show-command is not needed. A show output is compared as plain text without a device type)"
@@ -4253,11 +4253,11 @@ CLI_HELP = {
         "If there is no such name, it ends without comparing or sending"
     ),
     "patterns.help": "Output the list of what the config parser supports (the pattern table)",
-    "patterns.platform": "Output the table of the flat config, FortiGate, Yamaha RTX, Juniper Junos or Palo Alto PAN-OS parser (default: the Cisco family table. docs/notes/flat-patterns.md, fortinet-patterns.md, yamaha-patterns.md, junos-patterns.md, panos-patterns.md)",
+    "patterns.platform": "Output the table of the flat config, FortiGate, Yamaha RTX, Juniper Junos, Palo Alto PAN-OS or Check Point Gaia parser (default: the Cisco family table. docs/notes/flat-patterns.md, fortinet-patterns.md, yamaha-patterns.md, junos-patterns.md, panos-patterns.md, gaia-patterns.md)",
     "coverage.help": "Measure the coverage of the config parser",
     "coverage.paths": "Config files, or directories of split files (reads _index.tsv)",
     "coverage.exposure": "Category when files are given directly (default: normal). For a directory it is decided by the command column of _index.tsv",
-    "coverage.platform": "Measure with the flat config, FortiGate, Yamaha RTX, Juniper Junos or Palo Alto PAN-OS parser (default: the Cisco family parser)",
+    "coverage.platform": "Measure with the flat config, FortiGate, Yamaha RTX, Juniper Junos, Palo Alto PAN-OS or Check Point Gaia parser (default: the Cisco family parser)",
     "coverage.top": "Number of top entries for unparsed shapes and for blocks with many lines of the generic FortiGate shape (default: {default})",
     "coverage.files": "Number of file lines shown in text (default: {default})",
     "coverage_show.help": "Measure the coverage of the show side (identification rate and template coverage)",
@@ -4313,6 +4313,14 @@ PILOT_CALL_MESSAGES = {
     "multiple_segments": "The config contains {count} segments. Pass a config that has a single segment",
     "parse_failed": "The config could not be read: {error_type}",
     "cancelled_facts": "Standard input was closed, so building the list was stopped",
+    # Texts for calling agreement v1.1 (ADR-0232. REQ-340). Only paths and the limit number are included
+    "request_not_found": "The request file does not exist (it is not a regular file, or it cannot be read): {path}",
+    "request_too_large": "The request file is larger than {limit} bytes",
+    "request_bom": "The request file starts with a BOM. Use UTF-8 without a BOM",
+    "invalid_correlation_id": "caller.correlation_id must be a string of 1 to 128 characters made only of letters, digits and . _ : -",
+    "unknown_operation": "The operation must be one of capabilities, compare or config-facts",
+    "invalid_arguments": "The arguments of pilot-call are not valid",
+    "interrupted": "Stopped because an interrupt signal (Ctrl+C) was received",
 }
 
 # --- Error texts of the commands (after "Error: ". REQ-258) ---
@@ -4881,3 +4889,116 @@ def device_split_not_opened(folder: Path) -> str:
 
 
 GUI_WEB_TEXTS.update({"compare.split_devices": DEVICE_SPLIT_BUTTON})
+
+
+# --- Voice input in the AI pane (calls PartsPilot's voice-serve. ADR-0233 / REQ-341) ---
+# Only a checked code goes into a text. The content of PartsPilot's message and the spoken words never do (decision 5)
+VOICE_BUTTON = "Voice input"
+VOICE_PREPARING = "Preparing voice input…"
+VOICE_TRANSCRIBING = "Converting to text…"
+VOICE_LIMIT_NOTE = "Recording stopped at 60 seconds"
+VOICE_TITLE_IDLE_TOGGLE = "Press to start recording, press again to stop"
+VOICE_TITLE_IDLE_HOLD = "Records only while you hold the button"
+VOICE_TITLE_RECORDING_TOGGLE = "Press again to stop recording (Esc cancels)"
+VOICE_TITLE_RECORDING_HOLD = "Release to stop recording (Esc cancels)"
+VOICE_NOT_SUPPORTED = "Add voice input in the PartsPilot window"
+VOICE_MODEL_NOT_FOUND = "Add the voice input model in the PartsPilot window"
+
+
+def voice_stopped(code: str) -> str:
+    """The child ended with an error (other than operation_not_supported and model_not_found), or ended unexpectedly."""
+    return f"Voice input stopped (code: {code}). Reopen the compare window to prepare it again"
+
+
+def voice_mic_unavailable(system: str) -> str:
+    """text_failed with microphone_unavailable. On Windows, adds where the microphone permission is."""
+    base = "The microphone cannot be used. Check that it is connected and that no other app is using it"
+    if system == "windows":
+        return f"{base}. Also check that desktop apps are allowed in Windows Settings > Privacy & security > Microphone"
+    return base
+
+
+def voice_mic_silent(system: str) -> str:
+    """text_failed with microphone_silent. On Mac, adds where the microphone permission is."""
+    base = "No sound was picked up"
+    if system == "mac":
+        return f"{base}. Allow DriftPilot in System Settings > Privacy & Security > Microphone"
+    return base
+
+
+def voice_text_failed(code: str) -> str:
+    """text_failed with any other code."""
+    return f"Could not convert the speech to text (code: {code})"
+
+
+# The "Voice input" tab of the settings window (decision 6). The Save text is the same settings.button.save_config as the Update tab
+SETTINGS_TAB_VOICE = "Voice input"
+VOICE_SETTINGS_ENABLED = "Use voice input"
+# Correct with an LLM using the context (ADR-0233 decisions 4 and 6 / REQ-342). Off by default
+VOICE_SETTINGS_LLM_CORRECT = "Correct with an LLM using the context"
+VOICE_SETTINGS_LLM_CORRECT_NOTE = (
+    "When on, the words you speak after an AI answer, together with the conversation so far "
+    "(the compared config is not included), are sent to the AI the conversation was sent to, and corrected. "
+    "Nothing is corrected before the first send, or after the destination has been changed"
+)
+# Texts near the input box (while correcting spoken words with an LLM, after correcting, and when refused)
+VOICE_CORRECTING = "Correcting with an LLM…"
+VOICE_CORRECT_REFUSED = "Not corrected with an LLM because it contains something that must be hidden"
+VOICE_REVERT = "Undo the correction"
+VOICE_USE_CORRECTION = "Use the LLM correction"
+VOICE_SETTINGS_PRESS = "How the button works"
+VOICE_SETTINGS_PRESS_TOGGLE = "Press to start, press again to stop"
+VOICE_SETTINGS_PRESS_HOLD = "Record only while held"
+VOICE_SETTINGS_CLI = "Location of the PartsPilot CLI"
+VOICE_SETTINGS_CLI_NOTE = "Leave empty to find it automatically. If PartsPilot is not found, the button stays hidden even when this is on"
+VOICE_SETTINGS_BROWSE = "Browse…"
+VOICE_SETTINGS_REFIND = "Search again"
+VOICE_SETTINGS_STATUS = "PartsPilot status"
+VOICE_SETTINGS_SEARCHING = "Searching…"
+VOICE_SETTINGS_NOTE = (
+    "Voice input is prepared when the compare window opens. Saving also applies to an open compare window (the button style from the next recording)"
+)
+VOICE_STATUS_NOT_FOUND = "PartsPilot was not found. Set the CLI location or install PartsPilot"
+VOICE_STATUS_NOT_PARTSPILOT = "The CLI that was found is not PartsPilot's. Check the CLI location"
+VOICE_STATUS_NO_VOICE_SERVE = "Add voice input in the PartsPilot window"
+VOICE_FOUND_BY = {
+    "settings": "the saved location",
+    "beside_app": "next to DriftPilot",
+    "applications": "an Applications folder",
+    "mdfind": "a Spotlight search",
+}
+
+
+def voice_status_found(path: str, order: str, version: str, component_version: str, *, voice_serve: bool) -> str:
+    """Status text when PartsPilot was found (where, PartsPilot version, voice input version). Adds guidance if voice-serve is missing."""
+    lines = [f"Found at: {path} ({VOICE_FOUND_BY.get(order, order)})"]
+    if version:
+        lines.append(f"PartsPilot version: {version}")
+    if voice_serve:
+        lines.append(f"Voice input version: {component_version}" if component_version else "Voice input: available")
+    else:
+        lines.append(VOICE_STATUS_NO_VOICE_SERVE)
+    return "\n".join(lines)
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "voice.button": VOICE_BUTTON,
+        "settings.tab.voice": SETTINGS_TAB_VOICE,
+        "settings.voice.enabled": VOICE_SETTINGS_ENABLED,
+        "settings.voice.llm_correct": VOICE_SETTINGS_LLM_CORRECT,
+        "settings.voice.llm_correct.note": VOICE_SETTINGS_LLM_CORRECT_NOTE,
+        "voice.revert": VOICE_REVERT,
+        "voice.use_correction": VOICE_USE_CORRECTION,
+        "settings.voice.press": VOICE_SETTINGS_PRESS,
+        "settings.voice.press.toggle": VOICE_SETTINGS_PRESS_TOGGLE,
+        "settings.voice.press.hold": VOICE_SETTINGS_PRESS_HOLD,
+        "settings.voice.cli": VOICE_SETTINGS_CLI,
+        "settings.voice.cli.note": VOICE_SETTINGS_CLI_NOTE,
+        "settings.voice.browse": VOICE_SETTINGS_BROWSE,
+        "settings.voice.refind": VOICE_SETTINGS_REFIND,
+        "settings.voice.status": VOICE_SETTINGS_STATUS,
+        "settings.voice.searching": VOICE_SETTINGS_SEARCHING,
+        "settings.voice.note": VOICE_SETTINGS_NOTE,
+    }
+)

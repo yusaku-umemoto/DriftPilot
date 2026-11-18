@@ -30,6 +30,9 @@ _OWNED: tuple[str, ...] = ("router-id", "network", "passive-interface", "no pass
 _SEPARATOR = " > "
 _BLOCK_SCOPE = "router ospf block"
 _V3_SCOPE = "router ospfv3"
+# Huawei VRP の `ospf <番号>` の塊の中の scope(REQ-338)
+_HUAWEI_SCOPE = "huawei ospf"
+_HUAWEI_AREA_SCOPE = "huawei ospf area"
 
 
 @dataclass
@@ -42,6 +45,9 @@ class _Ctx:
     # 中の行を写す先(options・settings)と、見出しの次の段からその行までの行の文字列
     target: list[str] | None = None
     path: list[str] = field(default_factory=list)
+    # Huawei と見立てた config か、読んでいる `area` の行のエリア(REQ-338)
+    huawei: bool = False
+    area: IPv4Address | None = None
 
 
 def _is_secret(*texts: str) -> bool:
@@ -119,6 +125,52 @@ def _v3_process(m: re.Match[str], ctx: _Ctx) -> bool:
     return True
 
 
+def _huawei_process(m: re.Match[str], ctx: _Ctx) -> bool:
+    """Huawei の `ospf <番号>[ router-id <A>][ vpn-instance <V>]`。見立てたときだけ読む(REQ-338)。
+
+    router-id と vpn-instance はどちらの順でも 1 回ずつ。ほかの語・2 回目・読めない router-id・同じ番号の 2 つ目は未解釈。
+    """
+    if not ctx.huawei or m["id"] in ctx.processes:
+        return False
+    words = m["rest"].split()
+    values: dict[str, str] = {}
+    while words:
+        key = words.pop(0)
+        if key not in ("router-id", "vpn-instance") or key in values or not words:
+            return False
+        values[key] = words.pop(0)
+    router_id: str | None = None
+    if "router-id" in values:
+        try:
+            router_id = str(IPv4Address(values["router-id"]))
+        except AddressValueError:
+            return False
+    ctx.current = new_ospf(int(m["id"]))
+    ctx.current["router_id"] = router_id
+    ctx.current["vrf"] = values.get("vpn-instance")
+    ctx.processes[m["id"]] = ctx.current
+    return True
+
+
+def _huawei_area(m: re.Match[str], ctx: _Ctx) -> bool:
+    """`area <エリア>`。エリアを読んで ctx.area に置く(行を解釈済みにするかは、子の network を写せたかで決める)。"""
+    try:
+        ctx.area = _area(m["area"])
+    except ValueError:  # AddressValueError も含む(全角の数字なども)
+        return False
+    return True
+
+
+def _huawei_network(m: re.Match[str], ctx: _Ctx) -> bool:
+    network: OspfNetwork = {
+        "address": IPv4Address(m["addr"]),
+        "wildcard": IPv4Address(m["wildcard"]),
+        "area": ctx.area,
+    }
+    ctx.current["networks"].append(network)
+    return True
+
+
 _SECRET_NOTE = (
     "道すじのどの段かの語が password・secret・key・message-digest-key・authentication-key か、"
     "語の中に鍵が埋まった(key, や password= などの)行は、その行も子孫も未解釈"
@@ -184,6 +236,28 @@ PATTERNS: tuple[Pattern, ...] = (
             + _SECRET_NOTE
         ),
     ),
+    Pattern(
+        "ospf.huawei_process", "top", r"ospf (?P<id>[0-9]+)(?P<rest>(?: \S+)*)", "ospf[id]",
+        "ospf 1 router-id 192.0.2.1 vpn-instance VPN-A", _huawei_process,
+        note=(
+            "Huawei VRP と見立てた config だけ(ADR-0231 決定 3(3)、REQ-338)。`router-id <A>` を router_id に、"
+            "`vpn-instance <V>` を vrf に写す(どちらの順でも 1 回ずつ)。ほかの語がある・2 回目・router-id が IPv4 として"
+            "読めない見出しと、同じ番号の 2 つ目の塊は、塊ごと未解釈。options には何も入れない"
+        ),
+    ),
+    Pattern(
+        "ospf.huawei_area", _HUAWEI_SCOPE, r"area (?P<area>\S+)", "networks[].area", "area 0.0.0.0", _huawei_area,
+        note=(
+            "手続き。エリアは `0` と `0.0.0.0` が同じ値になるよう正規化する。子の `network` を 1 つ以上写したときだけ"
+            "解釈済みにする(子が無い・写せる子が無い行は未解釈)。area のほかの子(authentication-mode・stub など)と"
+            "ospf の塊のほかの子(import-route・silent-interface など)は未解釈"
+        ),
+    ),
+    Pattern(
+        "ospf.huawei_network", _HUAWEI_AREA_SCOPE, r"network (?P<addr>\S+) (?P<wildcard>\S+)", "networks",
+        "network 192.0.2.0 0.0.0.255", _huawei_network,
+        note="親の `area` のエリアと合わせて networks に出現順に足す。IPv4 として読めない行は未解釈",
+    ),
 )
 _OSPF_PATTERNS = tuple(pattern for pattern in PATTERNS if pattern.category == "ospf")
 _V3_PATTERNS = tuple(pattern for pattern in PATTERNS if pattern.category == "ospfv3")
@@ -205,14 +279,42 @@ def _read_block(
             _read_block(patterns, scope, child, ctx.path, ctx, interpreted)
 
 
-def extract_ospf(tree: HConfig, interpreted: InterpretedLines) -> dict[str, Ospf]:
-    """`router ospf` 行から、process ID の文字列をキーにした Ospf の辞書を返す。"""
-    ctx = _Ctx({})
+def _read_huawei_ospf(block: HConfigChild, ctx: _Ctx, interpreted: InterpretedLines) -> None:
+    """Huawei の `ospf <番号>` の塊の中の `area <エリア>` と、その子の `network` を読む(REQ-338)。
+
+    `area` の行は、子の `network` を 1 つ以上写したときだけ解釈済みにする。ほかの子は未解釈のまま。
+    """
+    for line in block.children:
+        area = apply_first(_OSPF_PATTERNS, _HUAWEI_SCOPE, line.text, ctx)
+        if area is None:
+            continue
+        written = 0
+        for child in line.children:
+            try:
+                pattern = apply_first(_OSPF_PATTERNS, _HUAWEI_AREA_SCOPE, child.text, ctx)
+            except ValueError:
+                pattern = None
+            if pattern is not None:
+                interpreted.mark(child, pattern.id)
+                written += 1
+        if written:
+            interpreted.mark(line, area.id)
+
+
+def extract_ospf(tree: HConfig, interpreted: InterpretedLines, huawei: bool = False) -> dict[str, Ospf]:
+    """`router ospf` 行から、process ID の文字列をキーにした Ospf の辞書を返す。
+
+    huawei が真のとき(Huawei VRP と見立てた config)だけ、最上位の `ospf <番号>` の塊も読む(REQ-338)。
+    """
+    ctx = _Ctx({}, huawei=huawei)
     for block in tree.children:
         heading = apply_first(_OSPF_PATTERNS, "top", block.text, ctx)
         if heading is None:
             continue
         interpreted.mark(block, heading.id)
+        if heading.id == "ospf.huawei_process":
+            _read_huawei_ospf(block, ctx, interpreted)
+            continue
         for line in block.children:
             ctx.path = [line.text]
             ctx.has_children = bool(line.children)

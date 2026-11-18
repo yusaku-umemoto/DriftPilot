@@ -23,6 +23,7 @@ class _Ctx:
     details: list[dict[str, Any]] = field(default_factory=list)
     scope_vrf: str | None = None
     asa: bool = False
+    huawei: bool = False
 
 
 def _address(token: str, version: int) -> IPv4Address | IPv6Address | None:
@@ -173,6 +174,88 @@ def _asa_route(m: re.Match[str], ctx: _Ctx, version: int) -> bool:
     return True
 
 
+# Huawei の出口インターフェースの名前で、Cisco の決まりに当たらない速度の名前(ADR-0231 決定 1。`10GE1/0/1` など)
+_HUAWEI_SPEED_NAMES = ("10GE", "25GE", "40GE", "100GE")
+
+
+def _is_huawei_interface(token: str) -> bool:
+    if _is_interface(token):
+        return True
+    for prefix in _HUAWEI_SPEED_NAMES:
+        rest = token.removeprefix(prefix)
+        if rest != token and rest[:1].isascii() and rest[:1].isdigit() and not rest.strip("0123456789/.:"):
+            return True
+    return False
+
+
+def _huawei_route(m: re.Match[str], ctx: _Ctx, version: int) -> bool:
+    """Huawei の `ip route-static`・`ipv6 route-static`。Huawei と見立てた config だけ読む(ADR-0231 決定 3(3)、REQ-338)。"""
+    if not ctx.huawei:
+        return False
+    parts = m["body"].split()
+    vrf: str | None = None
+    if parts[0] == "vpn-instance":
+        if len(parts) < 2:
+            return False
+        vrf, parts = parts[1], parts[2:]
+    if len(parts) < 3:
+        return False
+    destination_text, length_text = parts[0], parts[1]
+    parts = parts[2:]
+    if _address(destination_text, version) is None:
+        return False
+    try:
+        if _number(length_text):
+            length = int(length_text)
+            if length > (32 if version == 4 else 128):
+                return False
+            destination = ip_network(f"{destination_text}/{length}", strict=False)
+        elif version == 4 and _address(length_text, 4) is not None:
+            destination = ip_network(f"{destination_text}/{length_text}", strict=False)
+        else:
+            return False
+    except ValueError:
+        return False
+
+    interface: str | None = None
+    next_hop: IPv4Address | IPv6Address | None = None
+    first = parts.pop(0)
+    if (address := _address(first, version)) is not None:
+        next_hop = address
+    elif _is_huawei_interface(first):
+        interface = first
+        if parts and (address := _address(parts[0], version)) is not None:
+            next_hop = address
+            parts.pop(0)
+    else:
+        return False
+
+    distance: int | None = None
+    while parts:
+        if parts[0] != "preference" or distance is not None or len(parts) < 2 or not _number(parts[1]):
+            return False
+        distance = int(parts[1])
+        if not 1 <= distance <= 255:
+            return False
+        del parts[:2]
+
+    ctx.routes.append({
+        "destination": destination, "next_hop": next_hop, "interface": interface,
+        "vrf": vrf, "distance": distance, "enabled": None,
+    })
+    # 差分の処理が経路の一覧と位置で対応付けるので、ASA と同じく全部 None の値を積んで長さを揃える
+    ctx.details.append({"name": None, "tag": None, "track": None})
+    return True
+
+
+def _huawei_ipv4(m: re.Match[str], ctx: _Ctx) -> bool:
+    return _huawei_route(m, ctx, 4)
+
+
+def _huawei_ipv6(m: re.Match[str], ctx: _Ctx) -> bool:
+    return _huawei_route(m, ctx, 6)
+
+
 def _asa_ipv4(m: re.Match[str], ctx: _Ctx) -> bool:
     return _asa_route(m, ctx, 4)
 
@@ -207,6 +290,15 @@ _ROUTE_NOTE = (
     "global(vrf のある行だけ)。ほかの語は行ごと未解釈"
 )
 
+_HUAWEI_NOTE = (
+    "Huawei VRP と見立てた config だけ(ADR-0231 決定 3(3)、REQ-338)。"
+    "`[vpn-instance <V>] <宛先> <マスク|長さ> <次>[ <次のアドレス>] [preference <1〜255>]`。vpn-instance は vrf に、"
+    "preference は distance に写す。次はアドレスなら next_hop、インターフェースの名前(Cisco の出口IFの決まりか、"
+    "10GE・25GE・40GE・100GE の後に数字が続く語)なら interface(後ろにアドレスが続けば next_hop も)。"
+    "次の位置の vpn-instance(VPN の間の経路)・description・tag・track・bfd・permanent・inherit-cost など上に無い語・"
+    "形に合わないアドレス・マスク・長さ・数(雛形の行を含む)は行ごと未解釈。機種固有値は全部 None の値を積んで一覧と長さを揃える"
+)
+
 
 PATTERNS: tuple[Pattern, ...] = (
     Pattern("static_routes.ipv4", "top", r"ip route (?P<body>(?:vrf \S+ )?[0-9.]+(?:/[0-9]+)?(?: .+)?)",
@@ -235,13 +327,19 @@ PATTERNS: tuple[Pattern, ...] = (
             r"ipv6 route (?P<nameif>\S+) (?P<dest>[^\s/]+/[0-9]+) (?P<hop>\S+)(?: (?P<distance>[0-9]+))?",
             "static_routes[]", "ipv6 route outside ::/0 2001:db8::1", _asa_ipv6,
             note="ASA と見立てた config だけ。interface は nameif、vrf は None。次のアドレスが読めない行は未解釈"),
+    Pattern("static_routes.huawei_ipv4", "top", r"ip route-static (?P<body>\S.*)",
+            "static_routes[]", "ip route-static 0.0.0.0 0.0.0.0 192.0.2.1", _huawei_ipv4,
+            note=_HUAWEI_NOTE),
+    Pattern("static_routes.huawei_ipv6", "top", r"ipv6 route-static (?P<body>\S.*)",
+            "static_routes[]", "ipv6 route-static 2001:db8:1:: 64 2001:db8::1", _huawei_ipv6,
+            note=_HUAWEI_NOTE + "。宛先は IPv6 のアドレスと長さ 0〜128、next_hop は IPv6 のアドレス"),
 )
 
 
 def extract_static_routes(
-    tree: HConfig, interpreted: InterpretedLines, asa: bool = False
+    tree: HConfig, interpreted: InterpretedLines, asa: bool = False, huawei: bool = False
 ) -> tuple[list[StaticRoute], list[dict[str, Any]]]:
-    ctx = _Ctx(asa=asa)
+    ctx = _Ctx(asa=asa, huawei=huawei)
     for block in tree.children:
         ctx.scope_vrf = None
         if (pattern := apply_first(PATTERNS, "top", block.text, ctx)) is not None:

@@ -13,6 +13,11 @@ Cisco IOS-XR の形のプロンプト(`RP/0/RSP0/CPU0:<host>#`・`RP/0/RP0/CPU0:
 別の規則で見分ける(ADR-0213 決定8)。一般の候補は頭の字が `[` の候補を数えないため。FortiGate の形では、`[` で始まるホスト名は数えない。
 Cisco ASA の形のプロンプト(`<host>/pri/act# `・`<host>/sec/stby# `・`<host>/ctx1/pri/act(config-if)# `。フェイルオーバーの状態を出す設定)も
 別の規則で見分け、設定モードの形の行のコマンドの頭の `do ` は外す(ADR-0214 決定7。`/pri/act` だけで 8 文字あり、一般の候補の上限を超えるため)。
+Huawei VRP の形のプロンプト(`<名前>`・`[名前]`・`[~名前]`・`[*名前]`・`[名前-<ビュー>]`。後ろに空白 0〜1 個でコマンドが続く)も別の規則で見分け、
+ページ送りの印 `---- More ----`(後ろに `ESC[<数>D`・空白・`ESC[<数>D` が続く)も外す(ADR-0231 決定 4)。
+F5 BIG-IP の形のプロンプト(tmsh の `<人>@(<名前>)(…)(tmos)# ` と bash の `[<人>@<名前>:<状態>] <場所> # `)も別の規則(`f5`・`single-f5`)で見分け、
+ほかのどの規則よりも先に見る(ADR-0235 決定 4。REQ-352)。括弧の中の状態(`Active`・`Standby`・`In Sync`)は機器の切り替えで変わるので、
+区切りは同じホスト名の F5 の形の行(状態・パーティション・場所・人は問わない)。出力が空でも残す語の判定は、F5 で区切ったときだけ頭の `tmsh` と `-q` などを飛ばして見る。
 設定モードの運用コマンドの頭の `$`(`(config)# $show ip arp`)は、区間のコマンドから外す(ADR-0207 決定1〜3)。
 採ったプロンプトが設定モードの形(`Router(config)# `)のときは、モードを外したホスト名(`Router`)の
 ほかのモードのプロンプトと `Router# `・`Router> ` も区切りにする(ADR-0209 決定7)。
@@ -45,7 +50,7 @@ MAX_PROMPT_SPACES = 2
 # 頭の語が英小文字で始まり英小文字・数字・- が続き、そのあとは空白で区切って何でもよい(引数・パイプつきも可。ADR-0201 決定1)
 COMMAND_SHAPED = re.compile(r"^[a-z][a-z0-9-]*(?:\s.*)?$")
 # 出力が空でも区間を残すコマンドの頭の語(小文字)。プロンプトが 1 回だけのログの判定にも使う(ADR-0201 決定4・5)
-KEEP_EMPTY_COMMANDS = frozenset({"show", "get", "display", "diagnose", "execute", "fnsysctl", "dir", "more", "cat"})
+KEEP_EMPTY_COMMANDS = frozenset({"show", "get", "display", "diagnose", "execute", "fnsysctl", "dir", "more", "cat", "list"})
 # 設定モードのプロンプト(ADR-0201 決定3): ホスト名に空白なしで (<モード>) が付き、終端が # か >。
 # host が採ったプロンプトのホスト名のどれかと同じときだけ区切りにする
 _MODE_HOST = re.compile(r"^(?P<host>[^\s()#>$]{1,35})\([^()\s]{1,30}\)$")
@@ -76,6 +81,36 @@ BRACKET_PROMPT = re.compile(r"^(?P<prefix>\[(?P<host>[^\[\]\s][^\[\]]{0,31})\] ?
 ASA_PROMPT = re.compile(
     r"^(?P<prefix>(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,62})(?P<ctx>/[A-Za-z0-9._-]{1,32})?(?P<pri>/(?:pri|sec))?"
     r"/(?P<state>act|stby|actNoFailover|stbyNoFailover)(?:\((?P<mode>[^()\s]{1,40})\))?[#>]\s?)(?P<rest>.*)$"
+)
+
+# Huawei VRP の形のプロンプト(ADR-0231 決定 4)。ユーザービュー `<名前>`、システムビューなど `[名前]`・`[~名前]`(CE の確定済み)・`[*名前]`(未確定)、
+# ビューを変えた `[名前-<ビュー>]`。`>`・`]` の直後に空白 0〜1 個とコマンドが続く(後ろの決まりは _huawei_tail)。
+# ホスト名は 1〜64 文字で空白・`<`・`>`・`[`・`]` を含まない(括弧の中身の数え方では `-<ビュー>` も含めて 1〜64 文字を 1 つの名前として見る)
+HUAWEI_USER = re.compile(r"^<(?P<host>[^\s<>\[\]]{1,64})>")
+HUAWEI_SYSTEM = re.compile(r"^\[(?P<mark>[~*]?)(?P<host>[^\s\[\]]{1,64})\]")
+HUAWEI_VIEW = re.compile(r"[^\s\[\]]{1,64}\]")
+HUAWEI_FULL = re.compile(r"^(?:<(?P<user>[^\s<>\[\]]{1,64})>|\[[~*]?(?P<system>[^\s\[\]]{1,64})\])$")
+HUAWEI_CLOSE_TAG = re.compile(r"</([^\s<>/\[\]]{1,64})>")
+# Huawei の形のページ送りの印(ADR-0231 決定 4)。行頭(前の空白は可)の `---- More ----`。後ろは次のどれか。
+#   (a) 印を消すための制御文字 `ESC[<数>D` + 空白 + `ESC[<数>D`(ESC だけが落ちた `[42D` も可)
+#   (b) 空白 0 個以上 + 改行(印だけの行)・復帰・バックスペース・ファイルの終わり
+#   (c) 空白 1 個以上だけ(制御文字が落ちた形。端末が消すために書いた空白)
+HUAWEI_PAGER = re.compile(
+    r"^[ \t]*---- More ----(?:(?P<esc>\x1b?\[\d+D *\x1b?\[\d+D)|(?P<eol> *(?:\r\n|[\r\n\x08]|\Z))|(?P<pad> +))",
+    re.M,
+)
+# (c) の形で、印の後ろの空白のうち消す数。実測の `ESC[42D` + 空白 42 個から決めた数(残りの空白は字下げとして残す)
+HUAWEI_PAGER_ERASE = 42
+
+# F5 BIG-IP の形のプロンプト(ADR-0235 決定 4。REQ-352)。どちらも一般の候補の上限(20 文字・空白 2 個)を超えるので別に見分ける。
+# tmsh の形: `<人>@(<名前>)` + `(<中身>)` が 0 個以上 + `(tmos)` + `#` + 空白 0〜1 個。中身は空白可(`cfg-sync In Sync`)
+F5_TMSH_PROMPT = re.compile(
+    r"^(?P<prefix>[^\s@()]{1,64}@\((?P<host>[^\s@()]{1,64})\)(?:\([^()]{1,64}\))*\(tmos\)# ?)(?P<rest>.*)$"
+)
+# bash の形: `[<人>@<名前>:<状態>] <場所> # ` + 空白 0〜1 個。状態は `]` を含まない(`Active:In Sync` のように `:`・空白は可)。
+# ホスト名は `:` を含まない(含むと `bigip1:Active` までがホスト名になる)。場所は空白を含まない(`config`・`~`・`images`)
+F5_BASH_PROMPT = re.compile(
+    r"^(?P<prefix>\[[^\s@()\[\]]{1,64}@(?P<host>[^\s@():\[\]]{1,64}):[^\]]{1,64}\] \S{1,64} # ?)(?P<rest>.*)$"
 )
 
 LOGIN = re.compile(r"^(Login|Username|Password)\s*:\s*$", re.IGNORECASE)
@@ -312,6 +347,165 @@ def _ax_bang_forms(ax: dict[str, collections.Counter], host: str) -> list[str]:
     return [q for q in _by_count(ax.get(base, collections.Counter())) if q.startswith("!")]
 
 
+def _huawei_tail(tail: str) -> str | None:
+    """Huawei の形のプロンプトの `>`・`]` の後ろ。空白 0〜1 個で行末か、空白 0〜1 個 + 空白・`>`・`#` でない字で始まる残り。
+
+    コマンド(空白を詰める前の残り)を返す。行末ならコマンドの無い空の文字列。当たらなければ None。
+    `]` の後に空白と `>`・`#` が続くヤマハ RTX の括弧の形(`[RTX1210] > `)は当たらない。
+    """
+    if tail in ("", " "):
+        return ""
+    s = tail[1:] if tail[0] == " " else tail
+    if not s or s[0].isspace() or s[0] in ">#":
+        return None
+    return s
+
+
+def _huawei_match(line: str) -> tuple[str, str, str, str] | None:
+    """行が Huawei の形のプロンプトで始まるとき (種類 user か system, ホスト名, 空白を含まないプロンプト, 後ろ) を返す。"""
+    if line[:1] == "<":
+        m = HUAWEI_USER.match(line)
+        kind = "user"
+    elif line[:1] == "[":
+        m = HUAWEI_SYSTEM.match(line)
+        kind = "system"
+    else:
+        return None
+    if not m:
+        return None
+    rest = _huawei_tail(line[m.end() :])
+    if rest is None:
+        return None
+    return kind, m.group("host"), m.group(0), rest
+
+
+def _huawei_forms(
+    lines: list[str],
+) -> tuple[dict[str, collections.Counter], collections.Counter, collections.Counter, collections.Counter]:
+    """Huawei の形の候補をホスト名ごとに数える(ADR-0231 決定 4)。
+
+    (ホスト名 → 形ごとの出現回数, 全部の回数, コマンドの形の回数, `<名前>` の形でコマンドを打った行の回数) を返す。
+    `<名前>` の行は、後ろがコマンドの形のときだけ数える。ログのどこかに閉じタグ `</名前>` があるときは、その名前の `<名前>` の行を数えない(HTML の除外)。
+    括弧の行は全部を全部の回数に数える。括弧の中身はそのままホスト名として数える。
+    """
+    closed = {name for line in lines if "</" in line for name in HUAWEI_CLOSE_TAG.findall(line)}
+    forms: dict[str, collections.Counter] = {}
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    user: collections.Counter = collections.Counter()
+    for line in lines:
+        m = _huawei_match(line)
+        if not m:
+            continue
+        kind, host, prefix, rest = m
+        shaped = bool(COMMAND_SHAPED.match(rest.strip()))
+        if kind == "user":
+            if host in closed or not shaped:
+                continue
+            user[host] += 1
+        forms.setdefault(host, collections.Counter())[prefix] += 1
+        total[host] += 1
+        if shaped:
+            score[host] += 1
+    return forms, total, score, user
+
+
+def _huawei_hosts(prompts: Sequence[str]) -> list[str] | None:
+    """プロンプトの全部が Huawei の形(`<名前>`・`[名前]`・`[~名前]`・`[*名前]`)のときだけ、ホスト名を長い順に返す。そうでなければ None。"""
+    hosts: set[str] = set()
+    for p in prompts:
+        m = HUAWEI_FULL.match(p)
+        if not m:
+            return None
+        hosts.add(m.group("user") or m.group("system"))
+    return sorted(hosts, key=len, reverse=True) if hosts else None
+
+
+def _huawei_rest(line: str, hosts_by_length: list[str]) -> str | None:
+    """行が採ったホスト名の Huawei の形のプロンプトで始まるとき、後ろの部分を返す。当たらなければ None。
+
+    `<H>`・`[H]`・`[~H]`・`[*H]`・`[(印)H-ビュー]`。ホスト名は `SW-ACC-01` のように `-` が入ることがあるので、頭で比べる。
+    """
+    first = line[:1]
+    if first not in ("<", "["):
+        return None
+    for h in hosts_by_length:
+        if first == "<":
+            if line.startswith(f"<{h}>"):
+                rest = _huawei_tail(line[len(h) + 2 :])
+                if rest is not None:
+                    return rest
+            continue
+        body = line[2:] if line[1:2] in ("~", "*") else line[1:]
+        if not body.startswith(h):
+            continue
+        after = body[len(h) :]
+        if after.startswith("]"):
+            rest = _huawei_tail(after[1:])
+        elif after.startswith("-"):
+            vm = HUAWEI_VIEW.match(after, 1)
+            rest = _huawei_tail(after[vm.end() :]) if vm else None
+        else:
+            rest = None
+        if rest is not None:
+            return rest
+    return None
+
+
+def _f5_match(line: str) -> tuple[str, str, str] | None:
+    """行が F5 BIG-IP の形(tmsh の形か bash の形)のプロンプトで始まるとき (ホスト名, プロンプトの部分, 後ろ) を返す。当たらなければ None。"""
+    m = F5_TMSH_PROMPT.match(line) or F5_BASH_PROMPT.match(line)
+    if not m:
+        return None
+    return m.group("host"), m.group("prefix"), m.group("rest")
+
+
+def _f5_keep_word(command: str | None) -> str:
+    """F5 で区切ったときの、出力が空でも残す語の判定に使う頭の語(小文字)。頭の `tmsh` と、その後ろの `-` で始まる語(`-q` など)を飛ばす。
+
+    判定のときだけ飛ばす。区間のコマンドの文字は変えない。
+    """
+    words = (command or "").split()
+    if words and words[0].lower() == "tmsh":
+        i = 1
+        while i < len(words) and words[i].startswith("-"):
+            i += 1
+        words = words[i:]
+    return words[0].lower() if words else ""
+
+
+def _f5_forms(lines: list[str]) -> tuple[dict[str, collections.Counter], collections.Counter, collections.Counter]:
+    """F5 の形の候補をホスト名ごとに数える(ADR-0235 決定 4)。`_fortigate_forms` と同じ組を返す。
+
+    tmsh の形と bash の形をまとめて、ホスト名ごとに数える。状態・パーティション・場所・人が違っても同じホスト名にまとめる。
+    コマンドの形は、後ろの前後の空白を除いて `COMMAND_SHAPED` で判定する。
+    """
+    forms: dict[str, collections.Counter] = {}
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in lines:
+        m = _f5_match(line)
+        if not m:
+            continue
+        host, prefix, rest = m
+        forms.setdefault(host, collections.Counter())[prefix] += 1
+        total[host] += 1
+        if COMMAND_SHAPED.match(rest.strip()):
+            score[host] += 1
+    return forms, total, score
+
+
+def _f5_hosts(prompts: Sequence[str]) -> set[str] | None:
+    """プロンプトの全部が F5 の形で後ろに何も無いときだけ、ホスト名の集合を返す。そうでなければ None。"""
+    hosts: set[str] = set()
+    for p in prompts:
+        m = _f5_match(p)
+        if not m or m[2].strip():
+            return None
+        hosts.add(m[0])
+    return hosts or None
+
+
 def _by_count(counter: collections.Counter) -> list[str]:
     """出現の多い順。同じ回数ならログに先に出た順。"""
     return sorted(counter, key=lambda p: counter[p], reverse=True)
@@ -334,13 +528,31 @@ def detect_prompt(lines: list[str]) -> tuple[str, ...]:
     それでも決まらなければ AX の形(`AX_PROMPT`)を同じ基準でホスト名ごとに数え、順位1位のホスト名の形を
     設定モードの形も含めてすべて返す(ADR-0207 決定2)。
     最後に、プロンプトが 1 回だけのログの決まりを見る(`_detect_single_prompt`)。
+    それでも決まらなければ Huawei の形(`<HUAWEI>display …`・`[HUAWEI]`・`[~HUAWEI]`)を同じ基準でホスト名ごとに数え(`_huawei_forms`)、
+    順位1位のホスト名の形を返す(ADR-0231 決定 4)。次に Huawei の形の 1 回だけのログを見る。
     特定できなければ空のタプル。先頭は順位1位、一般の候補の残りは出現順。
+    F5 BIG-IP の形(tmsh の `root@(bigip1)(Active)(/Common)(tmos)# `・bash の `[root@bigip1:Active:In Sync] config # `)は、
+    ほかのどの規則よりも先に、ホスト名ごとに同じ基準で数えて順位1位のホスト名の形を出現の多い順にすべて返す(規則 f5)。
+    決まらなければ、プロンプトが 1 回だけの F5 の形のログを見る(規則 single-f5。ADR-0235 決定 4)。
     """
     return _detect(lines)[0]
 
 
 def _detect(lines: list[str]) -> tuple[tuple[str, ...], str]:
-    """(プロンプトの組, どの規則で決まったか) を返す。規則は general・fortigate・xr・bracket・asa・ax・single-xr・single-asa・single-other・none。"""
+    """(プロンプトの組, どの規則で決まったか) を返す。規則は f5・single-f5・general・fortigate・xr・bracket・asa・ax・huawei・single-xr・single-asa・single-other・single-huawei・none。
+
+    F5 の形(`f5`・`single-f5`)は、ほかの形と取り違えないので最初に見る。
+    """
+    f5, f5_total, f5_score = _f5_forms(lines)
+    f5_ranked = sorted(f5_total, key=lambda h: (f5_score[h], f5_total[h]), reverse=True)
+    for host in f5_ranked:
+        if f5_score[host] >= 1 and f5_total[host] >= 2:
+            return tuple(_by_count(f5[host])), "f5"
+    first_line = next((line for line in lines if line.strip()), None)
+    m5 = _f5_match(first_line) if first_line is not None else None
+    if m5 and _f5_keep_word(m5[2]) in KEEP_EMPTY_COMMANDS:
+        host, prefix, _ = m5
+        return (prefix, *(q for q in _by_count(f5.get(host, collections.Counter())) if q != prefix)), "single-f5"
     freq: collections.Counter = collections.Counter()
     score: collections.Counter = collections.Counter()
     for line in lines:
@@ -392,7 +604,22 @@ def _detect(lines: list[str]) -> tuple[tuple[str, ...], str]:
     for host in ax_hosts:
         if ax_score[host] >= 1 and ax_total[host] >= 2:
             return tuple(_by_count(ax[host])), "ax"
-    return _detect_single_prompt(lines, freq, forms, xr, br, asa, ax)
+    single = _detect_single_prompt(lines, freq, forms, xr, br, asa, ax)
+    if single[1] != "none":
+        return single
+    # Huawei の形は、ほかの全部の規則で決まらなかったときだけ見る(ADR-0231 決定 4)。
+    # `<名前>` の形でコマンドを打った行がある名前だけを採る(セッションはユーザービューから始まる。`[10/0] via …` などの取り違えを避ける)
+    hw, hw_total, hw_score, hw_user = _huawei_forms(lines)
+    hw_hosts = sorted((h for h in hw_total if hw_user[h] >= 1), key=lambda h: (hw_score[h], hw_total[h]), reverse=True)
+    for host in hw_hosts:
+        if hw_score[host] >= 1 and hw_total[host] >= 2:
+            return tuple(_by_count(hw[host])), "huawei"
+    first = next((line for line in lines if line.strip()), None)
+    m = _huawei_match(first) if first is not None else None
+    if m and _first_word(m[3]) in KEEP_EMPTY_COMMANDS:
+        _, host, prefix, _ = m
+        return (prefix, *(q for q in _by_count(hw.get(host, collections.Counter())) if q != prefix)), "single-huawei"
+    return (), "none"
 
 
 def _detect_single_prompt(
@@ -453,9 +680,19 @@ def _erase_pager(m: re.Match) -> str:
     return " " * max(0, len(m.group(2)) - (len(m.group(1)) + PAGER_ERASE_EXTRA))
 
 
+def _erase_huawei_pager(m: re.Match) -> str:
+    """Huawei の形の印を外す。制御文字・改行が続くときは丸ごと消し(続きの文字は行頭から始まる)、空白だけのときは消した分の空白を除いて字下げを残す。"""
+    pad = m.group("pad")
+    if pad:
+        return " " * max(0, len(pad) - HUAWEI_PAGER_ERASE)
+    return ""
+
+
 def _strip_pager(text: str) -> tuple[str, int]:
-    """行頭のページ送りの印を外す。(外した後の文字列, 外した数) を返す。"""
-    return PAGER.subn(_erase_pager, text)
+    """行頭のページ送りの印(Cisco の `--More--` と Huawei の `---- More ----`)を外す。(外した後の文字列, 外した数) を返す。"""
+    text, n = PAGER.subn(_erase_pager, text)
+    text, n2 = HUAWEI_PAGER.subn(_erase_huawei_pager, text)
+    return text, n + n2
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -512,6 +749,7 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
     source: PromptSource = "manual" if prompts else "auto"
     # 設定モードの行の頭の `do ` を外す対象にする規則(XR・ASA の形で自分で決めたときと、手で渡されたときだけ。ADR-0211 決定7・ADR-0214 決定7)
     strip_do_ok = source == "manual"
+    rule = "manual" if prompts else "auto"
     if not prompts:
         prompts, rule = _detect(lines)
         strip_do_ok = rule in ("xr", "single-xr", "asa", "single-asa")
@@ -524,7 +762,11 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
     # 設定モードのプロンプト(sw1(config)#)で区切るための、使うプロンプトのホスト名(ADR-0201 決定3)。
     # 採ったホスト名が設定モードの形(`Router(config)`)なら、モードを外したホスト名(`Router`)も足す。
     # これで `Router(config-GigaEthernet0.0)# …` も同じ機器の設定モードのプロンプトとして区切れる(ADR-0209 決定7 の1)
-    hosts = {h for h in (_host(p) for p in prompts) if h}
+    # Huawei の形のプロンプト(規則が huawei・single-huawei、または手で渡されたプロンプトが全部この形)のときは、ホスト名で区切る。設定モードの組には入れない
+    hw_hosts = _huawei_hosts(prompts) if rule in ("manual", "huawei", "single-huawei") else None
+    # F5 の形のプロンプト(規則が f5・single-f5、または手で渡されたプロンプトが全部この形で後ろが空)のときも、ホスト名で区切る。設定モードの組には入れない(REQ-352)
+    f5_hosts = _f5_hosts(prompts) if rule in ("manual", "f5", "single-f5") else None
+    hosts = {h for h in (_host(p) for p in prompts) if h} if hw_hosts is None and f5_hosts is None else set()
     bases = {b for b in (_mode_base(h) for h in hosts) if b}
     hosts |= bases
     # 長いホスト名から順に見る(`Router#` の判定で、より長い名前を先に当てるため)
@@ -552,6 +794,31 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
         if LOGIN.match(line.strip()):
             flush()
             continue
+        if hw_hosts is not None:
+            hw_rest = _huawei_rest(line, hw_hosts)
+            if hw_rest is not None:
+                flush()
+                c = _display_command(hw_rest)
+                if c:
+                    cmd = c
+                continue
+            if rule != "manual":
+                buf.append(line)
+                continue
+            # 手で渡された括弧だけのプロンプト(`[RTX1210]`・`[Expert@gw:0]`)は、Huawei の形でない行(`[RTX1210] > show …`)を
+            # 今までどおり頭の一致で区切る(ほかの機種の結果を変えない)
+        if f5_hosts is not None:
+            f5_line = _f5_match(line)
+            if f5_line is not None and f5_line[0] in f5_hosts:
+                flush()
+                c = _display_command(f5_line[2])
+                if c:
+                    cmd = c
+                continue
+            if rule != "manual":
+                buf.append(line)
+                continue
+            # 手で渡された F5 の形のプロンプトは、F5 の形でない行(や別のホスト名の行)を今までどおり頭の一致で区切る(ほかの機種の結果を変えない)
         hit = next((p for p in by_length if line.startswith(p)), None)
         if hit is not None:
             flush()
@@ -585,7 +852,7 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
         pre, rest = _finish(body)
         if any(line.strip() for line in rest):
             segments.append(Segment(len(segments) + 1, name, pre, rest, len(rest)))
-        elif name and _first_word(name) in KEEP_EMPTY_COMMANDS:
+        elif name and (_f5_keep_word(name) if f5_hosts is not None else _first_word(name)) in KEEP_EMPTY_COMMANDS:
             # 出力が空でも、見るためのコマンドの区間は残す(ADR-0201 決定4)
             segments.append(Segment(len(segments) + 1, name, pre, (), 0))
     return SplitResult(prompts, source, tuple(segments), marks)

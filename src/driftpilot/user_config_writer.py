@@ -39,12 +39,20 @@ from driftpilot.llm_settings import (
     AUTO_UPDATE_CHECK_KEY,
     CHARACTER_KEY,
     GUI_SECTION,
+    PRESS_MODES,
+    PRESS_TOGGLE,
     PROMPT_TEMPLATE_KEY,
     SECTION,
+    SERIES_CLI_KEY,
+    SERIES_SECTION,
     LANGUAGE_KEY,
     LANGUAGES,
     THEME_KEY,
     THEMES,
+    VOICE_ENABLED_KEY,
+    VOICE_LLM_CORRECT_KEY,
+    VOICE_PRESS_KEY,
+    VOICE_SECTION,
     SettingsError,
     auto_compare_of,
     auto_send_llm_of,
@@ -57,6 +65,7 @@ from driftpilot.llm_settings import (
     parse_section,
     read_bytes,
     theme_of,
+    voice_settings_of,
     words_of,
 )
 from driftpilot.messages import CONFIG_CHANGED_ELSEWHERE, gui_language_invalid
@@ -99,6 +108,10 @@ class UserConfigSnapshot:
     auto_update_check: bool = False
     theme: str = "system"
     language: str = "en"
+    voice_enabled: bool = True
+    voice_press: str = PRESS_TOGGLE
+    voice_llm_correct: bool = False
+    partspilot_cli: str = ""
 
 
 @dataclass(frozen=True)
@@ -130,6 +143,7 @@ def read_user_config(path: Path) -> UserConfigSnapshot:
     """設定ファイルを読む(書かない)。値の形が違えば、読み込み(load_settings)と同じ SettingsError。"""
     data = read_bytes(path)
     section = parse_section(data, path)
+    voice = voice_settings_of(data)
     return UserConfigSnapshot(
         path=path,
         digest=digest_of(data),
@@ -143,6 +157,10 @@ def read_user_config(path: Path) -> UserConfigSnapshot:
         auto_update_check=auto_update_check_of(data),
         theme=theme_of(data),
         language=language_of(data),
+        voice_enabled=voice.enabled,
+        voice_press=voice.press,
+        voice_llm_correct=voice.llm_correct,
+        partspilot_cli=voice.cli,
     )
 
 
@@ -377,6 +395,64 @@ def update_gui_display(path: Path, expected_digest: str | None, values: Mapping[
     if LANGUAGE_KEY in values and (not isinstance(language, str) or language not in LANGUAGES):
         raise SettingsError(gui_language_invalid(path))
     return _put_gui(path, expected_digest, dict(values))
+
+
+def update_voice_settings(
+    path: Path,
+    expected_digest: str | None,
+    enabled: object,
+    press: object,
+    cli: object,
+    llm_correct: object = None,
+) -> str:
+    """音声入力の設定を 1 回で書く。返すのは書いた後のハッシュ(ADR-0233 決定6)。
+
+    [voice] の enabled(真偽値)と press("toggle"・"hold")を置き換える・足す。[series] の partspilot_cli は、空白を除いて
+    空でなければ置き換える・足し、空なら消す(無ければ [series] も作らない)。ほかの項目・ほかの表・コメント・並びは変えない。
+    [voice] の llm_correct(REQ-342)は、None なら触らず、真偽値なら置き換える・足す(それ以外は SettingsError)。
+    値の形が違えば SettingsError(書かない)。ハッシュが違えば書かない(ConfigChanged)。
+    """
+    if llm_correct is not None and not isinstance(llm_correct, bool):
+        raise SettingsError(_T["true_or_false"].format(path=path, section=VOICE_SECTION, key=VOICE_LLM_CORRECT_KEY))
+    if not isinstance(enabled, bool):
+        raise SettingsError(_T["true_or_false"].format(path=path, section=VOICE_SECTION, key=VOICE_ENABLED_KEY))
+    if not isinstance(press, str) or press not in PRESS_MODES:
+        raise SettingsError(
+            _T["one_of"].format(path=path, section=VOICE_SECTION, key=VOICE_PRESS_KEY, choices=", ".join(PRESS_MODES))
+        )
+    if not isinstance(cli, str):
+        raise SettingsError(_T["not_writable_item"].format(names=SERIES_CLI_KEY))
+    location = cli.strip()
+    _, doc = _load(path, expected_digest)
+    voice_values: dict[str, object] = {VOICE_ENABLED_KEY: enabled, VOICE_PRESS_KEY: press}
+    if llm_correct is not None:
+        voice_values[VOICE_LLM_CORRECT_KEY] = llm_correct
+    _put_section(doc, path, VOICE_SECTION, voice_values)
+    if location:
+        _put_section(doc, path, SERIES_SECTION, {SERIES_CLI_KEY: location})
+    else:
+        series = _section(doc, path, create=False, name=SERIES_SECTION)
+        if series is not None:
+            for part in _parts(doc, series, SERIES_SECTION):
+                if SERIES_CLI_KEY in part:
+                    del part[SERIES_CLI_KEY]
+    return _write(path, tomlkit.dumps(doc))
+
+
+def _put_section(doc: tomlkit.TOMLDocument, path: Path, name: str, values: Mapping[str, object]) -> None:
+    """表 name の項目を置き換える・足す(名前と値は呼ぶ側で確かめる)。表が無ければ文書の最後に足す。置き換えは行末のコメントを残す。"""
+    parts = _parts(doc, _section(doc, path, create=True, name=name), name)
+    added: dict[str, object] = {}
+    for key, value in values.items():
+        part = next((p for p in parts if key in p), None)
+        if part is None:
+            added[key] = value
+        else:
+            part[key] = value
+    if added:
+        table = _section(doc, path, create=True, name=name)
+        for key, value in added.items():
+            table[key] = value
 
 
 def _write_gui(path: Path, expected_digest: str | None, values: Mapping[str, object]) -> str:

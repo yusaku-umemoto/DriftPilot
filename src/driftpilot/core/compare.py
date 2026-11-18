@@ -19,7 +19,7 @@ pager_marks と同じ経路で、読み込みは切り分けより前の工程�
 
 機種の自動(ADR-0151。REQ-209): 要求の platform が auto のとき、区間を選んだ後の本文から片側ごとに機種を判定し
 (detect_platform)、choose_platform の組み合わせで使う系統を決める。以降は同じ系統を手で指定したのと同じ道を通る。
-種類も auto なら、判定が fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos の側は config、ほかは sniff で決める(AmbiguousFormatError は出さない)。
+種類も auto なら、判定が fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos・checkpoint_gaia・f5_bigip の側は config、ほかは sniff で決める(AmbiguousFormatError は出さない)。
 show に決まったら機種なし(単純比較)にする。自動のときは platform_mismatch を出さず、判定なし・食い違いのときだけ
 platform_auto の警告を1件出す。食い違いのときは AI に送らない(platform_conflict)。
 
@@ -372,7 +372,10 @@ def _llm_step(
     if error is not None and llm is not None and llm.skip_failed and llm.client is not None:
         # 失敗した比較の結果は送らない(一括比較の送る段。送る内容は作り、理由を残す)
         llm = dataclasses.replace(llm, client=None, unavailable="compare_failed")
-    return _llm_analysis(llm, rules, before, after, structured, raw, show, show_command)
+    return _llm_analysis(
+        llm, rules, before, after, structured, raw, show, show_command,
+        config_platform_used(request.platform, kind, auto_platform),
+    )
 
 
 def analyze_compared(request: CompareRequest, outcome: CompareOutcome, llm: LlmRequest | None) -> CompareOutcome:
@@ -412,7 +415,7 @@ def choose_platform(before: str, after: str) -> AutoPlatform:
 
 
 def combine_platforms(before: str | None, after: str | None) -> AutoPlatform:
-    """片側ごとの判定(fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos・a・None)の組み合わせ(ADR-0151 決定2 の表)。
+    """片側ごとの判定(fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos・checkpoint_gaia・f5_bigip・a・None)の組み合わせ(ADR-0151 決定2 の表)。
 
     同じならそれ、片側だけ判定できればその側、両側とも判定なしなら指定なし、違えば指定なしで conflict。
     a(Cisco 系)は指定なし(used=None)。
@@ -467,6 +470,7 @@ def _llm_analysis(
     raw: RawCompareResult | None,
     show: ShowCompareResult | None,
     show_command: str | None = None,
+    platform: str | None = None,
 ) -> LlmAnalysis:
     """差分を読むだけで書き換えない。行単位の差分の行番号に合わせて、比較と同じ正規化をした行を渡す。
 
@@ -474,7 +478,7 @@ def _llm_analysis(
     """
     if llm is None:
         return DISABLED
-    inputs = _analysis_inputs(rules, before, after, raw, show)
+    inputs = dataclasses.replace(_analysis_inputs(rules, before, after, raw, show), platform=platform)
     return analyze(
         llm,
         structured=structured,
@@ -485,6 +489,7 @@ def _llm_analysis(
         before_source=inputs.before_source,
         after_source=inputs.after_source,
         show_command=show_command,
+        platform=inputs.platform,
     )
 
 
@@ -520,7 +525,21 @@ def llm_inputs(request: CompareRequest, outcome: CompareOutcome) -> LlmInputs | 
     return dataclasses.replace(
         _analysis_inputs(effective_rules(request), before.text, after.text, outcome.raw, outcome.show),
         show_command=_llm_show_command(request, outcome.kind, segmentation),
+        platform=config_platform_used(request.platform, outcome.kind, outcome.auto_platform),
     )
+
+
+def config_platform_used(platform: str | None, kind: str | None, auto_platform: AutoPlatform | None) -> str | None:
+    """config として比べたときの機種の系統の名前(行頭スコープ表で読む機種 checkpoint_gaia・fujitsu_sir の未解釈の行の判定など、機種ごとの送る側の判定に渡す)。
+
+    kind が config でなければ None(show の機種名は ntc-templates の名前で、系統ではない)。機種が自動なら判定で使った系統
+    (判定なし・Cisco 系は None)、ほかは指定した名前そのまま。
+    """
+    if kind != "config":
+        return None
+    if platform == AUTO_PLATFORM:
+        return auto_platform.used if auto_platform is not None else None
+    return platform
 
 
 def _llm_show_command(
@@ -554,11 +573,11 @@ def _resolve_kind(request: CompareRequest, before: str, after: str):
 def _resolve_auto_kind(detected: dict[SideName, str | None], texts: dict[SideName, str]):
     """種類も機種も自動のときの種類(ADR-0151 決定3)。2つの判定が食い違うと None。AmbiguousFormatError は出さない。
 
-    片側ごとに、機種の判定が fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos なら config。ほかは sniff の判定が show なら show、それ以外は config。
+    片側ごとに、機種の判定が fujitsu_sir・yamaha・fortinet・juniper_junos・paloalto_panos・checkpoint_gaia・f5_bigip なら config。ほかは sniff の判定が show なら show、それ以外は config。
     """
     kinds = set()
     for side in SIDES:
-        if detected[side] in ("fujitsu_sir", "yamaha", "fortinet", "juniper_junos", "paloalto_panos"):
+        if detected[side] in ("fujitsu_sir", "yamaha", "fortinet", "juniper_junos", "paloalto_panos", "checkpoint_gaia", "f5_bigip"):
             kinds.add("config")
         else:
             kinds.add("show" if sniff(texts[side]).verdict == "show" else "config")

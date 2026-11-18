@@ -119,6 +119,10 @@ _INTERFACE_WORDS = frozenset(
         "name", "disable", "enable", "speed-duplex",
         # HPE Aruba AOS-Switch の `untagged vlan …`・`tagged vlan …`(ADR-0228 の追記、REQ-334)
         "untagged", "tagged",
+        # Huawei VRP の `undo shutdown`・`undo portswitch`・`portswitch`(`ip` は上に既にある。ADR-0231 決定 3、REQ-336)
+        "undo", "portswitch",
+        # Huawei VRP の `port link-type …`・`port default vlan …`・`port trunk …`・`eth-trunk <N>`(ADR-0231 決定 3(2)、REQ-337)
+        "port", "eth-trunk",
     }
 )
 # 項目に写す設定の頭の語(`vxlan ` を外した後)。`no ` の付いた形は options に入れない

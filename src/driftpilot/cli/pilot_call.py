@@ -17,6 +17,7 @@ AI は呼ばない。AI の設定・鍵は読まない(読むのは利用者が�
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 from collections.abc import Callable
@@ -60,7 +61,12 @@ from driftpilot.segmentation.input_forms import InputDecodeError, read_config_in
 _H = CLI_HELP
 _M = PILOT_CALL_MESSAGES
 
-EXIT_CANCELLED = 130  # 標準入力が閉じられて止めた(ADR-0203 決定6)
+EXIT_CANCELLED = 130  # 標準入力が閉じられて止めた・Ctrl+C で止めた(ADR-0203 決定6。ADR-0232 決定4)
+
+REQUEST_LIMIT = 1_048_576  # 依頼のファイルの大きさの上限(ADR-0232 決定1)
+BOM = b"\xef\xbb\xbf"
+CORRELATION_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}")  # ADR-0232 決定2(ASCII だけ。fullmatch で使う)
+OPERATIONS = ("capabilities", "compare", "config-facts")
 
 SCHEMA = "pilot.call-request"
 SCHEMA_VERSION = "1"
@@ -144,20 +150,44 @@ class CallRequest:
 
 
 def _read_envelope(path: str) -> dict[str, Any]:
+    """依頼のファイルを読む。code は ADR-0232 決定1(無い→request_not_found、大きすぎる→request_too_large、他→request_invalid)。"""
+    not_found = Reject("request_not_found", _M["request_not_found"].format(path=path))
     try:
-        text = Path(path).read_bytes().decode("utf-8-sig")
-        data = json.loads(text)
-    except (OSError, ValueError, RecursionError):  # UnicodeDecodeError・JSONDecodeError は ValueError
-        raise Reject("invalid_request", _M["invalid_request"]) from None
+        file = Path(path)
+        if not file.is_file():
+            raise not_found
+        with file.open("rb") as fh:
+            raw = fh.read(REQUEST_LIMIT + 1)
+    except OSError:
+        raise not_found from None
+    if len(raw) > REQUEST_LIMIT:
+        raise Reject("request_too_large", _M["request_too_large"].format(limit=REQUEST_LIMIT))
+    if raw.startswith(BOM):
+        raise Reject("request_invalid", _M["request_bom"])
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):  # UnicodeDecodeError・JSONDecodeError は ValueError
+        raise Reject("request_invalid", _M["invalid_request"]) from None
     if not isinstance(data, dict):
-        raise Reject("invalid_request", _M["invalid_request"])
+        raise Reject("request_invalid", _M["invalid_request"])
     return data
 
 
+def _valid_correlation_id(value: Any) -> bool:
+    return isinstance(value, str) and CORRELATION_ID_PATTERN.fullmatch(value) is not None
+
+
 def correlation_id_of(data: dict[str, Any]) -> str:
+    """error の行に入れる correlation_id。決まりに合う値だけ返し、ほかは空の文字列(合わない値は出さない)。"""
     caller = data.get("caller")
     value = caller.get("correlation_id") if isinstance(caller, dict) else None
-    return value if isinstance(value, str) else ""
+    return value if _valid_correlation_id(value) else ""
+
+
+def _check_caller(data: dict[str, Any]) -> None:
+    caller = data.get("caller")
+    if not isinstance(caller, dict) or not _valid_correlation_id(caller.get("correlation_id")):
+        raise Reject("request_invalid", _M["invalid_correlation_id"])
 
 
 def _is_absolute(value: Any) -> bool:
@@ -166,7 +196,7 @@ def _is_absolute(value: Any) -> bool:
 
 def _input_paths(data: dict[str, Any]) -> tuple[str, str]:
     inputs = data.get("inputs")
-    invalid = Reject("invalid_inputs", _M["invalid_inputs"])
+    invalid = Reject("request_invalid", _M["invalid_inputs"])
     if not isinstance(inputs, list) or len(inputs) != 2 or not all(isinstance(i, dict) for i in inputs):
         raise invalid
     by_role = {i.get("role"): i.get("path") for i in inputs if isinstance(i.get("role"), str)}
@@ -182,7 +212,7 @@ def _input_paths(data: dict[str, Any]) -> tuple[str, str]:
 
 def _output_dir(data: dict[str, Any]) -> Path:
     value = data.get("output_dir")
-    invalid = Reject("invalid_output_dir", _M["invalid_output_dir"])
+    invalid = Reject("output_dir_invalid", _M["invalid_output_dir"])
     if not _is_absolute(value):
         raise invalid
     path = Path(value)
@@ -197,12 +227,12 @@ def _output_dir(data: dict[str, Any]) -> Path:
 def _params(data: dict[str, Any]) -> Params:
     raw = data.get("params", {})
     if not isinstance(raw, dict):
-        raise Reject("invalid_param", _M["invalid_param"].format(name="params"))
+        raise Reject("request_invalid", _M["invalid_param"].format(name="params"))
     if unknown := [name for name in raw if name not in PARAM_NAMES]:
-        raise Reject("unknown_param", _M["unknown_param"].format(count=len(unknown), allowed=", ".join(PARAM_NAMES)))
+        raise Reject("request_invalid", _M["unknown_param"].format(count=len(unknown), allowed=", ".join(PARAM_NAMES)))
 
     def invalid(name: str) -> Reject:
-        return Reject("invalid_param", _M["invalid_param"].format(name=name))
+        return Reject("request_invalid", _M["invalid_param"].format(name=name))
 
     kind = raw.get("kind", "auto")
     if kind not in KINDS:
@@ -228,7 +258,7 @@ def _check_combination(params: Params) -> None:
     """人向けの compare と同じ組み合わせの決まり(文は人向けの CLI の文)。"""
     if params.all_segments:
         if params.show_command is not None:
-            raise Reject("invalid_param", cli_err_all_segments_conflict(["--show-command"]))
+            raise Reject("request_invalid", cli_err_all_segments_conflict(["--show-command"]))
         return
     probe = CompareRequest(
         SideInput("", ""),
@@ -239,7 +269,7 @@ def _check_combination(params: Params) -> None:
         show_command=params.show_command,
     )
     if (problem := request_problem(probe)) is not None:
-        raise Reject("invalid_param", problem.message)
+        raise Reject("request_invalid", problem.message)
 
 
 def validate(path: str) -> CallRequest:
@@ -247,9 +277,10 @@ def validate(path: str) -> CallRequest:
     data = _read_envelope(path)
     try:
         if data.get("schema") != SCHEMA or data.get("schema_version") != SCHEMA_VERSION:
-            raise Reject("unsupported_schema", _M["unsupported_schema"])
+            raise Reject("unsupported_schema_version", _M["unsupported_schema"])
         if data.get("operation") != "compare":
-            raise Reject("unsupported_operation", _M["unsupported_operation"])
+            raise Reject("operation_mismatch", _M["unsupported_operation"])
+        _check_caller(data)
         before, after = _input_paths(data)
         output_dir = _output_dir(data)
         if data.get("llm", "off") != "off":
@@ -279,7 +310,7 @@ class FactsRequest:
 def _facts_input_path(data: dict[str, Any]) -> str:
     """inputs は役 config が 1 つだけ(絶対パスで、ある普通のファイル)。"""
     inputs = data.get("inputs")
-    invalid = Reject("invalid_inputs", _M["invalid_inputs_facts"])
+    invalid = Reject("request_invalid", _M["invalid_inputs_facts"])
     if not isinstance(inputs, list) or len(inputs) != 1 or not isinstance(inputs[0], dict):
         raise invalid
     if inputs[0].get("role") != "config" or not _is_absolute(inputs[0].get("path")):
@@ -294,12 +325,12 @@ def _facts_platform(data: dict[str, Any]) -> str:
     """params は platform だけ(auto 既定、または compare の kind: config で選べる機種の名前)。"""
     raw = data.get("params", {})
     if not isinstance(raw, dict):
-        raise Reject("invalid_param", _M["invalid_param"].format(name="params"))
+        raise Reject("request_invalid", _M["invalid_param"].format(name="params"))
     if unknown := [name for name in raw if name not in FACTS_PARAM_NAMES]:
         raise Reject(
-            "unknown_param", _M["unknown_param"].format(count=len(unknown), allowed=", ".join(FACTS_PARAM_NAMES))
+            "request_invalid", _M["unknown_param"].format(count=len(unknown), allowed=", ".join(FACTS_PARAM_NAMES))
         )
-    invalid = Reject("invalid_param", _M["invalid_param"].format(name="platform"))
+    invalid = Reject("request_invalid", _M["invalid_param"].format(name="platform"))
     platform = raw.get("platform", AUTO_PLATFORM)
     if not isinstance(platform, str) or not platform.strip():
         raise invalid
@@ -309,7 +340,7 @@ def _facts_platform(data: dict[str, Any]) -> str:
     # 表がまだ無い機種(fujitsu_srs)は compare の kind: config と同じ決まりで断る(文は人向けの CLI の文)
     probe = CompareRequest(SideInput("", ""), SideInput("", ""), kind="config", platform=platform)
     if (problem := request_problem(probe)) is not None:
-        raise Reject("invalid_param", problem.message)
+        raise Reject("request_invalid", problem.message)
     return platform
 
 
@@ -318,9 +349,10 @@ def validate_config_facts(path: str) -> FactsRequest:
     data = _read_envelope(path)
     try:
         if data.get("schema") != SCHEMA or data.get("schema_version") != SCHEMA_VERSION:
-            raise Reject("unsupported_schema", _M["unsupported_schema"])
+            raise Reject("unsupported_schema_version", _M["unsupported_schema"])
         if data.get("operation") != "config-facts":
-            raise Reject("unsupported_operation", _M["unsupported_operation_facts"])
+            raise Reject("operation_mismatch", _M["unsupported_operation_facts"])
+        _check_caller(data)
         config = _facts_input_path(data)
         output_dir = _output_dir(data)
         if data.get("llm", "off") != "off":
@@ -408,6 +440,9 @@ def write_files(directory: Path, contents: list[tuple[str, str]]) -> list[Path]:
     except OSError as exc:
         remove_files(created)
         raise WriteFailed(path, exc) from exc
+    except KeyboardInterrupt:  # 途中の Ctrl+C でも、自分が作ったファイルは消してから送り直す
+        remove_files(created)
+        raise
     return created
 
 
@@ -498,12 +533,35 @@ def _compare(call: CallRequest, request: CompareRequest, cancel: threading.Event
     return Compared(single.status, _summary(single.status, 1, 0, masked), to_json(single) + "\n", masked.text)
 
 
+class _CallState:
+    """呼び出しの途中の状態。Ctrl+C で止めるとき、読めた correlation_id と書いたファイルを使う。"""
+
+    def __init__(self) -> None:
+        self.correlation_id = ""
+        self.written: list[Path] = []
+
+
+def _interrupted(state: _CallState) -> int:
+    """Ctrl+C(KeyboardInterrupt)で止める: 書いたファイルを消し、error の行と同じ文の標準エラーを出して 130(ADR-0232 決定4)。"""
+    remove_files(state.written)
+    return _fail("interrupted", _M["interrupted"], state.correlation_id, EXIT_CANCELLED)
+
+
 def run_compare_call(args: argparse.Namespace, stdin_reader: StdinReader | None = None) -> int:
+    state = _CallState()
+    try:
+        return _run_compare_call(args, stdin_reader, state)
+    except KeyboardInterrupt:
+        return _interrupted(state)
+
+
+def _run_compare_call(args: argparse.Namespace, stdin_reader: StdinReader | None, state: _CallState) -> int:
     try:
         call = validate(args.request)
     except Reject as exc:
         return _fail(exc.code, exc.message, exc.correlation_id)
     cid = call.correlation_id
+    state.correlation_id = cid
     try:
         words = load_extra_secret_words()
     except SettingsError as exc:
@@ -523,7 +581,7 @@ def run_compare_call(args: argparse.Namespace, stdin_reader: StdinReader | None 
             raise CompareCancelled("done")
         if compared.status == "error":
             return _fail("compare_failed", compared.failure, cid)
-        written = write_files(
+        written = state.written = write_files(
             call.output_dir, [(RESULT_FILE, compared.result_text), (PAYLOAD_FILE, compared.payload_text)]
         )
         if cancel.is_set():
@@ -544,7 +602,7 @@ def run_compare_call(args: argparse.Namespace, stdin_reader: StdinReader | None 
         return _fail("write_failed", _M["write_failed"].format(path=exc.path, reason=exc.reason), cid)
     except CompareCancelled:
         remove_files(written)
-        return _fail("cancelled", _M["cancelled"], cid, EXIT_CANCELLED)
+        return _fail("stopped_by_caller", _M["cancelled"], cid, EXIT_CANCELLED)
     except Exception as exc:  # noqa: BLE001 - 受け付けた後の予期しない失敗は、書きかけを消して error の行で終える
         remove_files(written)
         return _fail("internal_error", _M["internal_error"].format(error_type=type(exc).__name__), cid)
@@ -561,11 +619,20 @@ def _facts_failure(exc: FactsError) -> tuple[str, str]:
 
 
 def run_config_facts_call(args: argparse.Namespace, stdin_reader: StdinReader | None = None) -> int:
+    state = _CallState()
+    try:
+        return _run_config_facts_call(args, stdin_reader, state)
+    except KeyboardInterrupt:
+        return _interrupted(state)
+
+
+def _run_config_facts_call(args: argparse.Namespace, stdin_reader: StdinReader | None, state: _CallState) -> int:
     try:
         call = validate_config_facts(args.request)
     except Reject as exc:
         return _fail(exc.code, exc.message, exc.correlation_id)
     cid = call.correlation_id
+    state.correlation_id = cid
     try:
         words = load_extra_secret_words()
     except SettingsError as exc:
@@ -585,7 +652,7 @@ def run_config_facts_call(args: argparse.Namespace, stdin_reader: StdinReader | 
         facts = config_facts(side.text, side.name, side.notes, call.platform, words)
         if cancel.is_set():  # 読み終えた後・書く前に見る(書きかけは残さない)
             raise CompareCancelled("done")
-        written = write_files(
+        written = state.written = write_files(
             call.output_dir, [(RESULT_FILE, facts.result_text), (FACTS_MASKED_FILE, facts.masked_text)]
         )
         if cancel.is_set():
@@ -614,10 +681,24 @@ def run_config_facts_call(args: argparse.Namespace, stdin_reader: StdinReader | 
         return _fail("write_failed", _M["write_failed"].format(path=exc.path, reason=exc.reason), cid)
     except CompareCancelled:
         remove_files(written)
-        return _fail("cancelled", _M["cancelled_facts"], cid, EXIT_CANCELLED)
+        return _fail("stopped_by_caller", _M["cancelled_facts"], cid, EXIT_CANCELLED)
     except Exception as exc:  # noqa: BLE001 - 受け付けた後の予期しない失敗は、書きかけを消して error の行で終える
         remove_files(written)
         return _fail("internal_error", _M["internal_error"].format(error_type=type(exc).__name__), cid)
+
+
+def is_pilot_call_argv(argv: list[str]) -> bool:
+    """引数のうち `-` で始まらない最初の語が pilot-call か(`pilot-call` の下の引数の誤りを見分ける)。"""
+    return next((word for word in argv if not word.startswith("-")), None) == "pilot-call"
+
+
+def argument_error(argv: list[str]) -> int:
+    """`pilot-call` の下の引数の誤り(ADR-0232 決定3)。error の 1 行を標準出力に書いて 2 を返す。
+    知らない操作は operation_not_supported、ほかは request_invalid。標準エラーの使い方の文は argparse が出し済み。"""
+    words = [word for word in argv if not word.startswith("-")][1:]  # 先頭は pilot-call
+    if words and words[0] not in OPERATIONS:
+        return _fail("operation_not_supported", _M["unknown_operation"], "")
+    return _fail("request_invalid", _M["invalid_arguments"], "")
 
 
 def run(args: argparse.Namespace, *, stdin_reader: StdinReader | None = None) -> int:

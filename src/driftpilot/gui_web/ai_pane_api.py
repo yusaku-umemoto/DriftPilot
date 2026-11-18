@@ -17,7 +17,7 @@
 from collections.abc import Callable
 from typing import Any
 
-from driftpilot.gui_web.bridge import Api
+from driftpilot.gui_web.bridge import Api, _guarded
 from driftpilot.gui_web.compare_api import PANE_AI, CompareApi
 
 
@@ -80,6 +80,20 @@ class AiPaneApi(Api):
     def close(self) -> dict[str, Any]:
         """この窓を閉じる。比較の窓の右の面に戻す処理は、窓の closed の知らせから行う。"""
         return self._compare._call_as(PANE_AI, self._close)
+
+    # --- 音声入力(ADR-0233 / REQ-341。状態は比較の窓の hub が持つ。compare.changed は送らない) ---
+
+    def voice_state(self) -> dict[str, Any]:
+        """音声入力のボタンの状態(比較の窓と共用の 1 つ)。読むだけ。"""
+        return _guarded(self._compare._voice_state)
+
+    def voice_press(self, action: Any) -> dict[str, Any]:
+        """マイクのボタンを押した・離した(action は "toggle"・"down"・"up")。押した面は AI の窓。文字は、この窓の入力欄に入る。"""
+        return _guarded(self._compare._voice_press, action, PANE_AI)
+
+    def voice_cancel(self) -> dict[str, Any]:
+        """録音中の取り消し(Esc)。"""
+        return _guarded(self._compare._voice_cancel)
 
     # --- 中で使う ---
 

@@ -82,7 +82,14 @@ from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.gui_web.rule_ai import RuleAi
 from driftpilot.gui_web.theme import THEME_EVENT
 from driftpilot.llm_analyzer import LLMClient, ShapeNode, send_connection_check
-from driftpilot.llm_settings import CUSTOM_HTTP_JSON, ENV_KEY_PREFIX, LANGUAGES, THEMES, SettingsError
+from driftpilot.llm_settings import (
+    CUSTOM_HTTP_JSON,
+    ENV_KEY_PREFIX,
+    LANGUAGES,
+    PRESS_MODES,
+    THEMES,
+    SettingsError,
+)
 from driftpilot.messages import (
     AUTO_SEND_CONFIRM_TITLE,
     CLI_MODEL_HINT,
@@ -154,7 +161,21 @@ from driftpilot.messages import (
 )
 from driftpilot.messages import RAW_DEFAULTS_TITLE
 from driftpilot.screen_model.settings_model import RawDefaultsPane, raw_defaults_pane, save_raw_defaults_form
-from driftpilot.screen_model.settings_model import save_auto_update_check, save_gui_display, save_gui_theme
+from driftpilot.messages import (
+    VOICE_SETTINGS_SEARCHING,
+    VOICE_STATUS_NO_VOICE_SERVE,
+    VOICE_STATUS_NOT_FOUND,
+    VOICE_STATUS_NOT_PARTSPILOT,
+    voice_status_found,
+)
+from driftpilot.screen_model.settings_model import (
+    save_auto_update_check,
+    save_gui_display,
+    save_gui_theme,
+    save_voice_settings,
+)
+from driftpilot.series import discovery as series_discovery
+from driftpilot.series.discovery import Discovery
 from driftpilot.update import (
     INSTALL_SOURCE,
     RELEASES_PAGE_URL,
@@ -286,8 +307,10 @@ FOCUS_NAME = "name"
 FOCUS_PROMPT_NAME = "prompt_name"
 PROCEED_SAVE_KEY = "save_key"
 # 窓のタブ(static/js/settings.js の TABS と同じ並び)。開くタブ(open_tab)に渡せるのはこの名前だけ。「更新」は REQ-252 §4
-SETTINGS_TABS = ("profiles", "prompt", "auto", "raw", "file", "display", "update")
+SETTINGS_TABS = ("profiles", "prompt", "auto", "raw", "file", "display", "voice", "update")
 UPDATE_TAB = "update"
+# 「音声入力」のタブ(ADR-0233 決定6): 「PartsPilot の CLI の場所」の欄の文字の長さの上限
+VOICE_CLI_MAX_CHARS = 4096
 # 「更新する」を出せる入れ方(REQ-253 §7)と、進み具合を知らせる間隔の下限(秒)。時計はテストで差し替える
 UPDATABLE_KINDS = (INSTALL_WINDOWS_ZIP, INSTALL_MAC_APP)
 PROGRESS_INTERVAL_SECONDS = 0.2
@@ -301,6 +324,19 @@ class _BadRequest(Exception):
 
 # 「表示」の「保存」で language を渡さなかった印(省いたときは今までどおり theme だけを扱う。ADR-0190)。None と区別する
 _NO_LANGUAGE: Any = object()
+
+
+def _voice_status_text(found: Discovery) -> str:
+    """「音声入力」のタブの状態の行の文(ADR-0233 決定1・5)。見つけた場所・版・案内、または見つからない理由。理由と案内の文は種類から選ぶ(場所と版は文字として出すだけ)。"""
+    if found.path:
+        return voice_status_found(
+            found.path, found.order, found.version, found.component_version, voice_serve=found.voice_serve
+        )
+    if found.reason == series_discovery.REASON_NOT_PARTSPILOT:
+        return VOICE_STATUS_NOT_PARTSPILOT
+    if found.reason == series_discovery.REASON_NO_VOICE_SERVE:
+        return VOICE_STATUS_NO_VOICE_SERVE
+    return VOICE_STATUS_NOT_FOUND
 
 
 def web_version() -> str:
@@ -343,8 +379,16 @@ class SettingsApi(Api):
         prepare_update: Callable[..., PreparedUpdate] = prepare_update_default,
         start_applier: Callable[[PreparedUpdate], bool] = start_applier_default,
         discard_update: Callable[[PreparedUpdate], None] = discard_prepared_update,
+        voice_finder: Callable[[str], Discovery] | None = None,
     ) -> None:
         self._where: dict[str, Any] = {"cwd": cwd, "env": env, "platform": platform, "home": home}
+        # 「音声入力」のタブ(ADR-0233 決定6): PartsPilot を探す関数(None なら、そのときの discovery.discover_default。テストは偽物を渡す)・
+        # 探した結果の状態の文・探している最中か・探す番号(古い結果は捨てる)・欄を入れ直す番号
+        self._voice_finder = voice_finder
+        self._voice_status: str | None = None
+        self._voice_searching = False
+        self._voice_serial = 0
+        self._fill_voice = 0
         self._client_factory = client_factory
         self._web_version = web_version
         self._opener = opener
@@ -608,6 +652,21 @@ class SettingsApi(Api):
         書けたら、開いている窓すべてに色を当てる。言語はその場では当てない(DriftPilot を開き直すと効く)。
         """
         return self._call(self._save_display_settings, form, theme, language)
+
+    def save_voice_settings(self, form: Any, values: Any) -> dict[str, Any]:
+        """「音声入力」のタブの「保存」(ADR-0233 決定6)。[voice] の enabled・press と [series] の partspilot_cli だけを書く。
+
+        values は {"enabled": 真偽値, "press": "toggle"か"hold", "cli": 文字}。form は画面の欄の値(ほかの操作と同じ。受け取るだけで書かない)。
+        """
+        return self._call(self._save_voice_settings, form, values)
+
+    def choose_partspilot_cli(self, form: Any) -> dict[str, Any]:
+        """「参照…」。開くのダイアログで選んだ場所を "chosen" で返す(欄に入れるだけで、ファイルには書かない。Mac で .app を選んだら中の CLI)。"""
+        return self._call(self._choose_partspilot_cli, form)
+
+    def find_partspilot(self, form: Any, cli: Any) -> dict[str, Any]:
+        """「探し直す」。欄の今の値(cli)で、裏のスレッドで PartsPilot を探す。終わったら settings.view の知らせで状態の行を描き直す。"""
+        return self._call(self._find_partspilot, form, cli)
 
     def start_update(self) -> dict[str, Any]:
         """「更新する」(REQ-253 §7)。引数は受けない。確かめた結果が newer で、配った物で動いているときだけ、裏で取ってきて確かめて準備する。
@@ -907,6 +966,8 @@ class SettingsApi(Api):
             "open_tab": open_tab,
             # 「更新」のタブ(REQ-252 §4)。文はどれも文字として描く(変更の内容 notes も textContent)
             "update": self._update_view(fields),
+            # 「音声入力」のタブ(ADR-0233 決定6)。status は探した結果の文(見つけた場所・版・案内。まだ探していなければ null)
+            "voice": self._voice_view(fields),
             # 「表示」のタブ(ADR-0189)。theme は設定ファイルの値(読めなければ "system")
             "display": {
                 "theme": fields.theme if fields is not None else "system",
@@ -1971,6 +2032,102 @@ class SettingsApi(Api):
                 self._refresh(keep_edits=True, keep_config_edits=True)
                 self._fill_update += 1  # チェックの欄を読み直した値で入れ直す(書けなかったときは押した値を残す)
             return self._ok(notice=notice)
+
+    # --- 「音声入力」のタブ(ADR-0233 決定6) ---
+
+    def _voice_values(self, values: Any) -> tuple[bool, str, str, bool | None]:
+        """画面から受け取った欄の値の形を確かめる。形が違えば _BadRequest。llm_correct は任意の真偽値(無ければ None で今の値のまま)。"""
+        if not isinstance(values, dict):
+            raise _BadRequest
+        enabled, press, cli = values.get("enabled"), values.get("press"), values.get("cli")
+        llm_correct = values.get("llm_correct")
+        if (
+            not isinstance(enabled, bool)
+            or not isinstance(press, str)
+            or press not in PRESS_MODES
+            or not isinstance(cli, str)
+            or len(cli) > VOICE_CLI_MAX_CHARS
+            or (llm_correct is not None and not isinstance(llm_correct, bool))
+        ):
+            raise _BadRequest
+        return enabled, press, cli, llm_correct
+
+    def _save_voice_settings(self, form: Any, values: Any) -> dict[str, Any]:
+        """「更新」のタブの「保存」と同じ作り: 先に form を受け取り、書くのは音声入力の 3 項目だけ。
+        書けたら・ほかで変わっていたら読み直し(ほかのタブの打ちかけは残す)、書けたら保存の後の口を呼び、PartsPilot を探し直す。
+        """
+        with self._lock:
+            enabled, press, cli, llm_correct = self._voice_values(values)
+            self._take(form)
+            fields = self._current().config_fields
+            if fields is None:
+                return self._unreadable() or self._ok()
+            action = save_voice_settings(fields, enabled, press, cli, llm_correct, **self._kw("env", "platform", "home"))
+            self._mark_saved(action.ok)
+            notice = self._notice(action.message, CONFIG_SAVE_TITLE)
+            if action.ok or action.reload:
+                self._refresh(keep_edits=True, keep_config_edits=True)
+                self._fill_voice += 1  # 欄を読み直した値で入れ直す(書けなかったときは入れた値を残す)
+            if action.ok:
+                self._start_voice_search(cli.strip())
+            return self._ok(notice=notice)
+
+    def _choose_partspilot_cli(self, form: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+        # 開いている間はロックを持たない。CLI のプログラムは拡張子が決まらないので、種類で絞らない
+        chosen = self._choose_file(DIALOG_OPEN, file_types=())
+        if chosen is not None and chosen.suffix == ".app":
+            chosen = chosen / series_discovery.MAC_CLI  # Mac で .app を選んだら中の CLI を使う
+        with self._lock:
+            return self._ok(chosen=str(chosen) if chosen is not None else None)
+
+    def _find_partspilot(self, form: Any, cli: Any) -> dict[str, Any]:
+        with self._lock:
+            if not isinstance(cli, str) or len(cli) > VOICE_CLI_MAX_CHARS:
+                raise _BadRequest
+            self._take(form)
+            self._start_voice_search(cli.strip())
+            return self._ok()
+
+    def _start_voice_search(self, cli: str) -> None:
+        """ロックの中で呼ぶ。探している印を立て、daemon のスレッドで探す(古い探しの結果は番号で捨てる)。"""
+        self._voice_serial += 1
+        serial = self._voice_serial
+        self._voice_searching = True
+        self._voice_status = VOICE_SETTINGS_SEARCHING
+        threading.Thread(target=self._run_voice_search, args=(serial, cli), daemon=True, name="voice-search").start()
+
+    def _run_voice_search(self, serial: int, cli: str) -> None:
+        finder = self._voice_finder or series_discovery.discover_default
+        try:
+            found = finder(cli)
+        except Exception:  # noqa: BLE001 - 探す途中の失敗は「見つからない」
+            found = series_discovery.NOT_FOUND
+        with self._lock:
+            if serial != self._voice_serial:
+                return  # 後から始めた探しがある
+            self._voice_searching = False
+            self._voice_status = _voice_status_text(found)
+            view = self._render() if self._view is not None else None
+        window = self._window
+        if window is not None and view is not None:
+            try:
+                notify(window, {"type": VIEW_EVENT, "view": view})
+            except Exception:  # noqa: BLE001 - 閉じた窓への知らせの失敗は捨てる
+                pass
+
+    def _voice_view(self, fields: Any) -> dict[str, Any]:
+        return {
+            "enabled": bool(fields.voice_enabled) if fields is not None else True,
+            "press": fields.voice_press if fields is not None else "toggle",
+            "cli": fields.partspilot_cli if fields is not None else "",
+            "llm_correct": bool(fields.voice_llm_correct) if fields is not None else False,
+            "can_save": fields is not None,
+            "fill": self._fill_voice,
+            "searching": self._voice_searching,
+            "status": self._voice_status,
+        }
 
     def _save_display_settings(self, form: Any, theme: Any, language: Any = _NO_LANGUAGE) -> dict[str, Any]:
         """「表示」のタブの「保存」。theme・language が文字でない・3 つのどれでもない・form の形が違えば _BadRequest。

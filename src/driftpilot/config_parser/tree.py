@@ -21,6 +21,10 @@ hier_config はツリーにする前に、テキストを前処理する。木�
 IOS-XR は、木にする前に閉じの語(`end-policy`・`end-set` など)の行を消し、XR と見立てた config だけ最上位の同じ見出しの
 塊を 1 つにまとめる(config_parser/iosxr.py。ADR-0211。ルート直下の重複の扱いはその後の文字列に対して今のまま)。
 A型では、この木を抽出の前に字下げの崩れを直してから使う(ADR-0121 決定2、indentation.py)。
+Huawei VRP と見立てた config では、`banner ` で始まる行をバナーの始まりとして扱わない(build_tree の banners=False。
+ADR-0231 の追記、REQ-343)。Huawei の `banner enable` は終わりの印を持たない 1 行のコマンドで、ライブラリのバナーの規則に
+当てると最後までバナーのままになって止まるため。木にする前に行の頭へ印を 1 つ足してライブラリに気づかせず、
+木を作った後に印を外して、もとの文字に戻す(IR・差分・送る文には印が出ない)。
 文章を字下げで数えた値は、木の中身の数ではない。木について数えるときは build_tree() を通す。
 """
 
@@ -29,6 +33,7 @@ import re
 from functools import lru_cache
 
 from hier_config import HConfig, MatchRule, Platform, get_hconfig, get_hconfig_driver
+from hier_config.exceptions import DuplicateChildError
 from hier_config.models import ParentAllowsDuplicateChildRule, PerLineSubRule
 
 _DISABLED_CALLBACKS = frozenset({"_remove_ipv4_acl_remarks", "_add_acl_sequence_numbers"})
@@ -57,6 +62,10 @@ _EIGRP_EXIT_RULES = tuple(
 )
 
 _DUPLICATE_PREFIX = "Found a duplicate section: "
+
+# バナーの始まりに見えない行の頭へ足す印(REQ-343)。ライブラリの空白の扱い(split・strip)や行を消す規則では
+# 消えも変わりもしない。木を作った後に外すので、外へは出ない
+_NO_BANNER_MARK = "\x00"
 
 
 @lru_cache(maxsize=None)
@@ -111,8 +120,43 @@ def banner_line_kinds(lines: list[str]) -> list[int]:
     return kinds
 
 
-def build_tree(text: str) -> HConfig:
-    """Cisco IOS / IOS-XE の config テキストをツリーにする。ルート直下の重複は DuplicateChildError。"""
+def _mark_lines(text: str) -> str:
+    """バナーの始まりに見える行の頭へ印を足す。もとの本文の印の文字で始まる行は、字下げの後ろへ足して逃がす。"""
+    marked: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("banner "):
+            line = _NO_BANNER_MARK + line
+        else:
+            body = line.lstrip()
+            if body.startswith(_NO_BANNER_MARK):
+                indent = line[: len(line) - len(body)]
+                line = indent + _NO_BANNER_MARK + body
+        marked.append(line)
+    return "\n".join(marked)
+
+
+def _unmark_tree(tree: HConfig) -> None:
+    """印で始まる節から、印を 1 つだけ外してもとの文字に戻す。"""
+    for child in tuple(tree.all_children()):
+        if child.text.startswith(_NO_BANNER_MARK):
+            child.text = child.text[len(_NO_BANNER_MARK) :]
+
+
+def _unmarked_duplicate_error(exc: DuplicateChildError) -> DuplicateChildError:
+    """印付きの文字が入った重複の例外文から印を外し、同じ形の新しい例外にする。"""
+    path = duplicate_path(exc)
+    if path is not None:
+        message = _DUPLICATE_PREFIX + str(tuple(part.removeprefix(_NO_BANNER_MARK) for part in path))
+    else:
+        message = str(exc).replace(_NO_BANNER_MARK, "").replace("\\x00", "")
+    return DuplicateChildError(message)
+
+
+def build_tree(text: str, *, banners: bool = True) -> HConfig:
+    """Cisco IOS / IOS-XE の config テキストをツリーにする。ルート直下の重複は DuplicateChildError。
+
+    banners=False のときは、`banner ` で始まる行をバナーの始まりとして扱わず、ふつうの行として入れる(Huawei。REQ-343)。
+    """
     driver = get_hconfig_driver(Platform.CISCO_IOS)
     rules = driver.rules
     # rules は frozen なので、リストを置き換えずに中身を直す(ドライバーはこの呼び出し専用の新しいインスタンス)
@@ -123,7 +167,15 @@ def build_tree(text: str) -> HConfig:
     ]
     rules.parent_allows_duplicate_child.extend(_DUPLICATE_RULES)
     rules.per_line_sub.extend(_EIGRP_EXIT_RULES)
-    return get_hconfig(driver, text)
+    if banners:
+        return get_hconfig(driver, text)
+    try:
+        tree = get_hconfig(driver, _mark_lines(text))
+    except DuplicateChildError as exc:
+        error = _unmarked_duplicate_error(exc)
+        raise error from None
+    _unmark_tree(tree)
+    return tree
 
 
 def duplicate_path(exc: Exception) -> tuple[str, ...] | None:

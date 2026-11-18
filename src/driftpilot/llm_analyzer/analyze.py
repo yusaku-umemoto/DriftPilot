@@ -67,6 +67,7 @@ def analyze(
     before_source: Sequence[str] | None = None,
     after_source: Sequence[str] | None = None,
     show_command: str | None = None,
+    platform: str | None = None,
     clock: Callable[[], str] = _now,
 ) -> LlmAnalysis:
     """差分を伏せて送り、回答を注釈として返す。
@@ -76,12 +77,14 @@ def analyze(
     """
     sources = (before_source, after_source)
     try:
-        return _analyze(request, structured, raw, show, before_lines, after_lines, sources, clock, show_command)
+        return _analyze(request, structured, raw, show, before_lines, after_lines, sources, clock, show_command, platform)
     except Exception as exc:  # noqa: BLE001 - 解析の失敗で比較を止めない(ADR-0018 決定4)
         return LlmAnalysis(status="skipped", reason="internal_error", detail={"error_type": type(exc).__name__})
 
 
-def _analyze(request, structured, raw, show, before_lines, after_lines, sources, clock, show_command) -> LlmAnalysis:
+def _analyze(
+    request, structured, raw, show, before_lines, after_lines, sources, clock, show_command, platform=None
+) -> LlmAnalysis:
     words = normalize_words(request.extra_secret_words)
     masker = Masker(secret_words=words)
     # 使用中が既定で show の比較なら「状態の確認」の本文で送る(ADR-0146 決定6)。送らないときの版も同じ決まりで決める。
@@ -117,6 +120,7 @@ def _analyze(request, structured, raw, show, before_lines, after_lines, sources,
         max_diffs=request.max_diffs,
         include_after_text=request.include_after_text,
         show_command=show_command,
+        platform=platform,
         prefer=request.prefer_source,
     )
     reason: LlmReason

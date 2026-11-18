@@ -15,6 +15,16 @@ kind=config の `--platform` は「既定でないパーサーの系統を選ぶ
   形は中身から見分ける。XML は自前の走査で読み(panos_xml)、複数行の値は <複数行の値 行数 sha256 の頭 16 字> の 1 語にする。
   指紋に入る木の版は panos_tree の TREE_VERSION の 1 つだけ(brace_tree の版と見分けの規則・XML と set の読み方・木の作り方をまとめた版)。
   ntc-templates の show の機種名も paloalto_panos で、kind=show(--show-command つき)の道は変えない
+- checkpoint_gaia: B型(Check Point Gaia。`show configuration` の字下げの無い `set <対象> …`・`add <対象> …` の行を、Si-R と同じ行頭スコープ表
+  〔GAIA_SCOPES。動詞 set・add はスコープ名に入れない〕で木にし、`#` の行は木に入れない。よく使う葉は interfaces・static_routes・global に写し
+  〔REQ-345〕、写さなかった葉を vendor_specific["checkpoint_gaia"]["config"] のスコープごとの葉の集合に写す〔汎用の形〕。ADR-0234)。
+  build は `#` の行を外してから build_flat_tree を呼ぶ関数。指紋に入る木の版は gaia の TREE_VERSION。
+  ntc-templates の show の機種名も checkpoint_gaia で、kind=show(--show-command つき)の道は変えない
+- f5_bigip: B型(F5 BIG-IP。`tmsh list`・`tmsh show running-config`・`bigip.conf` の波かっこの入れ子を、1 行に波かっこを書く形〔`/Common/http { }`・
+  `vlans { /Common/a /Common/b }`〕と iRule・iApp の Tcl の本文〔行のまま持つ塊〕も読める F5 用の木〔f5_tree〕に組み、全部の行を
+  よく使う物〔ホスト名・NTP・DNS・syslog・SNMP の場所と連絡先・管理 IP・インターフェース・VLAN・Self IP・経路〕を共通スキーマに写し〔REQ-350〕、
+  写さなかった行を vendor_specific["f5_bigip"]["config"] の見出しごとの葉の集合に写す〔汎用の形〕。自動判定は REQ-351。端末ログは REQ-352。ADR-0235)。
+  行頭スコープ表は無い。imish の部分は読まずに未解釈。指紋に入る木の版は f5_tree の TREE_VERSION
 - fujitsu_srs: 表が未作成のため UnsupportedConfigPlatform
 sniff では機種を当てない。中身からの系統の見立て(family_hint)は安全網5 の警告に使う(ADR-0027)。
 機種を「自動」(auto)にしたときだけ、core が family_hint.detect_platform で選んだ名前をここに渡す(ADR-0151)。
@@ -28,8 +38,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from driftpilot import i18n
-from driftpilot.config_parser import fortinet, fujitsu_sir, junos, panos, registry, yamaha
-from driftpilot.config_parser.flat_scopes import SIR_SCOPES, FlatScope
+from driftpilot.config_parser import f5, fortinet, fujitsu_sir, gaia, junos, panos, registry, yamaha
+from driftpilot.config_parser.f5_tree import TREE_VERSION as F5_TREE_VERSION
+from driftpilot.config_parser.f5_tree import build_f5_tree
+from driftpilot.config_parser.flat_scopes import GAIA_SCOPES, SIR_SCOPES, FlatScope
 from driftpilot.config_parser.flat_tree import DuplicateLine, FlatTree
 from driftpilot.config_parser.fortinet_tree import TREE_VERSION as FORTINET_TREE_VERSION
 from driftpilot.config_parser.fortinet_tree import build_fortinet_tree, embedded_lines
@@ -65,7 +77,7 @@ class UnsupportedConfigPlatform(ValueError):
 class FlatPlatform:
     """FlatTree で読む機種1つ。scopes は行頭スコープ表、patterns は IR への写しの表、extract はその表で写す extractor。
 
-    build は行頭スコープ表を使わずに木を組む関数(D型・ヤマハ)。None なら build_flat_tree(B型)。
+    build は木を組む関数(D型・ヤマハ・Junos・PAN-OS・F5 は行頭スコープ表を使わない。Check Point Gaia は中で行頭スコープ表を使う)。None なら build_flat_tree(B型)。
     tree_version は build の規則の版で、表の指紋に入る(build が無い機種では None。指紋を動かさない)。
     protected_lines は、機種の正規化ルールを当てない行(行をまたぐ値の本文など)を返す関数。None なら全行に当てる。
     family は系統(b=平坦 config、d=FortiGate)。安全網5 の見立てとの突き合わせだけに使い、指紋には入れない。
@@ -109,6 +121,10 @@ FLAT_PLATFORMS: dict[str, FlatPlatform] = {
     "paloalto_panos": FlatPlatform(
         "paloalto_panos", (), panos.PATTERNS, panos.extract, build_panos_tree, PANOS_TREE_VERSION, None, family="b"
     ),
+    "checkpoint_gaia": FlatPlatform(
+        "checkpoint_gaia", GAIA_SCOPES, gaia.PATTERNS, gaia.extract, gaia.build_gaia_tree, gaia.TREE_VERSION, None, family="b"
+    ),
+    "f5_bigip": FlatPlatform("f5_bigip", (), f5.PATTERNS, f5.extract, build_f5_tree, F5_TREE_VERSION, None, family="b"),
 }
 # 系統は B型だが表が無い機種 → 理由
 _UNSUPPORTED_CONFIG_PLATFORMS_JA: dict[str, str] = {

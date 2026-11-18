@@ -184,6 +184,11 @@ from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.gui_web.drop_order import dropped_paths, order_pair
 from driftpilot.gui_web.rule_ai import RuleAi
 from driftpilot.gui_web.session import WebSession
+from driftpilot.gui_web.voice import PANE_AI as VOICE_PANE_AI
+from driftpilot.gui_web.voice import PANE_COMPARE as VOICE_PANE_COMPARE
+from driftpilot.gui_web.voice import TARGET_BOTH as VOICE_TARGET_BOTH
+from driftpilot.gui_web.voice import VoiceHub, hidden_view
+from driftpilot.gui_web.voice_correct import VoiceCorrector
 from driftpilot.llm_analyzer import (
     THINKING_CUT_NOTE,
     ApiErrorText,
@@ -224,6 +229,7 @@ from driftpilot.llm_settings import (
     auto_update_check_enabled,
     character_enabled,
     load_settings,
+    voice_settings,
 )
 from driftpilot.messages import (
     DEVICE_SPLIT_CONFIRM_TITLE,
@@ -609,6 +615,28 @@ class _OpenedSaved:
         return None if self.whole is None else self.records[self.whole].outcome.conversation
 
 
+@dataclasses.dataclass(frozen=True, eq=False)
+class _Correction:
+    """音声入力の「LLM で文脈を踏まえて直す」の持ち物(ADR-0233 決定4 / REQ-342)。マイクのボタンで録音を止めたとき(stop を書く時点)に決める。
+
+    context は stop に付ける、やり取りの古い順の {"role", "content"} の並び(20 件まで)。destination は、そのやり取りの送り先の
+    プロファイル (id, 名前)。name_only は保存から戻した記録(名前だけ)なので名前で比べるか。words は最初に送ったときの秘密の語
+    (直す文の確かめには、これと今の設定の語の両方を使う)。epoch・result_key・opened_saved は、同じやり取り・同じ結果・同じ開いた保存かの確かめ用。
+    送った文・話した文字は持たない。
+    """
+
+    context: tuple[dict[str, str], ...]
+    destination: tuple[str, str]
+    name_only: bool
+    words: tuple[str, ...]
+    epoch: int
+    result_key: object
+    opened_saved: "_OpenedSaved | None"
+
+
+# LLM の直しに渡す文脈の上限(新しい方から。ADR-0233 決定4)
+VOICE_CONTEXT_LIMIT = 20
+
 # 表示中の差分の対象(REQ-312 / ADR-0218 決定3): (タブ, カテゴリ, まとめての比較で組を選んでいるときの pairs の位置)。
 # 全コマンド比較結果のタブは ("all", None, None)
 _Target = tuple[str, str | None, int | None]
@@ -825,9 +853,18 @@ class CompareApi(Api):
         client_factory: Callable[..., LLMClient] | None = None,
         post: Callable[..., Any] = _run_at_once,
         runner: Callable[..., CompareOutcome] = run_compare,
+        voice: VoiceHub | None = None,
     ) -> None:
         self._session = session
         self._where: dict[str, Any] = {"cwd": cwd, "env": env, "platform": platform, "home": home}
+        # 音声入力(ADR-0233 / REQ-341)。渡さなければ音声入力は無し(ボタンは出ず、知らせも出ない)。ロックの順は、このロック → hub のロック
+        self._voice = voice
+        # 音声入力の LLM の直し(REQ-342)。直す送信は追加の質問のやり取り・門・送信中の表示に入れない(専用の入れ物が 1 回だけ送る)
+        self._voice_corrector = VoiceCorrector()
+        if voice is not None:
+            voice.bind(
+                partial(voice_settings, env=env, platform=platform, home=home), self._voice_deliver, self._voice_correct
+            )
         self._client_factory = client_factory
         self._post = post
         self._runner = runner
@@ -1187,6 +1224,20 @@ class CompareApi(Api):
     def close(self) -> dict[str, Any]:
         """窓を閉じる。実行中なら中止してから。"""
         return self._call(self._close)
+
+    # --- 音声入力(ADR-0233 / REQ-341)。_call を通さない(compare.changed を送らず、状態は voice.changed で知らせる) ---
+
+    def voice_state(self) -> dict[str, Any]:
+        """音声入力のボタンの状態。最初の呼び出しで、裏で PartsPilot を探して起動する。読むだけ。"""
+        return _guarded(self._voice_state)
+
+    def voice_press(self, action: Any) -> dict[str, Any]:
+        """マイクのボタンを押した・離した(action は "toggle"・"down"・"up")。押した面はこの窓。"""
+        return _guarded(self._voice_press, action, VOICE_PANE_COMPARE)
+
+    def voice_cancel(self) -> dict[str, Any]:
+        """録音中の取り消し(Esc)。録音中でなければ何もしない。"""
+        return _guarded(self._voice_cancel)
 
     # --- 呼び出しの共通 ---
 
@@ -1795,6 +1846,7 @@ class CompareApi(Api):
             self._status[0] = state.status
 
     def _set_source(self, side: Side, source: SideSource) -> None:
+        self._voice_cancel_recording()  # 入力を変えたら、録音中の音声入力は取り消す(ADR-0233 決定3)
         self._sources[side] = source
         self._summaries[side] = input_summary(source)
         self._clear_follow_up()
@@ -2899,6 +2951,8 @@ class CompareApi(Api):
             max_total_diffs = settings.max_total_diffs if settings is not None else DEFAULT_MAX_TOTAL_DIFFS
         self._preview = None
         self._preview_parts = None
+        if kind not in AI_ONLY_RUNS and kind != RUN_AUTO_SEND:
+            self._voice_cancel_recording()  # 比べ直すと、録音中の音声入力は取り消す(AI への送信だけの始まりでは取り消さない)
         self._clear_follow_up()  # 比較し直すと、追加の質問のやり取りは消える(ADR-0081 決定5)
         if kind not in AI_ONLY_RUNS:
             self._shown = DEFAULT_SHOWN  # 比べ直すと、画面が次に知らせるまで構造化比較のタブ・絞り込み無しとみなす(REQ-312 §2)
@@ -4510,6 +4564,7 @@ class CompareApi(Api):
 
         比較の窓に出した AI の知らせが残っていれば消す(新しい窓でもう1回出さない)。
         """
+        self._voice_cancel_recording()  # AI の窓を切り離すとき、録音中の音声入力は取り消す(ADR-0233 決定3)
         with self._lock:
             self._ai_window = window
             self._drop_ai_notice()
@@ -4524,6 +4579,7 @@ class CompareApi(Api):
         送り先の確認も消す。送っている途中なら止めない(答えは右の面に出る)。答えとやり取りは残す。
         AI の窓に出した知らせが残っていれば消す(比較の窓でもう1回出さない)。
         """
+        self._voice_cancel_recording()  # AI の窓を戻すとき、録音中の音声入力は取り消す(ADR-0233 決定3)
         with self._lock:
             self._ai_window = None
             self._preview = None
@@ -4623,9 +4679,206 @@ class CompareApi(Api):
         self._full_text = False  # 新しく比較を始めたら「差分＋全文を送る」は外す(ADR-0158 決定1。_begin と同じ)
         return self._start(inp, build_request(inp), None, None, RUN_HANDOFF)
 
+    # --- 音声入力の内側 ---
+
+    def _voice_state(self) -> dict[str, Any]:
+        hub = self._voice
+        if hub is None:
+            return {"ok": True, "voice": hidden_view()}
+        hub.open()  # 最初の 1 回だけ、裏で探して起動する(画面の操作は止めない)
+        return {"ok": True, "voice": hub.view()}
+
+    def _voice_press(self, action: Any, pane: str) -> dict[str, Any]:
+        hub = self._voice
+        if hub is None:
+            return {"ok": True, "voice": hidden_view()}
+        correction: _Correction | None = None
+        if hub.recording() and hub.wants_correction():
+            with self._lock:  # 録音を止める押し方のときだけ。押したときの状態で、直してよいかを決める
+                correction = self._voice_correction()
+        hub.press(action, pane, correction)
+        return {"ok": True, "voice": hub.view()}
+
+    def _voice_correction(self) -> _Correction | None:
+        """ロックの中で呼ぶ。押した面で、LLM で直してよいか(ADR-0233 決定4 / REQ-342 §3)。次のすべてを満たすときだけ持ち物を返す。
+
+        - 閉じている途中でない
+        - AI の答えがある(最初の送信が済んだ状態。保存した結果を開いて続きから質問できる状態も含む)
+        - 開いた結果であるか、入力が比べたときと同じ(表示中の差分への質問に切り替わる状態〈_follow_up_target_ok が偽〉は直さない)
+        - 開いた結果で、保存に送ったときの伏せる語が無いときは、追加の質問の確認に「はい」と答えた後(_saved_words_confirmed)
+        - そのやり取りの送り先(_sent_profiles の 0。保存に profile が無ければ無い)がある
+        - 使用中の AI プロファイルが送り先と同じ(保存から戻した記録は名前で、それ以外は id で比べる。設定を読めなければ直さない)
+        送信中・MAX_TURNS・一括比較の門は問わない(直す送信はそれらに入れない)。
+        """
+        if self._closing:
+            return None
+        first = self._first_answer()
+        if first is None or first.answer is None:
+            return None
+        if self._opened_saved is None and not self._input_unchanged():
+            return None
+        if not self._follow_up_target_ok():
+            return None
+        if self._opened_saved is not None and not first.secret_words and not self._saved_words_confirmed:
+            return None
+        sent = self._sent_profiles.get(0)
+        if sent is None:
+            return None
+        try:
+            current = destination_of(load_settings(**self._where, read_prompt=False))
+        except SettingsError:
+            return None
+        if not self._same_destination(sent, current, self._sent_name_only):
+            return None
+        result_key = self._result_key()
+        if result_key is None:
+            return None
+        return _Correction(
+            context=self._voice_context(first),
+            destination=sent,
+            name_only=self._sent_name_only,
+            words=tuple(first.secret_words or ()),
+            epoch=self._follow_up_epoch,
+            result_key=result_key,
+            opened_saved=self._opened_saved,
+        )
+
+    @staticmethod
+    def _same_destination(sent: tuple[str, str], current: tuple[str, str], name_only: bool) -> bool:
+        """送り先の記録と今の使用中のプロファイルが同じか(保存から戻した記録は id が無いので名前で比べる)。"""
+        return sent[1] == current[1] if name_only else sent[0] == current[0]
+
+    def _voice_context(self, first: LlmAnalysis) -> tuple[dict[str, str], ...]:
+        """ロックの中で呼ぶ。そのやり取りの最初の依頼の文(user)・AI の最初の答え(assistant)・続く追加の質問と答えを、
+        古い順の {"role", "content"} にして、新しい方から 20 件まで。最初の送信の本文・全文・考えている内容・伏せを外した文は入れない。"""
+        assert first.answer is not None
+        items: list[tuple[str, str]] = []
+        if self._first_request:
+            items.append(("user", self._first_request))
+        items.append(("assistant", first.answer))
+        for question, answer in self._turns:
+            items += [("user", question), ("assistant", answer)]
+        return tuple({"role": role, "content": content} for role, content in items[-VOICE_CONTEXT_LIMIT:])
+
+    def _voice_correction_valid(self, correction: _Correction) -> bool:
+        """ロックの中で呼ぶ。押したときと同じやり取り・同じ結果・同じ開いた保存で、閉じていないか。"""
+        return (
+            not self._closing
+            and self._follow_up_epoch == correction.epoch
+            and self._opened_saved is correction.opened_saved
+            and self._result_key() is correction.result_key
+        )
+
+    def _voice_correct(self, correction: _Correction, messages: list[Any], respond: Callable[[dict[str, Any]], None]) -> None:
+        """llm_request を確かめて、やり取りの送り先の AI へ 1 回だけ送る(読みのスレッドから呼ばれる。hub のロックの外)。
+
+        respond に {"content": 文字} か {"error": "failed"|"cancelled"|"refused"|"timeout"} を 1 回だけ渡す。
+        送る文は messages の content を順に空行でつないだ 1 つの文(temperature・max_tokens・role は使わない)。
+        _asking・_status・_turns・一括比較の門・保存の conversation には触らない。話した文字・送る文・返事は記録に出さない。
+        """
+        prompt: str | None = None
+        client: LLMClient | None = None
+        error: str | None = None
+        with self._lock:
+            if not self._voice_correction_valid(correction):
+                error = "cancelled"
+            else:
+                # 追加の質問と同じ接続(やり取りの送り先のプロファイル)。ただし答えの見え方の決まり(LOOK_RULES)を足す包みは
+                # 付けない(下の plan_llm の指定。rule_ai.py・組の案と同じ。送る文は messages の content をつないだものだけ。ADR-0177 決定4)
+                try:
+                    settings = load_settings(**self._where)
+                except SettingsError:
+                    settings = None
+                if settings is None:
+                    error = "failed"
+                else:
+                    plan = plan_llm(settings, client_factory=self._client_factory, look_rules=False)
+                    if plan.send is None or plan.send.client is None:
+                        error = "failed"
+                    elif not self._same_destination(correction.destination, destination_of(settings), correction.name_only):
+                        error = "cancelled"  # stop を書いた後に使用中のプロファイルが変わった
+                    else:
+                        prompt = self._voice_prompt(correction, messages, plan.send.extra_secret_words)
+                        if prompt is None:
+                            error = "refused"
+                        else:
+                            client = plan.send.client
+        if prompt is None or client is None:
+            respond({"error": error or "failed"})
+            return
+
+        def still_valid() -> bool:
+            with self._lock:
+                return self._voice_correction_valid(correction)
+
+        self._voice_corrector.start(client, prompt, respond, still_valid)
+
+    @staticmethod
+    def _voice_prompt(correction: _Correction, messages: list[Any], extra_words: tuple[str, ...]) -> str | None:
+        """送る文(messages の content を空行でつないだもの)。断るとき(None)の条件は次のどれか(中身は文に出さない)。
+
+        messages が空・content が文字でない・どれかの content が質問と同じ確かめ(check_question。秘密の語は送ったときの語と今の設定の語の
+        両方。長さの上限は送る文全体の上限)で断られる・つないだ文が上限を超える。
+        """
+        if not messages:
+            return None
+        contents: list[str] = []
+        for message in messages:
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str):
+                return None
+            contents.append(content)
+        words = normalize_words([*correction.words, *extra_words])
+        for content in contents:
+            if check_question(content, words, max_chars=MAX_PROMPT_CHARS) is not None:
+                return None
+        prompt = "\n\n".join(contents)
+        return None if prompt_too_long(prompt) else prompt
+
+    def _voice_cancel(self) -> dict[str, Any]:
+        hub = self._voice
+        if hub is None:
+            return {"ok": True, "voice": hidden_view()}
+        hub.cancel()
+        return {"ok": True, "voice": hub.view()}
+
+    def _voice_cancel_recording(self) -> None:
+        """録音中なら取り消す(比べ直す・入力を変える・窓を閉じる・AI の窓を切り離す・戻すとき。ロックの中でも呼べる)。"""
+        hub = self._voice
+        if hub is not None:
+            hub.cancel()
+            hub.cancel_corrections()  # 直している最中の LLM の直しも取り消す(cancelled を返し、後から届いた返事は捨てる。REQ-342)
+        self._voice_corrector.cancel_all()
+
+    def _voice_deliver(self, destination: str, payload: dict[str, Any]) -> None:
+        """hub の知らせを窓へ送る。両方か、押した面の窓(無ければ比較の窓)。片方の失敗で他方を止めない。"""
+        compare_window, ai_window = self._window, self._ai_window
+        if destination == VOICE_TARGET_BOTH:
+            targets = [compare_window, ai_window]
+        elif destination == VOICE_PANE_AI and ai_window is not None:
+            targets = [ai_window]
+        else:
+            targets = [compare_window]
+        for window in targets:
+            if window is None:
+                continue
+            try:
+                notify(window, payload)
+            except Exception:  # noqa: BLE001 - 閉じた窓への知らせの失敗は捨てる
+                pass
+
+    def _voice_settings_changed(self) -> None:
+        """設定の窓で保存した後(WebSession.settings_saved がロックの外で呼ぶ)。音声入力の設定を読み直す。"""
+        hub = self._voice
+        if hub is not None:
+            hub.settings_changed()
+
     def _closed(self) -> None:
         """窓が閉じた(WebSession が窓の closed の知らせで呼ぶ)。実行中なら中止を頼み、戻ってきた結果は捨てる。"""
         self._rule_ai.closed()  # 「AI に式を頼む…」の確認と送信を捨てる(元の行も捨てる。REQ-314)
+        self._voice_corrector.cancel_all()  # LLM の直しの送信は、子の標準入力を閉じる前に cancelled を返す(REQ-342)
+        if self._voice is not None:
+            self._voice.close()  # 録音中なら cancel を書き、子を止める(裏のスレッド。窓を閉じる処理は待たない)
         with self._lock:
             if self._worker is not None:
                 self._worker.cancel()  # 工程の境目で止まる。門はワーカーが戻ったときに返す

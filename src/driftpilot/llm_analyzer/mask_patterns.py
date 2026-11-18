@@ -30,6 +30,13 @@ ADR-0211 決定6(REQ-296)で、IOS-XR の伏せる穴3つ(`snmp-server vrf` の�
 ADR-0214 決定6(REQ-307)で、ASA の伏せる穴2つ(行の中に鍵を書く `aaa-server … host <アドレス> <鍵>`・
 `secondary-pre-fill-username … use-common-password <値>`)の頭の形(GH-25・26)を足した。これらの行も表に mask の行を持たず、
 送らない側に落ちる。
+ADR-0230 決定1〜3(REQ-335)で、秘密語に `plain`(Huawei VRP の `… plain <鍵>`)を足し、Huawei の伏せる穴 4 つ
+(`area-authentication-mode simple `・`security-key simple `・v1/v2c の `snmp-agent target-host … securityname`・
+`snmp-agent usm-user v3 … authentication-mode|privacy-mode <方式> <値>`)の頭の形(GH-27〜30)を足した。表に mask の行は
+持たず、送らない側に落ちる。割れた秘密の行のかたまりの決まり(masking.wrapped_secret_groups)は変えない。
+ADR-0235 決定1(REQ-348)で、F5 BIG-IP の iRule（Tcl）の `set <変数> <値>`（変数を `_` で区切った部分に token・secret・password・
+passwd・pwd・apikey・passphrase のどれかがあり、値が文字そのもの）の頭の形(GH-31)を足した。表に mask の行は持たず、送らない側に
+落ちる。秘密語を含む行は `_guarded` で外し、今の判定と記録の形のままにする。
 ADR-0215 決定2(REQ-306)で、ログの行の頭(時刻・ホスト名・プロセス名・`+ `・プロンプトなど)の形(下の `LOG_PREFIXES`)を足した。
 masking.py は、今の判定で「そのまま送る」になった行だけ、この形を行の頭から外して判定し直す。頭を外す手順と、行の途中の
 `<名前>=<値>` の決まり(masking.py)の版の名前が `LOG_LINE_RULES` で、masking.py の決まりを変えたら上げる(指紋に入れる)。
@@ -204,6 +211,9 @@ SECRET_WORDS: tuple[str, ...] = (
     "clearpass-password",
     "ciphertext",
     "plaintext",
+    # ADR-0230 決定1 (REQ-335)。Huawei VRP の `… plain <鍵>`（入力の形の鍵の前に付く語）。`plain-text-password` などの
+    # `-` でつながった語は別の語のまま。表の `plain` を含む形（MSK-126・164・166 など）は今のとおり当たる
+    "plain",
 )
 
 # ADR-0199 決定3・4。値の接頭辞の例外はこの3つだけ。value は XML タグだけで見る。
@@ -1259,6 +1269,24 @@ GATE_HEADS: tuple[tuple[str, str], ...] = (
     # GH-26 は `secondary-pre-fill-username clientless|ssl-client [hide] use-common-password `(値が続く)
     ("GH-25", r"aaa-server \S+ (?:\(\S+\) )?host \S+ (?!timeout )\S"),
     ("GH-26", r"secondary-pre-fill-username (?:clientless|ssl-client) (?:hide )?use-common-password "),
+    # ADR-0230 決定2 (REQ-335)。Huawei VRP の伏せる穴 4 つ。表の行は足さず、送らない側に落とす。場所の条件は付けない。
+    # GH-27 は `area-authentication-mode simple `・`domain-authentication-mode simple `（IS-IS。値が続く）
+    # GH-28 は `security-key simple `（E-Trunk。値が続く）
+    # GH-29 は `snmp-agent target-host ` で、語 securityname を含み語 v3 を含まない行（v1・v2c のコミュニティ名が入る）
+    # GH-30 は `snmp-agent usm-user v3 … authentication-mode|privacy-mode <方式> <語>`（方式の後ろに値が続く）
+    ("GH-27", r"(?:area|domain)-authentication-mode simple "),
+    ("GH-28", r"security-key simple "),
+    ("GH-29", r"snmp-agent target-host (?!(?:\S+ )*v3(?: |$))(?=(?:\S+ )*securityname(?: |$))"),
+    ("GH-30", r"snmp-agent usm-user v3 (?:\S+ )*?(?:authentication-mode|privacy-mode) \S+ \S"),
+    # ADR-0235 決定1 (REQ-348)。F5 BIG-IP の iRule（Tcl）の `set <変数> <値>` の穴を塞ぐ。表の行は足さず、送らない側に落とす。
+    # GH-31 は、変数を `_` で区切った部分のどれかが token・secret・password・passwd・pwd・apikey・passphrase に完全に一致し
+    # （大文字・小文字は区別しない。`_` の無い変数もその語そのものなら当たる）、値（変数の後ろの最初の語）が文字そのもの
+    # （`"` か `{` で始まる、または `[`・`$` で始まらず数字だけでもない）の行。場所の条件は付けない。
+    # 秘密語を含む行（`set password "<値>"`・FortiGate の `set password ENC …`）は _guarded で外し、今の判定と記録の形のままにする
+    ("GH-31", _guarded(
+        r"set (?:[^\s_]*_)*(?i:token|secret|password|passwd|pwd|apikey|passphrase)(?:_[^\s_]*)* "
+        r"(?:[\"{]|(?![\[$])(?!\d+(?: |$))\S)"
+    )),
 )
 # 行の頭の形の場所の条件(書き方は UNSENT_FORM_SCOPES と同じ)。ここに無い形はどこでも当てる
 GATE_HEAD_SCOPES: dict[str, str] = {

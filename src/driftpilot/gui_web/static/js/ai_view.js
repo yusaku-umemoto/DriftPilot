@@ -20,6 +20,7 @@ import { confirm, notice, panel } from "./dialog.js";
 import { renderAnswer } from "./answer_view.js";
 import { bubble, copyButton, copyIcon, copyText } from "./answer_copy.js";
 import { revealCharacters } from "./character.js"; // キャラクターの絵（ADR-0174 / REQ-236）
+import { createVoice } from "./voice.js"; // 入力欄の横のマイクのボタン（ADR-0233 / REQ-341）
 
 let $ = null;
 let call = null;
@@ -49,6 +50,7 @@ let thinkingBox = null;
 let thinkingFolded = false;
 let thinkingLive = false;
 let thinkingRevision = null;
+let voice = null; // 入力欄の横のマイクのボタン（最初の描画のときに状態を取り始める）
 let aiPending = false; // AI の面のボタンの呼び出しを待っている間（Shift+Enter の二度押しで重ねて呼ばない）
 // AI に送る間のクルクル（ADR-0164 決定5）。最後の view の ai_busy（{text} か null。出すかは Python が決める）
 let aiBusy = null;
@@ -107,6 +109,8 @@ function renderChoices(select, names) {
 // view の AI の面の部分を描く（確認のダイアログは番号が変わったときだけ出す）。
 function render(next) {
   view = next;
+  // 最初の描画（ページの文を入れた後）で、音声入力の状態を取り始める。送信中でも録音・挿入はできる（欄を書くだけ）
+  voice.start();
   aiBusy = next.ai_busy;
   characterOn = next.character === true;
   // キャラクターがオンなら、空の面の案内を Mirarin の文に替える（ADR-0181 決定2。オフのときは触らない）
@@ -127,6 +131,8 @@ function render(next) {
     shown.preview = next.preview.id;
     showPreview(next.preview);
   }
+  // 送っている間に話した文字は、欄を空にする処理（renderFollowUp・renderAi の clear）が済んだ後、送り終わった view で入れる（REQ-341）
+  voice.flush();
 }
 
 // --- AI の面（ADR-0148 決定4・5・8） ---
@@ -507,6 +513,7 @@ async function aiAction() {
   if (view === null || $("ai-ask").disabled) {
     return;
   }
+  voice.dismiss(); // 送信するときは、「直す前に戻す」「LLM の直しを使う」を消す（REQ-342）
   aiPending = true;
   renderAsk();
   try {
@@ -642,6 +649,14 @@ async function showPreview(preview) {
 export function createAiView(options) {
   ({ $, call, act, afterPreview } = options);
   question = $("follow-up-question");
+  // 送っている間かどうかは、AI の面に処理が動いているか（view.busy が真で、結果の面の処理でない）で決める。欄が押せないことだけでは決めない
+  voice = createVoice({
+    $,
+    call,
+    on: options.on,
+    question,
+    sending: () => view !== null && view.busy === true && view.busy_result === false,
+  });
   $("llm-copy").append(copyIcon());
   // AI の面の1つのボタン（ADR-0148 決定5）。打った文と質問の文は Python に渡すだけ（確かめと送るかどうかは Python が決める）
   $("ai-ask").addEventListener("click", () => aiAction());

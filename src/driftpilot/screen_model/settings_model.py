@@ -334,6 +334,7 @@ from driftpilot.user_config_writer import (
     update_gui_display,
     update_gui_theme,
     update_llm_items,
+    update_voice_settings,
 )
 
 # キーの読み元の名前。保管庫は OS で名前を変える(画面では store_name を使う。ここは OS を問わない名前)。
@@ -741,6 +742,11 @@ class ConfigFields:
     auto_update_check: bool = False
     theme: str = "system"
     language: str = "en"
+    # 音声入力([voice] enabled・press と [series] partspilot_cli。「音声入力」のタブの専用の「保存」だけが書く。ADR-0233 決定6)
+    voice_enabled: bool = True
+    voice_press: str = "toggle"
+    voice_llm_correct: bool = False  # [voice] llm_correct(REQ-342)
+    partspilot_cli: str = ""
 
     @property
     def words_text(self) -> str:
@@ -1172,6 +1178,10 @@ def settings_view(
             snapshot.auto_update_check,
             snapshot.theme,
             snapshot.language,
+            snapshot.voice_enabled,
+            snapshot.voice_press,
+            snapshot.partspilot_cli,
+            snapshot.voice_llm_correct,
         ),
         limits_warning=(
             workdir_limits_ignored(workdir or Path("driftpilot.toml").absolute(), active.ignored_workdir_limits)
@@ -1194,6 +1204,10 @@ def _config_fields(
     auto_update_check: bool = False,
     theme: str = "system",
     language: str = "en",
+    voice_enabled: bool = True,
+    voice_press: str = "toggle",
+    partspilot_cli: str = "",
+    voice_llm_correct: bool = False,
 ) -> ConfigFields:
     note = "\n".join(
         [
@@ -1214,6 +1228,10 @@ def _config_fields(
         auto_update_check=auto_update_check,
         theme=theme,
         language=language,
+        voice_enabled=voice_enabled,
+        voice_press=voice_press,
+        voice_llm_correct=voice_llm_correct,
+        partspilot_cli=partspilot_cli,
     )
 
 
@@ -2051,6 +2069,37 @@ def save_auto_update_check(
     path = user_config_path(platform=platform, env=env, home=home).absolute()
     try:
         update_gui_items(path, fields.digest, {AUTO_UPDATE_CHECK_KEY: checked})
+    except ConfigChanged:
+        return ConfigAction(False, CONFIG_CHANGED_ELSEWHERE, reload=True)
+    except SettingsError as exc:
+        return ConfigAction(False, config_not_saved(str(exc)))
+    return ConfigAction(True, config_saved(path))
+
+
+def save_voice_settings(
+    fields: ConfigFields,
+    enabled: bool,
+    press: str,
+    cli: str,
+    llm_correct: bool | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> ConfigAction:
+    """「音声入力」のタブの「保存」。[voice] の enabled・press・llm_correct と [series] の partspilot_cli だけを 1 回で書く(ADR-0233 決定6)。
+
+    書き方は save_auto_update_check と同じ(読んだときのハッシュを付け、ほかで変わっていたら書かずに reload を立てる)。
+    どれも読んだときと同じ値なら何も書かない。cli は前後の空白を除き、空なら書かない(あれば消す)。ほかの項目には触らない。
+    llm_correct(REQ-342)は、None か読んだときと同じ値なら書かない(ほかの項目だけを変えたときに `llm_correct = false` を足さない)。
+    """
+    location = cli.strip()
+    changed_correct = llm_correct if llm_correct is not None and llm_correct != fields.voice_llm_correct else None
+    if changed_correct is None and (enabled, press, location) == (fields.voice_enabled, fields.voice_press, fields.partspilot_cli):
+        return ConfigAction(True, CONFIG_NOT_CHANGED)
+    path = user_config_path(platform=platform, env=env, home=home).absolute()
+    try:
+        update_voice_settings(path, fields.digest, enabled, press, location, changed_correct)
     except ConfigChanged:
         return ConfigAction(False, CONFIG_CHANGED_ELSEWHERE, reload=True)
     except SettingsError as exc:

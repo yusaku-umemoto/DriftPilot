@@ -142,6 +142,37 @@ def _dns_server(m: re.Match[str], result: Global) -> bool:
     return True
 
 
+def _huawei_server_text(m: re.Match[str], canonical: bool) -> str | None:
+    """Huawei の `<A>[ <残り>]` の文字列。A が IPv4・IPv6 のアドレスでなければ None。残りは原文の語を空白 1 つでつなぐ。"""
+    try:
+        address = ip_address(m["addr"])
+    except ValueError:
+        return None
+    rest = m["rest"].split() if m["rest"] is not None else []
+    return " ".join([str(address) if canonical else m["addr"], *rest])
+
+
+def _huawei_ntp_server(m: re.Match[str], result: Global) -> bool:
+    if (text := _huawei_server_text(m, False)) is None:
+        return False
+    _append_once(result["ntp_servers"], text)
+    return True
+
+
+def _huawei_loghost(m: re.Match[str], result: Global) -> bool:
+    if (text := _huawei_server_text(m, False)) is None:
+        return False
+    _append_once(result["logging_hosts"], text)
+    return True
+
+
+def _huawei_dns_server(m: re.Match[str], result: Global) -> bool:
+    if (text := _huawei_server_text(m, True)) is None:
+        return False
+    _add(result["dns"]["servers"], text)
+    return True
+
+
 def _asa_dns_server_group(m: re.Match[str], result: Global) -> bool:
     """`dns server-group DefaultDNS` の見出し。中の行を読めたかは extract_global が見て、解釈済みにするか決める。"""
     return True
@@ -540,6 +571,48 @@ _ONCE = "二度目に現れた行は上書きせず読まない(未解釈)"
 # aaa.no_new_model は aaa.no_line より前に置く。
 PATTERNS: tuple[Pattern, ...] = (
     Pattern("global.hostname", "top", r"hostname (?P<name>\S+)", "hostname", "hostname R1", _hostname, note=_ONCE),
+    Pattern(
+        "global.huawei_sysname", "top", r"sysname (?P<name>\S+)", "hostname", "sysname hw-test1", _hostname,
+        note=(
+            "Huawei VRP と見立てた config だけ(ADR-0231 決定 3、REQ-336)。今の Cisco の `hostname <名前>` と同じ持ち方で "
+            "hostname に写す。" + _ONCE + "。Huawei と見立てない config では未解釈"
+        ),
+    ),
+    Pattern(
+        "global.huawei_ntp_server", "top", r"ntp-service unicast-server (?P<addr>\S+)(?: (?P<rest>\S.*))?",
+        "ntp_servers", "ntp-service unicast-server 192.0.2.10", _huawei_ntp_server,
+        note=(
+            "Huawei VRP と見立てた config だけ(ADR-0231 決定 3(3)、REQ-338)。「<A>[ <残り>]」(残りは原文の語を空白 1 つで"
+            "つなぐ。vpn-instance も残りのまま)を出現順に足し、同じ文字列は重ねない。A が IPv4・IPv6 のアドレスとして"
+            "読めない行(`{{ … }}` の雛形・名前など)は未解釈。子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "global.huawei_dns_server", "top", r"dns server (?P<addr>\S+)(?: (?P<rest>\S.*))?",
+        "dns.servers", "dns server 192.0.2.53", _huawei_dns_server,
+        note=(
+            "Huawei VRP と見立てた config だけ(REQ-338)。「<A の正規の書き方>[ <残り>]」を dns.servers に足す"
+            "(重ねず、文字列の昇順)。A がアドレスとして読めない行(`ipv6` の語・名前など)は未解釈。子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "global.huawei_loghost", "top", r"info-center loghost (?P<addr>\S+)(?: (?P<rest>\S.*))?",
+        "logging_hosts", "info-center loghost 192.0.2.20 facility local6", _huawei_loghost,
+        note=(
+            "Huawei VRP と見立てた config だけ(REQ-338)。「<A>[ <残り>]」を出現順に足し、同じ文字列は重ねない。"
+            "A がアドレスとして読めない行(`source`・`domain` の語など)は未解釈。子を持つ行は未解釈"
+        ),
+    ),
+    Pattern(
+        "global.huawei_snmp_location", "top", r"snmp-agent sys-info location (?P<text>\S.*)", "snmp.location",
+        "snmp-agent sys-info location LAB-ROOM", _snmp_location,
+        note="Huawei VRP と見立てた config だけ(REQ-338)。文は行の残りのまま。" + _ONCE,
+    ),
+    Pattern(
+        "global.huawei_snmp_contact", "top", r"snmp-agent sys-info contact (?P<text>\S.*)", "snmp.contact",
+        "snmp-agent sys-info contact NOC-TEAM", _snmp_contact,
+        note="Huawei VRP と見立てた config だけ(REQ-338)。文は行の残りのまま。" + _ONCE,
+    ),
     Pattern(
         "global.domain_name", "top", r"ip domain name (?P<name>\S+)", "domain_name",
         "ip domain name example.com", _domain_name, note=_ONCE,
@@ -951,11 +1024,19 @@ _LEAF_ONLY = frozenset(
         "global.snmp.option",
         "global.banner",
         "global.asa_domain_name",
+        "global.huawei_ntp_server",
+        "global.huawei_dns_server",
+        "global.huawei_loghost",
     }
 )
 # ASA と見立てた config だけ読む書式。ASA でなければ表から外す(REQ-304)
 _ASA_ONLY = frozenset({"global.asa_domain_name", "global.asa_dns_server_group"})
 _ASA_DNS_GROUP = "global.asa_dns_server_group"
+# Huawei VRP と見立てた config だけ読む書式。Huawei でなければ表から外す(REQ-336)
+_HUAWEI_ONLY = frozenset({
+    "global.huawei_sysname", "global.huawei_ntp_server", "global.huawei_dns_server", "global.huawei_loghost",
+    "global.huawei_snmp_location", "global.huawei_snmp_contact",
+})
 # 子を持つ行だけ読む書式(REQ-81 §3)。子の無い行は、表の後ろの書式(aaa.line など)に通すか未解釈
 _BLOCK_ONLY = frozenset({"global.aaa_server", "global.aaa_group", "global.aaa_dynamic_author"})
 _BLOCK_PATTERNS = tuple(pattern for pattern in PATTERNS if pattern.id not in _LEAF_ONLY)
@@ -994,20 +1075,35 @@ def _read_asa_dns_group(block: HConfigChild, result: Global, interpreted: Interp
     return found
 
 
-_NON_ASA_BLOCK_PATTERNS = tuple(pattern for pattern in _BLOCK_PATTERNS if pattern.id not in _ASA_ONLY)
-_NON_ASA_LEAF_PATTERNS = tuple(pattern for pattern in _LEAF_PATTERNS if pattern.id not in _ASA_ONLY)
+def _without(patterns: tuple[Pattern, ...], excluded: frozenset[str]) -> tuple[Pattern, ...]:
+    return tuple(pattern for pattern in patterns if pattern.id not in excluded)
 
 
-def extract_global(tree: HConfig, interpreted: InterpretedLines, asa: bool = False) -> Global:
+# 表の組み合わせは「ASA」「Huawei」「どちらでもない」の 3 つ(ASA と Huawei は同時に真にならない)
+_ASA_BLOCK_PATTERNS = _without(_BLOCK_PATTERNS, _HUAWEI_ONLY)
+_ASA_LEAF_PATTERNS = _without(_LEAF_PATTERNS, _HUAWEI_ONLY)
+_HUAWEI_BLOCK_PATTERNS = _without(_BLOCK_PATTERNS, _ASA_ONLY)
+_HUAWEI_LEAF_PATTERNS = _without(_LEAF_PATTERNS, _ASA_ONLY)
+_NON_ASA_BLOCK_PATTERNS = _without(_BLOCK_PATTERNS, _ASA_ONLY | _HUAWEI_ONLY)
+_NON_ASA_LEAF_PATTERNS = _without(_LEAF_PATTERNS, _ASA_ONLY | _HUAWEI_ONLY)
+
+
+def extract_global(tree: HConfig, interpreted: InterpretedLines, asa: bool = False, huawei: bool = False) -> Global:
     """tree のトップレベルの行から Global を返す。
 
     証明書チェーンと機器全体の設定(device_settings)、管理の入口(management)と feature(features)、
     証明書の trustpoint(trustpoints)も含む。asa が真のとき(ASA と見立てた config)だけ、
     最上位の domain-name と dns server-group DefaultDNS も読む(REQ-304)。
+    huawei が真のとき(Huawei VRP と見立てた config)だけ、最上位の `sysname <名前>` を hostname に写す(ADR-0231、REQ-336)。
+    あわせて `ntp-service unicast-server`・`dns server`・`info-center loghost`・`snmp-agent sys-info location|contact` も写す(REQ-338)。
     """
     result = new_global()
-    block_patterns = _BLOCK_PATTERNS if asa else _NON_ASA_BLOCK_PATTERNS
-    leaf_patterns = _LEAF_PATTERNS if asa else _NON_ASA_LEAF_PATTERNS
+    if asa:
+        block_patterns, leaf_patterns = _ASA_BLOCK_PATTERNS, _ASA_LEAF_PATTERNS
+    elif huawei:
+        block_patterns, leaf_patterns = _HUAWEI_BLOCK_PATTERNS, _HUAWEI_LEAF_PATTERNS
+    else:
+        block_patterns, leaf_patterns = _NON_ASA_BLOCK_PATTERNS, _NON_ASA_LEAF_PATTERNS
     for block in tree.children:
         patterns = block_patterns if block.children else leaf_patterns
         if (pattern := apply_first(patterns, "top", block.text, result)) is not None:
