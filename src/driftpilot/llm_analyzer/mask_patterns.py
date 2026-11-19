@@ -49,6 +49,12 @@ ADR-0220 決定8(REQ-316)で、行のどこにあってもパスワードのハ�
 (表の件数は変えない)。
 ADR-0221 決定1〜4(REQ-317)で、コマンドの語の見分け(masking.py。区切りの記号の直後のコマンド)と、ハッシュの前の文字の決まり
 (`CRYPT_HASH`。英数字と `_` 以外なら当たる)を広げ、`LOG_LINE_RULES` を `log-line-v4` に上げた(表の件数は変えない)。
+ADR-0247 決定1〜3(REQ-375)で、送る側に緩める 3 つを足した。(1) 割れた秘密の行のかたまりは、次の行が新しい記録の始まり(ログの時刻・
+`ls -l`・`ps`。masking.py の `_starts_new_record`)なら作らない。(2) sshd の決まった形の pass の行(MSK-173〜175。`ps` の
+`sshd: <利用者> [priv]` など・`Failed password for …`・`Accepted … ssh2`)を表の最後に足した。ログの頭が付いた行は masking.py が頭を
+外した残りに当て直す。(3) 秘密語のゲートは、秘密語の出現がパスの語(`/` を含み、パスに使う文字だけでできた語)かファイル名の語の中
+だけなら数えない。`_NO_SECRET`・`_NO_GATE` も同じ数え方にそろえた(`mysql -p<値> /var/lib/secret/x.sql` を送る側に変えないため)。
+`LOG_LINE_RULES` を `log-line-v5` に上げた(表の件数は 172 → 175)。値を伏せる mask の行が先に当たる今の順は変えない。
 """
 
 import hashlib
@@ -279,8 +285,16 @@ _ALGO = (
 # 行にも当たらない(頭の形 GH-15〜19 には当たるので、送らない側に倒れる)。語の一覧は読み込み時の SECRET_WORDS で、
 # 設定で足した利用者の語は含まない(`_ALGO` と同じ限界)
 _ALL_SECRET_PIECES = "|".join(re.escape(w) for w in sorted(set(SECRET_WORDS), key=lambda w: (-len(w), w)))
+# パス・ファイル名の語(ADR-0247 決定3。REQ-375)。秘密語のゲートは、秘密語の出現がこの語の中だけなら数えない。ゲートと同じ数え方に
+# そろえるため、_NO_SECRET・_NO_GATE も語ごとに見て、この語を外す。2 つの式は masking.py の `_PATH_WORD_REGEX`・`_FILE_WORD_REGEX` と
+# 同じ文字列(2 ファイルを互いに読まないため、写して持つ。テストで同じことを確かめる)。パスの語は、パスに使う文字と `/` だけでできて
+# `/` を含む語。`=`・`?`・`&`・`:`・引用符・かっこ・`<>` を含む語は外れる
+_PATH_WORD = r"[A-Za-z0-9_.~@+-]*/[A-Za-z0-9_.~@+/-]*"
+_FILE_WORD = r"[\w.-]+\.(?:key|pem|crt|cer|csr|der|p12|pfx|log|conf|cfg|yaml|yml|json|txt|ini|xml|toml)"
+# 語の頭(直前が空白か行の頭)で、その語の全体がパスの語でもファイル名の語でもないこと
+_NOT_PATH_WORD = rf"(?!(?:{_PATH_WORD}|{_FILE_WORD})(?!\S))"
 _NO_SECRET = (
-    rf"(?!.*(?<![A-Za-z0-9_-])(?i:{_ALL_SECRET_PIECES})(?![A-Za-z0-9_-]))"
+    rf"(?!.*(?<!\S){_NOT_PATH_WORD}\S*?(?<![A-Za-z0-9_-])(?i:{_ALL_SECRET_PIECES})(?![A-Za-z0-9_-]))"
     + "(?!.*(?:" + "|".join(re.escape(prefix) for prefix in SECRET_VALUE_PREFIXES) + "))"
     + r"(?!.*</?value)"
 )
@@ -301,6 +315,12 @@ _NOT_LONG_PW_ARG = r"(?!--passw(?:or)?d=)\S+"
 _ARG_VALUE = r"""(?:"(?P<secret>[^"\\$`]+)"|'(?P<secret2>[^'\\]+)'|(?P<secret3>[^"'\s\\$`()]+))"""
 # ADR-0208 決定1 の shadow の欄2(ハッシュ。ロックの `!` が前に付いてもよい)の方式の印
 _SHADOW_HASH_HEAD = r"!?\$(?:1|2a|2b|2y|5|6|7|y|gy)\$"
+# ADR-0247 決定2(REQ-375)の sshd の決まった形(MSK-173〜175。秘密の値を持たない形の pass)。語を 1 つの空白で区切った形に当てる。
+# IP は IPv4 か、`:` を含む 16 進と `:`・`.` の並び(IPv6)。`ps` の欄は ps aux(利用者名・PID・%CPU・%MEM・VSZ・RSS・TTY・STAT・START・TIME)と
+# ps -ef(利用者名・PID・PPID・C・時刻か日付・端末・hh:mm:ss)の並びだけで、どんな語でも前に付けてよいことにはしない
+_SSH_IP = r"(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)"
+_PS_AUX_COLUMNS = r"\S+ \d+ \d+\.\d+ \d+\.\d+ \d+ \d+ \S+ \S+ \S+ \d+:\d{2} "
+_PS_EF_COLUMNS = r"\S+ \d+ \d+ \d+ (?:\d{1,2}:\d{2}|\w{3}\d{2}|\d{4}) \S+ \d+:\d{2}:\d{2} "
 
 
 # 行の頭の形(GH-15〜19)に付ける条件: 秘密語のゲート(masking.py)が当たる行を外す。表の行の _NO_SECRET より緩い。
@@ -309,7 +329,7 @@ _SHADOW_HASH_HEAD = r"!?\$(?:1|2a|2b|2y|5|6|7|y|gy)\$"
 # 頭の形には当たり(表の行は _NO_SECRET で当たらないため)送らない側に倒れる。ゲートに当たる行は頭の形に当たらず、
 # 今までの判定と記録の形のまま。語の一覧は読み込み時の SECRET_WORDS(設定で足した利用者の語は含まない)
 _NO_GATE = (
-    rf"(?!.*(?<!\S)[^\s<>]*?(?<![A-Za-z0-9_-])(?i:{_ALL_SECRET_PIECES})(?![A-Za-z0-9_-])[^\s<>]*(?!\S))"
+    rf"(?!.*(?<!\S){_NOT_PATH_WORD}[^\s<>]*?(?<![A-Za-z0-9_-])(?i:{_ALL_SECRET_PIECES})(?![A-Za-z0-9_-])[^\s<>]*(?!\S))"
     + '(?!.*(?<!\\S)"?(?:' + "|".join(re.escape(prefix) for prefix in SECRET_VALUE_PREFIXES) + "))"
     + "(?!.*</(?:" + "|".join(re.escape(w) for w in sorted({*SECRET_WORDS, "value"})) + ")>)"
 )
@@ -1030,6 +1050,26 @@ MASK_PATTERNS: tuple[MaskPattern, ...] = (
         "mask", "mysqladmin --user=admin --password=<値> status", "Linux (--password=)",
         note="どのコマンドの行でも、`--password=`・`--passwd=` の値(引用符で囲んだ値は引用符の中全部)を伏せる。`mysql -p<値>` を含む行、引数が2つある行、エスケープ・途中の引用符・コマンド置換のある値は送らない",
     ),
+    # ADR-0247(REQ-375)。sshd の決まった形。秘密の値を持たない形の pass。表の最後に足す(値を伏せる mask の行が先に当たる今の順は変えない)。
+    # ログの頭(時刻・ホスト名・プロセス名)が付いた行は、masking.py が頭を外した残りにこの 3 行だけを当て直す
+    MaskPattern(
+        "MSK-173", "*",
+        rf"(?:{_PS_AUX_COLUMNS}|{_PS_EF_COLUMNS})?sshd(?:-session)?: \S+ \[(?:priv|net|accepted|preauth)\]", "pass",
+        "root 1301 0.0 0.2 17100 10500 ? Ss 10:00 0:00 sshd: labuser [priv]", "Linux (ps)",
+        note="sshd のプロセス名。前に付けてよいのは ps aux か ps -ef の欄の並びだけ",
+    ),
+    MaskPattern(
+        "MSK-174", "*", rf"Failed password for (?:invalid user )?\S+ from {_SSH_IP} port \d+ ssh2", "pass",
+        "Failed password for invalid user admin from 192.0.2.10 port 50000 ssh2", "Linux (sshd)",
+        note="sshd の認証の失敗のログ。後ろに語が付く行は当てない",
+    ),
+    MaskPattern(
+        "MSK-175", "*",
+        rf"Accepted (?:password|publickey|keyboard-interactive/pam) for \S+ from {_SSH_IP} port \d+ ssh2"
+        r"(?:: [A-Z0-9-]+ SHA256:[A-Za-z0-9+/]+)?",
+        "pass", "Accepted publickey for labuser from 192.0.2.11 port 50001 ssh2: ED25519 SHA256:EXAMPLEfingerprint0123",
+        "Linux (sshd)", note="sshd の認証の成功のログ。鍵の指紋は公開鍵の要約で秘密ではない。後ろに語が付く行は当てない",
+    ),
 )
 
 # --- 利用者に見える説明の英語の版(REQ-259 / ADR-0190 決定3) ---
@@ -1116,6 +1156,9 @@ MASK_NOTES_EN: dict[str, str] = {
     "MSK-170": "Empty value",
     "MSK-171": "The value written right after `-p` (no space; everything inside the quotes for a quoted value with spaces) is masked. Not applied when there is a space after `-p` or no value. A line with two password arguments, or with an escape, a stray quote or a command substitution in the value, is not sent",
     "MSK-172": "In any command line, the value of `--password=` and `--passwd=` (everything inside the quotes for a quoted value) is masked. A line with `mysql -p<value>`, with two password arguments, or with an escape, a stray quote or a command substitution in the value is not sent",
+    "MSK-173": "The process name of sshd. Only the columns of ps aux or ps -ef may come before it",
+    "MSK-174": "The log of a failed sshd authentication. A line with more words after it is not matched",
+    "MSK-175": "The log of a successful sshd authentication. The key fingerprint is a digest of the public key, not a secret. A line with more words after it is not matched",
 }
 # 出どころの英語の版(日本語の出どころだけ。ほかはもともと英語)
 _SOURCES_EN: dict[str, str] = {
@@ -1328,7 +1371,7 @@ LOG_PREFIXES: tuple[tuple[str, str, str], ...] = (
 )
 LOG_PREFIX_KINDS = ("time", "after_time", "any")
 # 頭を外す手順と、行の途中の key=value・ヘッダー・引数の決まり(masking.py)の版の名前。決まりを変えたら上げる。masking.py からは読まない
-LOG_LINE_RULES = "log-line-v4"
+LOG_LINE_RULES = "log-line-v5"
 
 # 行のどこにあっても値を伏せる秘密のヘッダーの名前(ADR-0219 決定2。REQ-315)。大文字・小文字を問わない。
 # このほかに、`-` を 1 つ以上含み、`-` で区切った最後の部分が masking.py の `_KV_SECRET_PARTS` の語の名前(`X-API-Key` など)も当てる
@@ -1399,6 +1442,8 @@ CRYPT_HASH = _crypt_hash_regex(CRYPT_HASH_SCHEMES)
 _FORM_ID = re.compile(r"UNS-\d{2,}")
 _GATE_HEAD_ID = re.compile(r"GH-\d{2,}")
 _LOG_PREFIX_ID = re.compile(r"LP-\d{2,}")
+# 秘密語のゲートが語を分けるかたまり(英数字・`_`・`-`)。例がゲートを通るかの検査だけで使う
+_GATE_PIECE = re.compile(r"[A-Za-z0-9_-]+")
 
 
 @lru_cache(maxsize=None)
@@ -1417,6 +1462,7 @@ def validate(
     """
     seen: set[str] = set()
     words = set(secret_words)
+    folded = {word.lower() for word in secret_words}
     heads = [compiled(regex) for _, regex in gate_heads]
     for p in patterns:
         if not _ID.fullmatch(p.id):
@@ -1436,7 +1482,18 @@ def validate(
         if regex.fullmatch(p.example) is None:
             raise ValueError(f"{p.id}: 例が自分の書式に当たりません: {p.example!r}")
         example = " ".join(p.example.split())
-        if not words.intersection(p.example.split()) and not any(head.match(example) for head in heads):
+        # 例が秘密語を含むかは、本当のゲートと同じ数え方で見る: 語ごとに、パスの語・ファイル名の語は飛ばし、残りは英数字・`_`・`-` の
+        # かたまりで大文字・小文字を区別せずに見る(`[priv]` のように語の中にもよい。ADR-0247)
+        gate_words = [
+            word
+            for word in p.example.split()
+            if not (compiled(_PATH_WORD).fullmatch(word) or compiled(_FILE_WORD).fullmatch(word))
+        ]
+        if (
+            not words.intersection(gate_words)
+            and not any(piece.lower() in folded for word in gate_words for piece in _GATE_PIECE.findall(word))
+            and not any(head.match(example) for head in heads)
+        ):
             raise ValueError(f"{p.id}: 例が秘密語も行の頭の形も含みません(ゲートを通らない行は表を引きません)")
 
 

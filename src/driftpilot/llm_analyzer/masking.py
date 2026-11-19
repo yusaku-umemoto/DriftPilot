@@ -51,6 +51,17 @@ CRYPT_HASH_SCHEMES・CRYPT_HASH。`$<方式>$` から続きの終わりまでを
 (`RESULT=$(curl -u …)`・`x|curl -u …`・`ok;redis-cli -a …`)。パスワードのハッシュの前の文字は、英数字と `_` でなければよい(行の頭も含む。
 `<hash>$6$…</hash>`・`x admin:!$6$…`)。値の取り方は今のまま(`(redis-cli -a <値>)` の閉じかっこは値に含まれる)。「送らない」「pass」の行は今のまま。
 
+緩める直し(ADR-0247。REQ-375): (1) 割れた秘密の行のかたまりは、次の行が新しい記録の始まり(ログの時刻・`ls -l` の権限の並び・
+`ps aux`・`ps -ef` の行。`_starts_new_record`)なら作らない(A の続きもその行の手前で止める。ADR-0222 の広げも同じ)。折り返しの続きは
+新しい記録の始まりの形では始まらない。(2) sshd の決まった形(`ps` の `sshd: <利用者> [priv]`・`Failed password …`・`Accepted … ssh2`)は
+表の pass(MSK-173〜175)で送る。ログの頭が付いた行は、どの表の行にも行の頭の形にも当たらないときだけ、頭を外した残りにこの 3 行だけを
+当て直す(ほかの表の行は当て直さない)。(3) 秘密語のゲートで、秘密語の出現が空白で区切った語のうち「パスに使う文字だけでできた
+`/` を含む語」か「ファイル名の形の語」の中だけなら数えない(`_is_path_word`)。`=`・`?`・`&`・`:`・引用符・かっこ・`<>` を含む語
+(URL・JSON・`名前=値`)は外れるので、今までどおり数える。同じ行に語の外の秘密語があれば、今までどおり送らない。数えないのは
+初期の秘密語だけで、利用者が足した語はパス・ファイル名の語の中でも数える(`_added_folded`。ADR-0247 の対象は初期の語。ADR に無い
+判断なので完了報告で知らせる)。値の形
+(`first_secret_value`)と行の頭の形(`gate_head`)は変えない。この 3 つを変えたら mask_patterns.LOG_LINE_RULES を上げる(v5)。
+
 見えない文字(Unicode の種類が Cc・Cf の文字。タブ・LF・CR を除く)のある行は、形の一覧とゲートより前に送らないと決める
 (ADR-0142 決定1)。BOM の無い UTF-16 の NUL や語の中のゼロ幅の文字で、秘密語の判定を外れるため。文字の種類だけを見ていて、
 値の形は ADR-0199 決定3 の3接頭辞だけを例外として見る。形には行の中身を残さない(ADR-0142 決定2)。
@@ -109,6 +120,19 @@ _FRESH_HEAD = re.compile(r"[a-z][a-z-]*")
 _TAG_NAME = re.compile(r"</?([A-Za-z][\w-]*)")
 # 語を分けるかたまり(英数字・`_`・`-`。`-` と `_` は区切りにしない。ADR-0143 決定1)。語の名前を取り出すだけで、値の形は見ない
 _WORD_PIECE = re.compile(r"[A-Za-z0-9_-]+")
+# パス・ファイル名の語(ADR-0247 決定3。REQ-375)。秘密語の出現がこの語の中だけなら、ゲートで数えない。
+# パスの語: パスに使う文字(英数字・`_`・`.`・`~`・`@`・`+`・`-`)と `/` だけでできていて `/` を含む語。`=`・`?`・`&`・`:`・引用符・かっこ・`<>` を
+# 含む語(URL の `…?password=<値>`・JSON・`名前=<値>/<値>`)は外れる。ファイル名の語: 拡張子で終わる語。
+# 2 つの式は mask_patterns.py の `_PATH_WORD`・`_FILE_WORD` と同じ文字列(2 ファイルを互いに読まないため、写して持つ。テストで同じことを確かめる)
+_PATH_WORD_REGEX = r"[A-Za-z0-9_.~@+-]*/[A-Za-z0-9_.~@+/-]*"
+_FILE_WORD_REGEX = r"[\w.-]+\.(?:key|pem|crt|cer|csr|der|p12|pfx|log|conf|cfg|yaml|yml|json|txt|ini|xml|toml)"
+_PATH_WORD = re.compile(_PATH_WORD_REGEX)
+_FILE_WORD = re.compile(_FILE_WORD_REGEX)
+
+
+def _is_path_word(word: str) -> bool:
+    """空白で区切った語が、パスの語かファイル名の語か(語の全体で見る。ADR-0247 決定3)。"""
+    return _PATH_WORD.fullmatch(word) is not None or _FILE_WORD.fullmatch(word) is not None
 # 見えない文字のある行の記録の形(行の中身を残さない。ADR-0142 決定2)
 UNSEEN_SHAPE = "<見えない文字のある行>"
 # 見えない文字から除く文字(タブ・LF・CR。ADR-0142 決定1)
@@ -176,9 +200,23 @@ def _folded_words(words: frozenset[str]) -> dict[str, str]:
     return folded
 
 
-def _secret_hit(text: str, words: frozenset[str]) -> tuple[int, str] | None:
+@lru_cache(maxsize=32)
+def _added_folded(words: frozenset[str]) -> dict[str, str]:
+    """小文字にした、利用者が足した秘密語(初期の語に大文字・小文字を除いて無い語) → 一覧の文字列。語の集まりごとに1回だけ作る。
+
+    パス・ファイル名の語の中でも、この語は数える(ADR-0247 の対象は初期の語。利用者が名前・顧客名などを足した語を、ファイル名の
+    中だけだからと送る側に戻さない)。返した辞書は共有するので、呼び出し側で変えない。
+    """
+    initial = {word.lower() for word in SECRET_WORDS}
+    return {key: word for key, word in _folded_words(words).items() if key not in initial}
+
+
+def _secret_hit(text: str, words: frozenset[str], skip_paths: bool = False) -> tuple[int, str] | None:
     """最初に秘密語に当たった語の位置と、記録の形に残す文字列。
 
+    skip_paths が真のときは、パスの語・ファイル名の語(`_is_path_word`)の中の、初期の秘密語の出現を数えない(ADR-0247 決定3)。
+    利用者が足した語(`_added_folded`)は、この語の中でも数える。
+    ゲート・かたまりの「秘密語のある行」・送らなかった行の形がこの形で見る。初めの値は偽(今までの数え方)。
     空白で区切った語ごとに、次の順で見る(ADR-0143)。
     1. 語がそのまま秘密語なら当たる。残すのはその語
     2. 語に `<` か `>` があれば、XML のタグの判定だけを見る(ADR-0140 決定2)。残すのは `<名前>`
@@ -188,6 +226,15 @@ def _secret_hit(text: str, words: frozenset[str]) -> tuple[int, str] | None:
     head = text.lstrip()
     folded: dict[str, str] | None = None
     for index, word in enumerate(text.split()):
+        if skip_paths and _is_path_word(word):
+            # 初期の秘密語は数えない。利用者が足した語は、この語の中でも数える(ADR-0247 の対象は初期の語)
+            added = _added_folded(words)
+            if added:
+                for piece in _WORD_PIECE.findall(word):
+                    listed = added.get(piece.lower())
+                    if listed is not None:
+                        return index, listed
+            continue
         if word in words:
             return index, word
         if "<" in word or ">" in word:
@@ -204,8 +251,11 @@ def _secret_hit(text: str, words: frozenset[str]) -> tuple[int, str] | None:
     return None
 
 
-def first_secret_word(text: str, words: frozenset[str]) -> int | None:
+def first_secret_word(text: str, words: frozenset[str], *, skip_paths: bool = False) -> int | None:
     """行の語のうち、最初に秘密語に当たった語の位置。無ければ None。
+
+    skip_paths が真なら、パスの語・ファイル名の語の中の出現は数えない(ADR-0247 決定3。ゲートの数え方)。初めの値は偽で、
+    config の読み取り(device_settings)は今までの数え方のまま使う。
 
     語が秘密語と完全一致するとき。`<` も `>` も無い語は、英数字・`_`・`-` のかたまりのどれかが秘密語と大文字・小文字を
     区別せずに一致するときも当たる(`secret=…`・`Password:`・`SECRET`。ADR-0143 決定1)。`-` と `_` は区切りにしないので
@@ -213,7 +263,7 @@ def first_secret_word(text: str, words: frozenset[str]) -> int | None:
     そのタグで始まるか同じ行に閉じるタグがあるときだけ当たる(ADR-0140 決定2、ADR-0143 決定2)。本文の中で値の代わりに
     書いた `crypto isakmp <key>` は当たらない。全角の語は当たらない(ADR-0143 決定4)。
     """
-    hit = _secret_hit(text, words)
+    hit = _secret_hit(text, words, skip_paths)
     return None if hit is None else hit[0]
 
 
@@ -254,7 +304,7 @@ def first_secret_value(text: str) -> int | None:
 def unsent_shape(text: str, words: frozenset[str]) -> str:
     """行頭から最初の秘密語までの形。前の語は fold-v1 で畳み、秘密語より後ろは `…` にする(値を残さない)。"""
     parts = text.split()
-    hit = _secret_hit(text, words)
+    hit = _secret_hit(text, words, True)  # ゲートと同じ数え方(パス・ファイル名の語の中は数えない)
     value_index = first_secret_value(text)
     if value_index is not None and (hit is None or value_index <= hit[0]):
         # 秘密語より前の値も記録しない。値の語そのものは一切残さない。
@@ -323,6 +373,40 @@ _WORD = re.compile(r"\S+")
 
 # ログの行の頭の形(ADR-0215 決定2)。読み込み時にコンパイルしておく
 _LOG_PREFIXES = tuple((prefix_id, re.compile(regex), kind) for prefix_id, regex, kind in LOG_PREFIXES)
+
+# 新しい記録の始まり(ADR-0247 決定1。REQ-375)。行の頭の空白を除いた頭から当てる。割れた秘密の行のかたまりで、次の行がこの形で始まれば
+# 前の行の折り返しの続きではないので、つなげない。この一覧や式を変えたら mask_patterns.LOG_LINE_RULES を上げる
+# ログの時刻: LOG_PREFIXES の種類 time の形(LP-01〜03)と、時刻で始まる形(LP-12 nginx・LP-13 Apache・LP-15 RFC 5424)。ID で選ぶ
+_RECORD_PREFIX_IDS = frozenset({"LP-12", "LP-13", "LP-15"})
+_RECORD_PREFIXES = tuple(
+    regex for prefix_id, regex, kind in _LOG_PREFIXES if kind == "time" or prefix_id in _RECORD_PREFIX_IDS
+)
+_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_RECORD_FORMS = tuple(
+    re.compile(regex)
+    for regex in (
+        # ネットワーク機器のログの時刻の頭(`*` か `.` が付いた形・頭に `000123: ` の番号が付いた形)
+        rf"(?:\d+: )?[*.]?{_MONTH} {{1,2}}\d{{1,2}} \d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?(?: [A-Z]{{2,5}})?: ",
+        r"[-dlcbps][rwxsStT-]{9}[.+@]?\s",  # ls -l の権限の並び
+        r"\S+\s+\d+\s+\d+\.\d+\s+\d+\.\d+\s",  # ps aux(利用者名・PID・%CPU・%MEM)
+        r"\S+\s+\d+\s+\d+\s+\d+\s+(?:\d{1,2}:\d{2}|\w{3}\d{2}|\d{4})\s+\S+\s+\d+:\d{2}:\d{2}\s",  # ps -ef
+    )
+)
+
+
+def _starts_new_record(line: str) -> bool:
+    """行が新しい記録の始まりか(ログの時刻・ネットワーク機器のログの時刻・`ls -l`・`ps aux`・`ps -ef`。ADR-0247 決定1)。
+
+    行の頭の空白を除いた頭から当てる。この関数は割れた秘密の行のかたまりの判定だけで使い、1行ごとの伏せる判定は変えない。
+    """
+    head = line.lstrip()
+    return any(regex.match(head) is not None for regex in _RECORD_PREFIXES) or any(
+        regex.match(head) is not None for regex in _RECORD_FORMS
+    )
+
+
+# ログの頭を外した残りに当て直す表の pass の行(ADR-0247 決定2。sshd の決まった形)。ID が表にあって pass であることはテストで確かめる
+_SSHD_PASS_IDS = ("MSK-173", "MSK-174", "MSK-175")
 # 行の途中の `<名前>=<値>`(ADR-0215 決定4)。名前は語の頭から。名前を `_`・`-`・`.` で区切った最後の部分が秘密を示す語なら値を伏せる。
 # この一覧や値の決まりを変えたら mask_patterns.LOG_LINE_RULES を上げる
 _KV_NAME = re.compile(r"(?<!\S)([A-Za-z_][\w.-]*)=")
@@ -720,7 +804,7 @@ class Masker:
         show の差分の道(payload._show_body)は judge を通らずこれだけを見るため、見えない文字もここで見る(ADR-0143 決定5)。
         """
         return (
-            has_unseen_char(text) or first_secret_word(text, self._words) is not None
+            has_unseen_char(text) or first_secret_word(text, self._words, skip_paths=True) is not None
             or first_secret_value(text) is not None
         )
 
@@ -865,8 +949,30 @@ class Masker:
             return LineJudgement("mask", indent + "".join(out), pattern.id)
         if head_id is not None:  # 頭の形に当たった行は、秘密語があっても頭の形の ID だけを残す(語より前に値があり得るため)
             return LineJudgement("unsent", None, None, f"[{scope_label(ancestors)}] {head_id} …")
+        rematched = self._pass_after_log_head(line)
+        if rematched is not None:
+            return LineJudgement("pass", line, rematched)
         shape = f"[{scope_label(ancestors)}] {unsent_shape(body, self._words)}"
         return LineJudgement("unsent", None, None, shape)
+
+    def _pass_after_log_head(self, line: str) -> str | None:
+        """ログの頭が付いた sshd の決まった形の行を、頭を外した残りで当て直す(ADR-0247 決定2)。当たった pass の行の ID。無ければ None。
+
+        表のどの行にも行の頭の形にも当たらなかった行だけがここに来る。当て直すのは `_SSHD_PASS_IDS` の行だけ(ほかの表の行は当て直さず、
+        今の判定を変えない)。外した頭の中に秘密語(ゲートと同じ数え方)か値の形がある行は当て直さない。
+        """
+        start = len(line) - len(line.lstrip())
+        head_end = _log_head_end(line, start)
+        if head_end <= start:
+            return None
+        head = line[start:head_end]
+        if _secret_hit(head, self._words, True) is not None or first_secret_value(head) is not None:
+            return None
+        body = " ".join(line[head_end:].split())
+        for pattern in self._patterns:
+            if pattern.id in _SSHD_PASS_IDS and pattern.kind == "pass" and compiled(pattern.match).fullmatch(body):
+                return pattern.id
+        return None
 
     def mask_value(self, value: object) -> str:
         """構造化差分の伏せる項目(基準1)の値を記号にする。"""
@@ -942,6 +1048,8 @@ def wrapped_secret_groups(
     - C: 秘密語で終わるか、秘密語 + 1桁の数字で終わる行(表の pass に当たる行を除く) → 2行
     - D: 秘密語のある行で、次の行が新しい設定の行に見えない → 2行
 
+    どの判定も、行 i+1 が新しい記録の始まり(`_starts_new_record`。ログの時刻・`ls -l`・`ps`)なら行 i につなげない。A の続きは
+    その行の手前で止める。ADR-0222 の広げも同じ(ADR-0247 決定1)。秘密語は、パス・ファイル名の語の中を数えない(決定3)。
     形の一覧の行(場所の条件は見ない)と形の頭の行も「秘密語のある行」として扱う(REQ-198)。形の頭の行は C でも 2行にする。
     場所の条件が無い形の行で始まる A は、次の行が新しい設定の行に見えても伸ばす(値に小文字の語が続く形があるため)。
     祖先は見ない(ancestors_by_indent がこの関数を使うため)。
@@ -957,7 +1065,7 @@ def wrapped_secret_groups(
 
     def has_secret(text: str) -> bool:
         return (
-            first_secret_word(text, secret) is not None or first_secret_value(text) is not None
+            first_secret_word(text, secret, skip_paths=True) is not None or first_secret_value(text) is not None
             or bool(_form_line_ids(text)) or gate_head(text) is not None
         )
 
@@ -971,6 +1079,8 @@ def wrapped_secret_groups(
         row, following = rows[i], rows[i + 1]
         if not following.strip():
             return None
+        if _starts_new_record(following):  # 次の行が新しい記録の始まりなら、A〜D のどれでもつなげない(ADR-0247 決定1)
+            return None
         group: tuple[int, int] | None = None
         found = has_secret(row)
         if is_long(row) and not found and not has_secret(following) and has_secret(row + following.lstrip()):
@@ -982,6 +1092,7 @@ def wrapped_secret_groups(
                 j + 1 < len(rows)
                 and is_long(rows[j])
                 and rows[j + 1].strip()
+                and not _starts_new_record(rows[j + 1])  # A の続きは、新しい記録の始まりの行の手前で止める(ADR-0247 決定1)
                 and (keep or not _looks_like_fresh_line(rows[j + 1]))
             ):
                 j += 1

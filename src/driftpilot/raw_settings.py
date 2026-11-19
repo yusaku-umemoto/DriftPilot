@@ -4,7 +4,9 @@
 「単純比較」のタブが書く。コマンド(CLI)は読まない。読むのも書くのも画面の論理(screen_model)だけ。
 
 中身は {"schema_version": 1, "raw_options": {raw_keys.options_to_plain の形}, "context_lines": 3}。context_lines は
-「差分のみ表示」の前後の行数(REQ-228 §2。0〜20。無ければ 3。REQ-227 のファイルも読む)。読めない・形が違うときは SettingsError
+「差分のみ表示」の前後の行数(REQ-228 §2。0〜20。無ければ 3。REQ-227 のファイルも読む)。無効のルールがあるときだけ、上の段に
+"disabled": {"ignore_lines": [式…], "replacements": [{"pattern", "replacement"}…]} を書く(REQ-359。raw_options は無効のルールも
+含めた全部。disabled が無ければ全部有効。raw_options に無いものは読むときに捨てる)。読めない・形が違うときは SettingsError
 (場所と理由の種類だけ。式は文に入れない)。書くときは同じフォルダの一時ファイルに UTF-8・改行 \\n で書いて os.replace で
 置き換える(prompt_profiles と同じ書き方。途中で落ちても壊れたファイルを残さない)。
 """
@@ -22,10 +24,16 @@ from driftpilot.raw_keys import (
     DEFAULT_RAW_OPTIONS,
     RAW_CONTEXT_DEFAULT,
     RAW_CONTEXT_MAX,
+    NO_DISABLED,
+    RawDisabled,
     RawOptions,
     RawOptionsError,
+    disabled_from_plain,
+    disabled_to_plain,
+    enabled_options,
     options_from_plain,
     options_to_plain,
+    prune_disabled,
 )
 
 RAW_SETTINGS_NAME = "raw-compare.json"
@@ -41,15 +49,24 @@ def raw_settings_path(
 
 @dataclass(frozen=True)
 class RawSettings:
-    """raw-compare.json の中身。options は単純比較の設定、context_lines は「差分のみ表示」の前後の行数(表示だけの値)。"""
+    """raw-compare.json の中身。options は単純比較の設定(無効のルールも含めた全部)、context_lines は「差分のみ表示」の前後の行数
+    (表示だけの値)。disabled は無効のルール(REQ-359。options のルールのうち、比べるときだけ外すもの)。
+    """
 
     options: RawOptions = DEFAULT_RAW_OPTIONS
     context_lines: int = RAW_CONTEXT_DEFAULT
+    disabled: RawDisabled = NO_DISABLED
+
+    def enabled_options(self) -> RawOptions:
+        """比べるときの設定(無効のルールを除いたもの)。"""
+        return enabled_options(self.options, self.disabled)
 
 
 def load_raw_defaults(path: Path) -> RawOptions:
-    """既定の設定を読む。ファイルが無ければすべてオフ(DEFAULT_RAW_OPTIONS)。読めない・形が違えば SettingsError。"""
-    return load_raw_settings(path).options
+    """既定の設定を読む(無効のルールは除く。一括比較の窓へ渡す設定はこれ)。ファイルが無ければすべてオフ(DEFAULT_RAW_OPTIONS)。
+    読めない・形が違えば SettingsError。
+    """
+    return load_raw_settings(path).enabled_options()
 
 
 def load_raw_settings(path: Path) -> RawSettings:
@@ -80,7 +97,10 @@ def load_raw_settings(path: Path) -> RawSettings:
     if type(context) is not int or not 0 <= context <= RAW_CONTEXT_MAX:
         raise SettingsError(_T["context_lines"].format(path=path, maximum=RAW_CONTEXT_MAX))
     try:
-        return RawSettings(options_from_plain(data["raw_options"]), context)
+        options = options_from_plain(data["raw_options"])
+        # disabled が無ければ全部有効(REQ-359)。raw_options に無いものは捨てる
+        disabled = prune_disabled(options, disabled_from_plain(data["disabled"])) if "disabled" in data else NO_DISABLED
+        return RawSettings(options, context, disabled)
     except RawOptionsError as exc:
         if exc.problems:
             kinds = _T["kinds_separator"].join(sorted({p.kind for p in exc.problems}))
@@ -89,13 +109,21 @@ def load_raw_settings(path: Path) -> RawSettings:
         raise SettingsError(_T["form_error"].format(path=path, error=exc)) from None
 
 
-def save_raw_defaults(path: Path, options: RawOptions, context_lines: int = RAW_CONTEXT_DEFAULT) -> None:
-    """既定の設定と前後の行数を書く。フォルダが無ければ作る。書けなければ SettingsError(元のファイルは残る)。"""
-    data = {
+def save_raw_defaults(
+    path: Path, options: RawOptions, context_lines: int = RAW_CONTEXT_DEFAULT, disabled: RawDisabled = NO_DISABLED
+) -> None:
+    """既定の設定と前後の行数を書く。フォルダが無ければ作る。書けなければ SettingsError(元のファイルは残る)。
+
+    options は無効のルールも含めた全部。disabled(REQ-359)は上の段に書く。無効が 1 つも無ければ書かない(今と 1 文字も同じ)。
+    """
+    data: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "raw_options": options_to_plain(options),
         "context_lines": context_lines,
     }
+    disabled = prune_disabled(options, disabled)
+    if not disabled.is_empty():
+        data["disabled"] = disabled_to_plain(disabled)
     text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     tmp: Path | None = None
     try:

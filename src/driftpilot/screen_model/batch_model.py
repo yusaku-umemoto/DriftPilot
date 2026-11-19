@@ -11,6 +11,7 @@ LLM の段取り(ADR-0031 決定2・9): 1段目(送らない)→ 要約と全体
 マニフェストには LLM を書かない(決定6)。チェックは実行時の指定だけ。
 """
 
+import sys
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -39,6 +40,8 @@ from driftpilot.core import (
     Job,
     JobResult,
     ManifestError,
+    analyze_all,
+    analyze_compared,
     approved_payloads,
     config_platform_used,
     final_results,
@@ -61,9 +64,17 @@ from driftpilot.screen_model.model import (
     redact_text,
     show_method,
 )
-from driftpilot.core import DEFAULT_RAW_OPTIONS, RawOptions
+from driftpilot.core import (
+    DEFAULT_RAW_OPTIONS,
+    MultiCompareOutcome,
+    RawOptions,
+    attach_whole_answer,
+    llm_inputs,
+    options_to_plain,
+    whole_outcome,
+)
 from driftpilot.report_output import Report, ReportPair
-from driftpilot.llm_analyzer import LlmAnalysis
+from driftpilot.llm_analyzer import LlmAnalysis, LlmRequest, same_sent_body
 from driftpilot.llm_analyzer.answer_format import first_sentence
 from driftpilot.llm_settings import LlmSettings, default_base_url, display_model
 from driftpilot.messages import (
@@ -89,6 +100,8 @@ from driftpilot.messages import (
     batch_llm_payloads_text,
     batch_llm_preview_lines,
     batch_platform_auto_row,
+    batch_platform_hand,
+    batch_rechecked_note,
     batch_waiting_segment,
     llm_column,
     llm_limit_lines,
@@ -435,6 +448,12 @@ class BatchTableRow:
     show_methods: tuple[str, ...] = ()
     # まとめて比べた組の下に出すコマンドの組の行(ADR-0216 決定6)。外した組・実行中・結果の無い組・1 区間の組は空
     commands: tuple[BatchCommandRow, ...] = ()
+    # 単一比較の窓で比べ直した結果を受けた行の印の説明(REQ-362 / ADR-0242 決定2)。マウスを載せたときに出す文で、空なら印なし。
+    # 入るのは、返された単純比較の設定が組の設定と違うときだけ(同じなら空)
+    rechecked: str = ""
+    # 窓の中で機種を手で選んだ組の印の全文「機種を手で指定: {機種の名前}」(REQ-368 §4)。名前は機種の列の文(job_platform_text)。
+    # 空なら印なし(機種が自動の組・組のファイルに書かれた機種・外した組)
+    hand_platform: str = ""
 
 
 def job_show_methods(result: JobResult) -> tuple[str, ...]:
@@ -498,6 +517,13 @@ def job_platform_text(job: Job) -> str:
     return next((label for value, label in WEB_PLATFORM_CHOICES if value == job.platform), job.platform)
 
 
+def hand_platform_name(job: Job) -> str:
+    """機種を手で指定した行の印に入れる機種の名前(REQ-368 §4)。結果の機種の列と同じ表示名(「FortiGate」。platform_label)。
+    指定なし(値が無い)は選択肢の文(job_platform_text)のまま。
+    """
+    return platform_label(job.platform) if job.platform else job_platform_text(job)
+
+
 def ai_point(llm: LlmAnalysis | None) -> str:
     """「AI の要点」の列。答えがあれば最初の文(first_sentence)、読めなければ・答えが無ければ llm_column の文。
 
@@ -547,8 +573,14 @@ def table_rows(
     excluded: Collection[str] = (),
     *,
     words: Sequence[str] | None = None,
+    returned: Mapping[str, RawOptions] | None = None,
+    hand: Collection[str] = (),
 ) -> list[BatchTableRow]:
     """1 つの表の行(組の順)。shown は job の id ごとの表示する結果、running はいま実行中の job の id、excluded は外した組の id。
+
+    returned は、単一比較の窓から結果が返された組の id → そのとき使った単純比較の設定(REQ-362)。結果のある組で、その設定が
+    組の設定(job.raw_options)と違うときだけ、行の rechecked に説明の文を入れる(同じなら空。比べ方は REQ-361 の帯と同じ !=)。
+    hand は窓の中で機種を手で選んだ組の id(REQ-368 §4)。外していない組の行の hand_platform に印の全文を入れる。
 
     外した組を先に見る(状態は「外した組」、数は —。結果は消さずに残し、戻すとまた出す)。次に実行中の組(2段目の AI の送信の間も
     「実行中」)。結果のある組は result_row の値、それ以外は「待機」と —。
@@ -558,6 +590,8 @@ def table_rows(
     for job in jobs:
         label, before, after = job.label or "", str(job.before.path), str(job.after.path)
         extra = {"job_id": job.id, "included": job.id not in excluded, "platform_index": job_platform_index(job)}
+        if job.id in hand and job.id not in excluded:
+            extra["hand_platform"] = batch_platform_hand(hand_platform_name(job))
         result = shown.get(job.id)
         if job.id in excluded or job.id == running or result is None:
             if job.id in excluded:
@@ -582,6 +616,8 @@ def table_rows(
             )
             continue
         row = result_row(result)
+        used = returned.get(job.id) if returned is not None else None
+        rechecked = batch_rechecked_note(options_to_plain(used)) if used is not None and used != job.raw_options else ""
         rows.append(
             BatchTableRow(
                 job.index,
@@ -598,6 +634,7 @@ def table_rows(
                 **extra,
                 show_methods=job_show_methods(result),
                 commands=command_rows(result, words),
+                rechecked=rechecked,
             )
         )
     return rows
@@ -699,6 +736,22 @@ def waiting_reason(outcome: CompareOutcome, words: Sequence[str] | None) -> str 
 
 
 @dataclass(frozen=True)
+class BatchOrigin:
+    """単一比較の窓が覚える、元の組の目印(REQ-362 / ADR-0242 決定1)。比べ終わったときに結果を返す先を決める。
+
+    job_id は組の id、before・after は組のファイルのパス、version は受け取ったときの一括比較の窓の結果の版
+    (作り直し・実行・結果を消す直しで変わる番号。違えば返しても捨てられる)、owner は送り元の一括比較の窓(BatchApi。
+    開き直した窓へ返さないための印。== の比べには使わない)。
+    """
+
+    job_id: str
+    before: Path
+    after: Path
+    version: int
+    owner: object = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
 class CompareHandoff:
     """比較画面の入力欄に入れるもの。2つのパスと比較の設定だけで、結果は持たない。"""
 
@@ -708,8 +761,11 @@ class CompareHandoff:
     platform: str
     mode: Mode
     show_command: str
-    # 単純比較の設定(REQ-228 §7.2)。比較の窓は受け取ったら欄をこの値にする(既定のファイルの値ではない)
+    # 単純比較の設定(REQ-228 §7.2)。比較の窓は欄をこの値にしない(REQ-361 §2。窓の設定のまま比べ、違えば帯で知らせる)
     raw_options: RawOptions = DEFAULT_RAW_OPTIONS
+    # 元の組の目印(REQ-362)。pywebview の一括比較の窓だけが付ける(wx の「比較画面で開く」は付けず、結果も返さない)。
+    # == の比べには使わない(handoff_for(job) と等しいかを確かめる今のテストはそのまま通る)
+    origin: BatchOrigin | None = field(default=None, compare=False)
 
 
 def handoff_for(job: Job) -> CompareHandoff:
@@ -755,6 +811,48 @@ def handed_answer(
     return HandedAnswer(llm=llm, profile=profile, prompt_name=prompt_name)
 
 
+def returned_result(
+    job: Job, previous: JobResult, request: CompareRequest, outcome: CompareOutcome | MultiCompareOutcome
+) -> JobResult:
+    """単一比較の窓から返された結果で、組の行の結果を作る(REQ-362 / ADR-0242 決定2)。AI は呼ばない。
+
+    前の AI の答えは、送って届いた答え(status が done で transmitted)だけを候補にする(送らなかった理由などは外す)。
+    - 1 つの比較の結果: 比べ直した差分を、一括比較で送った文と照らす(same_sent_body。ADR-0170 決定3 と同じ確かめ)。同じなら前の答えを
+      入れ、違えば入れない(結果の llm は比較の窓で比べたまま。AI を使っていない比較の「無効」の印で、「実行」の結果と同じ)
+    - まとめて比べた結果: AI の値(llm・llm_pairs)を空にした結果に、attach_whole_answer で前の全体の答えを付ける(全体の本文が
+      送った文と同じときだけ)。付けられなければ空のまま。全体を表す結果は whole_outcome で作る(JobResult の形は core の一括実行と同じ)
+    """
+    before = previous.outcome.llm
+    answer = before if before is not None and before.status == "done" and before.transmitted else None
+    if isinstance(outcome, MultiCompareOutcome):
+        multi = replace(outcome, llm=None, llm_pairs=())
+        if answer is not None:
+            multi = attach_whole_answer(multi, answer) or multi
+        return JobResult(job, request, whole_outcome(multi, request, multi.llm), (), multi)
+    if answer is not None and same_sent_body(
+        structured=outcome.structured,
+        raw=outcome.raw,
+        show=outcome.show,
+        inputs=llm_inputs(request, outcome),
+        first=answer,
+    ):
+        outcome = replace(outcome, llm=answer)
+    return JobResult(job, request, outcome, (), None)
+
+
+def rechecked_result(previous: JobResult | None, fresh: JobResult) -> JobResult:
+    """「この組だけ比べ直す」(REQ-368 §3)の新しい結果と前の結果から、行に置く結果を作る。AI は呼ばない。
+
+    前の結果が無ければ新しい結果のまま。あれば returned_result(REQ-362 と同じ決まり)に新しい request と outcome
+    (まとめて比べた組は multi)を渡し、前の AI の答えを、送る差分の本文が同じときだけ残す。読めなかった側は新しい結果のまま。
+    """
+    if previous is None:
+        return fresh
+    outcome = fresh.multi if fresh.multi is not None else fresh.outcome
+    result = returned_result(fresh.job, previous, fresh.request, outcome)
+    return replace(result, unread_sides=fresh.unread_sides)
+
+
 # --- LLM の段取り(ADR-0031) ---
 
 
@@ -797,6 +895,24 @@ def after_first_stage(
     if not pv.jobs:
         return FirstStage(pv, final_results(results), batch_llm_nothing_to_send())
     return FirstStage(pv, None)
+
+
+def rebuilt_payloads(first: Sequence[JobResult], llm: LlmRequest, job_ids: Collection[str]) -> dict[str, str | None]:
+    """1段目の結果から、組ごとの送る文を llm(送らない要求。秘密の語などを今の値に替えたもの)で作り直す(REQ-371)。
+
+    返すのは、組の id → 送る文(作れなければ None)。作り方は core の _run_one と同じ(まとめて比べた組は analyze_all を
+    全体の上限なしで、1 区間の組は analyze_compared)。比較のやり直しとファイルの読み直しはしない(1段目の結果を使う)。
+    """
+    rebuilt: dict[str, str | None] = {}
+    for result in first:
+        if result.job.id not in job_ids:
+            continue
+        if result.multi is not None:
+            analysis = analyze_all(result.multi, llm, max_total_diffs=sys.maxsize).llm
+        else:
+            analysis = analyze_compared(result.request, result.outcome, llm).llm
+        rebuilt[result.job.id] = analysis.payload if analysis is not None else None
+    return rebuilt
 
 
 def second_stage(preview: BatchLlmPreview, checked: Collection[str]) -> dict[str, str]:

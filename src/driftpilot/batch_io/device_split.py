@@ -80,3 +80,36 @@ def write_device_split(
     except OSError as exc:
         raise DeviceSplitError(exc.strerror or str(exc), folder) from exc
     return DeviceSplitWritten(folder, before_dir, after_dir, len(before), len(after))
+
+
+@dataclass(frozen=True)
+class DeviceSplitSingleWritten:
+    """1 つの文を分けて書いた場所と台数(ログを見る窓の書き出し。before・after は作らない)。"""
+
+    folder: Path
+    count: int
+
+
+def write_device_split_single(
+    text: str,
+    parent: str | os.PathLike[str],
+    now: datetime | None = None,
+) -> DeviceSplitSingleWritten:
+    """text を機器ごとに分けて、parent の下の新しいフォルダーの直下に `<hostname>.log` で書く(ADR-0248 決定2 / REQ-377 §5)。
+
+    フォルダー名・ファイル名の決まり・上書きしない・UTF-8(BOM なし)・改行はそのまま・途中で書けなくなったら残して止める、は
+    write_device_split と同じ。比べるのではないので before・after のフォルダーは作らない。書けなければ DeviceSplitError。
+    """
+    parent = Path(parent)
+    devices = split_by_device(text)
+    names = device_filenames([d.hostname for d in devices])
+    folder: Path | None = None
+    try:
+        folder = _new_folder(parent, now or datetime.now())
+        for device in devices:
+            # 上書きしない("x")。BOM なしの UTF-8、改行はそのまま
+            with open(folder / names[device.hostname], "x", encoding="utf-8", newline="") as handle:
+                handle.write(device.text)
+    except OSError as exc:
+        raise DeviceSplitError(exc.strerror or str(exc), folder) from exc
+    return DeviceSplitSingleWritten(folder, len(devices))

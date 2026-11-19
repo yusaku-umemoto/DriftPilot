@@ -58,6 +58,9 @@ class CompareRequest:
     after_selection: SideSelection = field(default_factory=SideSelection)
     rules: list[NormalizationRule] | None = None  # 読み込み済み
     enabled_rule_ids: list[str] | None = None
+    # show の表の比較で値の違いを変更の列にしない列の名前(比較の窓のこの窓だけの設定。REQ-367)。CLI・組のファイルは作らない(いつも空)。
+    # raw_options を最後の項目のままにするため、その前に置く(どの呼び出しも名前で渡す)
+    skip_columns: tuple[str, ...] = ()
     # 単純比較の設定(ADR-0166)。単純比較だけに効き、構造化比較は変えない
     raw_options: RawOptions = DEFAULT_RAW_OPTIONS
 

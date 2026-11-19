@@ -1,6 +1,7 @@
 // 単純比較の設定の欄（ADR-0166 / REQ-227 §11.2）。比較の窓（compare.html）と設定の窓（settings.html の「単純比較」のタブ）で使う。
 //
-// 外から使うのは readRawOptions（欄の値を Python に渡す形にする）と fillRawOptions（Python が返した値と例を欄に入れる）の 2 つだけ。
+// 外から使うのは readRawOptions（欄の値を Python に渡す形にする）・fillRawOptions（Python が返した値と例を欄に入れる）・
+// openRuleAiWith（単純比較のタブの右クリックから、行・説明・選んだ文字を入れて「AI に式を頼む…」の小さな窓を開く。REQ-360）の 3 つだけ。
 // 欄の id はどちらの窓も同じ（rawopt- で始まる）。式の正しさはここでは判断しない（Python が確かめて、誤りの文を返す）。
 // 文字は textContent と value だけで入れる（HTML として扱わない）。例の文と式も Python から受け取る。
 // 「例から足す…」・置き換えの行を足す・外すは、この部品の中で欄を組み替える。外したときと例から足したときは、
@@ -9,6 +10,11 @@
 // 「AI に式を頼む…」（ADR-0218 決定8 / REQ-314）も、この部品の中で動く（小さな窓 #rawopt-ai-dialog。段は入力・確認・待つ間・結果）。
 // 送る・答えを読む・式を確かめるのは Python（ask_rule_ai・answer_rule_ai・close_rule_ai と rule_ai.done の知らせ）で、ここは描くだけ。
 // 「欄に入れる」（addRawRule）は欄に足して欄の外側へ change を送るだけで、保存も比較もしない。
+// 同じ式（置き換えは式と置き換える文字の組）が既に欄にあれば、例から足すときも「欄に入れる」ときも足さずに知らせる（ADR-0236 / REQ-353）。
+
+// ルールごとの有効・無効（REQ-359 / ADR-0240 決定1）。置き換えの表の「有効」のチェックと、無視する行の無効の式の集まり（ignoreOff）が
+// 持ち、readRawOptions の disabled で Python に渡す。式を書き換えたら新しいルールとして有効に戻す。比較の窓の「効いているルール」の
+// 一覧（compare.js）は、欄の外側（#rawopt-fields）へ rawopt-rule-toggle を送って切り替える（export は足さない）。
 
 import { call, on } from "./bridge.js";
 import { make, text } from "./dom.js";
@@ -21,16 +27,28 @@ const MAX_IGNORES = 20;
 
 let examples = { ignore: [], replace: [] }; // Python から受け取った例
 let bound = false;
+// 無効にした無視する行の式（REQ-359）。欄の文字の一部として持つ（置き換えの無効は、行の「有効」のチェックが持つ）。
+// 欄に無くなった式は、入力のたびに捨てる（式を書き換えたら新しいルールで有効）
+let ignoreOff = new Set();
 // 「AI に式を頼む…」: 今の確認・送信の番号（無ければ null）・「欄に入れる」に使う値（式・置き換える文字・種類だけ）・
 // 窓を開いた・閉じた回数（待っている間に閉じたとき、遅れて届いた答えを捨てるため）
 let aiId = null;
 let aiRule = null;
 let aiRound = 0;
+// 右クリックから開いたときの、選んだ文字（REQ-360）。「確認」で ask_rule_ai の 4 つ目の引数に渡す。閉じたら捨てる。無ければ null
+let aiSelection = null;
 const AI_STAGES = ["input", "confirm", "waiting", "result"];
 
-// 置き換えの表の 1 行（式・置き換える文字・「外す」）。
-function replacementRow(pattern, replacement) {
+// 置き換えの表の 1 行（有効のチェック・式・置き換える文字・「外す」）。enabled を省くと有効（REQ-359）。
+function replacementRow(pattern, replacement, enabled = true) {
   const tr = document.createElement("tr");
+  const enabledCell = document.createElement("td");
+  const enabledInput = make("input", "pilot-check", null);
+  enabledInput.type = "checkbox";
+  enabledInput.checked = enabled;
+  enabledInput.dataset.part = "enabled";
+  enabledInput.setAttribute("aria-label", $("rawopt-replace-enabled-head").textContent);
+  enabledCell.append(enabledInput);
   const patternCell = document.createElement("td");
   const patternInput = make("input", "pilot-input pilot-mono pilot-wide", null);
   patternInput.type = "text";
@@ -54,8 +72,55 @@ function replacementRow(pattern, replacement) {
   remove.type = "button";
   remove.dataset.action = "remove";
   buttonCell.append(remove);
-  tr.append(patternCell, textCell, buttonCell);
+  tr.append(enabledCell, patternCell, textCell, buttonCell);
   return tr;
+}
+
+// 無視する行の欄の、空でない行（両端の空白を除く。Python の欄の読み方と同じ）。
+function ignoreLines() {
+  return $("rawopt-ignore")
+    .value.split(/\r\n|\r|\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+
+// 欄に無くなった式を無効の集まりから捨て、残った数を返す（式を書き換えたら新しいルールで有効）。
+function pruneIgnoreOff() {
+  const present = new Set(ignoreLines());
+  ignoreOff = new Set(Array.from(ignoreOff).filter((pattern) => present.has(pattern)));
+  return ignoreOff.size;
+}
+
+// 無効にした無視する行の式があるときだけ、欄の下に注記を出す（文の雛形の {count} を数に直す）。
+function updateIgnoreDisabled() {
+  const count = pruneIgnoreOff();
+  const note = $("rawopt-ignore-disabled");
+  note.hidden = count === 0;
+  text(note, count === 0 ? "" : $("rawopt-ignore-disabled-template").textContent.replace("{count}", String(count)));
+}
+
+// 単純比較のタブの「効いているルール」の一覧（compare.js）がチェックを切り替えたときの知らせ。欄の無効を切り替え、窓に change を送る。
+function toggleRule(detail) {
+  if (detail.kind === "ignore") {
+    if (detail.enabled) {
+      ignoreOff.delete(detail.pattern);
+    } else {
+      ignoreOff.add(detail.pattern);
+    }
+    updateIgnoreDisabled();
+  } else if (detail.kind === "replace") {
+    for (const tr of replaceBody().rows) {
+      if (
+        tr.querySelector('input[data-part="pattern"]').value === detail.pattern &&
+        tr.querySelector('input[data-part="replacement"]').value === detail.replacement
+      ) {
+        tr.querySelector('input[data-part="enabled"]').checked = detail.enabled;
+      }
+    }
+  } else {
+    return;
+  }
+  announce();
 }
 
 function replaceBody() {
@@ -101,27 +166,62 @@ function ignoreCount() {
     .filter((line) => line.trim() !== "").length;
 }
 
+// 足す式が、無視する行の欄に既にあるか（各行を trim() して、足す式を trim() したものと同じものがあるか。空の式は重複としない）。
+function hasIgnore(pattern) {
+  const wanted = pattern.trim();
+  if (wanted === "") {
+    return false;
+  }
+  return $("rawopt-ignore")
+    .value.split(/\r\n|\r|\n/)
+    .some((line) => line.trim() === wanted);
+}
+
+// 足す組が、置き換えの表に既にあるか（式と置き換える文字の両方がちょうど同じ組。式が空の組は比べない）。
+function hasReplacement(pattern, replacement) {
+  if (pattern === "") {
+    return false;
+  }
+  return Array.from(replaceBody().rows).some(
+    (tr) =>
+      tr.querySelector('input[data-part="pattern"]').value === pattern &&
+      tr.querySelector('input[data-part="replacement"]').value === replacement,
+  );
+}
+
+// 「同じ式が既にあるため、足していません」の注記（#rawopt-duplicate）を出す・隠す。
+function showDuplicateNote(shown) {
+  $("rawopt-duplicate").hidden = !shown;
+}
+
 // 式を欄に足す（「欄に入れる」）。置き換えの表に 1 行足すか、無視する行の欄の最後に 1 行足し、欄の外側へ change を送る。
-// 同じ式が既に欄にあっても足す（判断は利用者）。欄が満ちていれば足さずに false。保存も比較もしない。
+// 足したら "added"。足さないときは理由を返す: 種類が違う "kind"・欄が満ちている "full"・同じ式が既に欄にある "duplicate"
+// （確かめる順は 種類 → 満ちている → 重複。ADR-0236）。保存も比較もしない。
 function addRawRule(kind, pattern, replacement) {
   if (kind === "replace") {
     if (replaceBody().rows.length >= MAX_REPLACEMENTS) {
-      return false;
+      return "full";
+    }
+    if (hasReplacement(pattern, replacement)) {
+      return "duplicate";
     }
     replaceBody().append(replacementRow(pattern, replacement));
     updateAddable();
   } else if (kind === "ignore") {
     if (ignoreCount() >= MAX_IGNORES) {
-      return false;
+      return "full";
+    }
+    if (hasIgnore(pattern)) {
+      return "duplicate";
     }
     const area = $("rawopt-ignore");
     const current = area.value.replace(/\n+$/, "");
     area.value = current === "" ? pattern : `${current}\n${pattern}`;
   } else {
-    return false;
+    return "kind";
   }
   announce();
-  return true;
+  return "added";
 }
 
 function aiDialog() {
@@ -161,7 +261,16 @@ function showAiRefused(message) {
   band.hidden = message === null || message === undefined || message === "";
 }
 
-function openAi() {
+// 選んだ文字（REQ-360）を持ち、小さな窓の入力の段の「消したい部分: …」に出す。null なら隠す。表示は textContent だけ。
+function setAiSelection(value) {
+  aiSelection = value;
+  text($("rawopt-ai-selection-text"), value === null ? "" : value);
+  $("rawopt-ai-selection").hidden = value === null;
+}
+
+// 小さな窓を開く（ボタンからも、右クリックの openRuleAiWith からも同じ。段・番号・確認と結果を捨てる・種類の確かめ・showModal）。
+// 選んだ文字は呼ぶ側が setAiSelection で決める（ここでは触らない）
+function openAiDialog() {
   aiRound += 1;
   aiId = null;
   aiRule = null;
@@ -169,6 +278,12 @@ function openAi() {
   showAiStage("input");
   updateAiKinds();
   aiDialog().showModal();
+}
+
+// 「AI に式を頼む…」のボタン。選んだ文字は無い（今までと同じ）
+function openAi() {
+  openAiDialog();
+  setAiSelection(null);
   $("rawopt-ai-lines").focus();
 }
 
@@ -178,6 +293,7 @@ async function closeAi() {
   const id = aiId;
   aiId = null;
   aiRule = null;
+  setAiSelection(null); // 窓を閉じたら、選んだ文字は捨てる（REQ-360）
   try {
     await call("close_rule_ai", id);
   } catch (error) {
@@ -194,7 +310,8 @@ async function closeAi() {
 async function askAi() {
   const round = aiRound;
   showAiRefused(null);
-  const result = await call("ask_rule_ai", $("rawopt-ai-lines").value, $("rawopt-ai-description").value, aiKind());
+  // 4 つ目は右クリックから開いたときの選んだ文字（ボタンから開いたときは null で、Python では None）
+  const result = await call("ask_rule_ai", $("rawopt-ai-lines").value, $("rawopt-ai-description").value, aiKind(), aiSelection);
   const info = result.ok ? result.rule_ai : null;
   if (round !== aiRound) {
     // 待っている間に窓を閉じた。出てきた確認は送らずに捨てる
@@ -247,6 +364,14 @@ async function sendAi() {
     // 待っていた確認が無かった（古い番号）。送っていないので、入力の段に戻る
     aiId = null;
     showAiStage("input");
+    return;
+  }
+  if (result.rule_ai.refused !== undefined) {
+    // 確認の後に設定が変わった・設定を読めなかったため、送っていない（REQ-371）。貼った行と説明は残して入力の段に戻り、断りの帯に文を出す。
+    // もう一度「確認」を押すと、今の設定で作った確認が出る
+    aiId = null;
+    showAiStage("input");
+    showAiRefused(result.rule_ai.refused);
   }
 }
 
@@ -295,17 +420,19 @@ function showAiResult(result) {
   (ok ? $("rawopt-ai-skip") : $("rawopt-ai-result-close")).focus();
 }
 
-// 「欄に入れる」。欄に足してから閉じる（保存も比較もしない）。欄が満ちていて足せなければ、閉じずに理由を出す。
+// 「欄に入れる」。欄に足してから閉じる（保存も比較もしない）。欄が満ちている・同じ式が既にあって足せなければ、閉じずに理由を出す。
 async function addAiRule() {
   const rule = aiRule;
   if (rule === null) {
     return;
   }
-  if (addRawRule(rule.kind, rule.pattern, rule.replacement)) {
+  const added = addRawRule(rule.kind, rule.pattern, rule.replacement);
+  if (added === "added") {
     await closeAi();
     return;
   }
-  showAiResult({ ok: false, message: $("rawopt-ai-full").textContent });
+  const reason = added === "duplicate" ? $("rawopt-ai-duplicate") : $("rawopt-ai-full");
+  showAiResult({ ok: false, message: reason.textContent });
 }
 
 function bindAiOnce() {
@@ -345,9 +472,15 @@ function bindOnce() {
     if (item === undefined) {
       return;
     }
+    if (hasIgnore(item.pattern)) {
+      // 同じ式が既にある。欄は変えずに注記を出す（選択の change は外側へ届くが、欄は同じなので窓の動きは変わらない）
+      showDuplicateNote(true);
+      return;
+    }
     const area = $("rawopt-ignore");
     const current = area.value.replace(/\n+$/, "");
     area.value = current === "" ? item.pattern : `${current}\n${item.pattern}`;
+    showDuplicateNote(false);
     // 選択の change は外側へ届くので、窓はここで足した後の値を読む
   });
   $("rawopt-replace-example").addEventListener("change", (event) => {
@@ -357,8 +490,20 @@ function bindOnce() {
     if (item === undefined || replaceBody().rows.length >= MAX_REPLACEMENTS) {
       return;
     }
+    if (hasReplacement(item.pattern, item.replacement)) {
+      showDuplicateNote(true);
+      return;
+    }
     replaceBody().append(replacementRow(item.pattern, item.replacement));
     updateAddable();
+    showDuplicateNote(false);
+  });
+  // 欄が変わったら注記を隠す（欄に書く・外す・「欄に入れる」）。例の選択から届いた change は除く（出した注記がその場で消えるため）
+  $("rawopt-fields").addEventListener("input", () => showDuplicateNote(false));
+  $("rawopt-fields").addEventListener("change", (event) => {
+    if (event.target.id !== "rawopt-ignore-example" && event.target.id !== "rawopt-replace-example") {
+      showDuplicateNote(false);
+    }
   });
   $("rawopt-replace-add").addEventListener("click", () => {
     if (replaceBody().rows.length >= MAX_REPLACEMENTS) {
@@ -367,7 +512,9 @@ function bindOnce() {
     const row = replacementRow("", "");
     replaceBody().append(row);
     updateAddable();
-    row.querySelector("input").focus();
+    showDuplicateNote(false);
+    // 行の先頭は「有効」のチェック（REQ-359）。フォーカスは式の欄へ
+    row.querySelector('input[data-part="pattern"]').focus();
   });
   replaceBody().addEventListener("click", (event) => {
     const button = event.target.closest('button[data-action="remove"]');
@@ -379,17 +526,47 @@ function bindOnce() {
     announce();
   });
   $("rawopt-space").addEventListener("change", updateSpaceNote);
+  // 無効のルール（REQ-359）。式か置き換える文字を書き換えたら、その行は新しいルールとして有効に戻す（change より先の input で戻す）。
+  // 無視する行の欄は、書き換えたときに無効の式を捨てて注記の数を直す。一覧のチェックは rawopt-rule-toggle で届く
+  replaceBody().addEventListener("input", (event) => {
+    const part = event.target.dataset ? event.target.dataset.part : undefined;
+    if (part === "pattern" || part === "replacement") {
+      event.target.closest("tr").querySelector('input[data-part="enabled"]').checked = true;
+    }
+  });
+  $("rawopt-ignore").addEventListener("input", updateIgnoreDisabled);
+  $("rawopt-fields").addEventListener("rawopt-rule-toggle", (event) => toggleRule(event.detail));
+  // 単純比較のタブの右クリックから足すルール（REQ-366 §2〜§4）。今の addRawRule で欄に足し、結果（"added"・"full"・"duplicate"・"kind"）を
+  // detail.result に返す。足せたら announce の change が窓に届く（保存はしない）。同じ式が既にあれば足さずに注記（#rawopt-duplicate）を出す
+  $("rawopt-fields").addEventListener("rawopt-rule-add", (event) => {
+    const { kind, pattern, replacement } = event.detail;
+    const result = addRawRule(kind, pattern, replacement);
+    showDuplicateNote(result === "duplicate");
+    event.detail.result = result;
+  });
 }
 
 // 欄の値（Python の read_raw_form の形）。置き換えの行は空の行も含めて並びのまま渡す（空の式の組は Python が捨てる）。
 // 前後の行数は Number(value) を送るだけで、範囲は判断しない（Python が 0〜20 を確かめて誤りの文を返す。REQ-228 §2）。
+// disabled（REQ-359）は無効のルール。無視する行は欄にある無効の式、置き換えは「有効」を切った行の [式, 置き換える文字]
+// （欄に無いものは送らない。送っても Python が捨てる）
 export function readRawOptions() {
+  pruneIgnoreOff();
   return {
     ignore_lines: $("rawopt-ignore").value,
     replacements: Array.from(replaceBody().rows).map((tr) => [
       tr.querySelector('input[data-part="pattern"]').value,
       tr.querySelector('input[data-part="replacement"]').value,
     ]),
+    disabled: {
+      ignore_lines: Array.from(ignoreOff),
+      replacements: Array.from(replaceBody().rows)
+        .filter((tr) => !tr.querySelector('input[data-part="enabled"]').checked)
+        .map((tr) => [
+          tr.querySelector('input[data-part="pattern"]').value,
+          tr.querySelector('input[data-part="replacement"]').value,
+        ]),
+    },
     whitespace: $("rawopt-space").value,
     ignore_blank_lines: $("rawopt-blank").checked,
     ignore_case: $("rawopt-case").checked,
@@ -406,7 +583,16 @@ export function fillRawOptions(values, items) {
   fillExamples($("rawopt-ignore-example"), examples.ignore);
   fillExamples($("rawopt-replace-example"), examples.replace);
   $("rawopt-ignore").value = values.ignore_lines;
-  replaceBody().replaceChildren(...values.replacements.map(([pattern, replacement]) => replacementRow(pattern, replacement)));
+  // 無効のルール（REQ-359）。disabled が無い値（古い呼び出し）は全部有効
+  const off = values.disabled || { ignore_lines: [], replacements: [] };
+  ignoreOff = new Set(off.ignore_lines);
+  const replaceOff = new Set(off.replacements.map(([pattern, replacement]) => JSON.stringify([pattern, replacement])));
+  replaceBody().replaceChildren(
+    ...values.replacements.map(([pattern, replacement]) =>
+      replacementRow(pattern, replacement, !replaceOff.has(JSON.stringify([pattern, replacement]))),
+    ),
+  );
+  updateIgnoreDisabled();
   $("rawopt-space").value = values.whitespace;
   $("rawopt-blank").checked = values.ignore_blank_lines;
   $("rawopt-case").checked = values.ignore_case;
@@ -415,4 +601,22 @@ export function fillRawOptions(values, items) {
   $("rawopt-algorithm").value = values.algorithm;
   updateAddable();
   updateSpaceNote();
+  showDuplicateNote(false);
+}
+
+// 「AI に式を頼む…」の小さな窓を、値を入れて開く（REQ-360 / ADR-0240 決定3）。ボタンから開くときと同じ開き方で、
+// 行の欄・説明の欄・種類（replace か ignore）に値を入れ、選んだ文字は別に持って「消したい部分: …」に出す（確認で Python に渡す）。
+// 送るのは「送る内容を確かめる…」から先で、ここでは送らない。窓が既に開いていれば何もしない。フォーカスは「送る内容を確かめる…」
+export function openRuleAiWith({ lines, description, kind, selection }) {
+  bindOnce();
+  if (aiDialog().open) {
+    return;
+  }
+  openAiDialog();
+  $("rawopt-ai-lines").value = lines;
+  $("rawopt-ai-description").value = description;
+  $(kind === "ignore" ? "rawopt-ai-kind-ignore" : "rawopt-ai-kind-replace").checked = true;
+  updateAiKinds(); // 置き換えが 20 組で満ちていれば、今の決まりで「行ごと比べない」に切り替わる
+  setAiSelection(selection);
+  $("rawopt-ai-check").focus();
 }

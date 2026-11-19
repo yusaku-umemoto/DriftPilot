@@ -34,14 +34,18 @@ const shown = {
   followUp: null,
   turns: 0,
   clear: null,
+  prefill: null, // 見た「決まった質問を入れる合図」の番号（view.ai.prefill.seq。REQ-366 §6）
   preview: null,
   result: 0,
   apiError: null, // 描いた API のエラーの文の番号（ADR-0168 決定5）
+  character: false, // やり取りを描いたときの characterOn（変わったら番号が同じでも作り直す。ADR-0245 決定2）
 };
 let llmCopy = null; // 最初の答えのコピーの文（Python が渡した、赤字の印を外した答え）
 // 届いたところまでの答え（ADR-0157 決定5〜7）。吹き出しの要素・描いた（か消した）番号・結果を読んだ後に消す印
 let partialBubble = null;
 let partialAvatar = null; // 途中の答えの吹き出しの上の顔と名前の行（キャラクターがオンのときだけ。ADR-0181 決定1）
+let partialCharacter = false; // 途中の答えの吹き出しを作ったときの characterOn（変わったら足す・外す。ADR-0245 決定2）
+let lastPartial = null; // 最後に描いた途中の答えの引数 [blocks, stoppedNote, thinking]（顔の行を足すときに描き直す）
 let partialRevision = 0;
 let partialDropAfterResult = false;
 // AI が考えている内容（ADR-0169 決定4）。折りたたみの要素（1つを使い回す）・自動でたたんだか・
@@ -113,15 +117,19 @@ function render(next) {
   voice.start();
   aiBusy = next.ai_busy;
   characterOn = next.character === true;
-  // キャラクターがオンなら、空の面の案内を Mirarin の文に替える（ADR-0181 決定2。オフのときは触らない）
+  // キャラクターがオンなら、空の面の案内を Mirarin の文に替える（ADR-0181 決定2）。
+  // オフなら元の文に戻す（設定の窓で保存したら開いている窓も変わる。ADR-0245 決定2。元の文は隠した #ai-empty-plain から読む）
   if (characterOn) {
     text($("ai-empty"), $("ai-empty-character").textContent);
+  } else {
+    text($("ai-empty"), $("ai-empty-plain").textContent);
   }
   syncAvatar();
   renderFirstRequest(next.follow_up);
   renderFollowUp(next.follow_up);
   renderApiError(next.api_error ?? null);
   renderPartial(next);
+  syncPartialCharacter();
   renderThinking(next);
   paintBusy();
   renderAi(next.ai);
@@ -162,8 +170,10 @@ function renderFollowUp(followUp) {
     note("follow-up-note", null);
     return;
   }
-  if (followUp.revision !== shown.followUp) {
+  // キャラクターの設定が変わったときも作り直す（顔と名前の行を足す・外す。欄を空にする条件と下まで送る動きは変えない。ADR-0245 決定2）
+  if (followUp.revision !== shown.followUp || shown.character !== characterOn) {
     shown.followUp = followUp.revision;
+    shown.character = characterOn;
     const fragment = document.createDocumentFragment();
     for (const turn of followUp.turns) {
       if (turn.blocks) {
@@ -242,10 +252,12 @@ function chatAtBottom() {
 function paintPartial(blocks, stoppedNote, thinking) {
   const follow = chatAtBottom();
   const hasAnswer = Array.isArray(blocks) && blocks.length > 0;
+  lastPartial = [blocks, stoppedNote, thinking];
   if (hasAnswer || stoppedNote) {
     if (partialBubble === null) {
       partialBubble = bubble("ai", answerLabel());
       $("follow-up-turns").after(partialBubble);
+      partialCharacter = characterOn;
       // キャラクターがオンなら、吹き出しの直前に顔と名前の行を足す（ADR-0181 決定1。外すときは一緒に外す）
       if (characterOn) {
         partialAvatar = avatarRow();
@@ -365,6 +377,25 @@ function renderThinking(next) {
   }
 }
 
+// キャラクターの設定が変わったとき、届いている途中の答えの吹き出しの上の顔と名前の行を外す・足す（ADR-0245 決定2）。
+// 吹き出しの中身と送信には触らない（足すときは、同じ引数でもう一度描いて、吹き出しの前に行を作る）。
+function syncPartialCharacter() {
+  if (partialBubble === null || partialCharacter === characterOn) {
+    return;
+  }
+  partialCharacter = characterOn;
+  if (!characterOn) {
+    dropPartialAvatar();
+  } else if (lastPartial !== null) {
+    partialBubble.remove();
+    partialBubble = null;
+    paintPartial(...lastPartial);
+  }
+  if (thinkingBox !== null && thinkingLive) {
+    placeThinking(partialBubble, partialBubble === null);
+  }
+}
+
 // 途中の答えの吹き出しの上の顔と名前の行を外す（吹き出しを外すときに一緒に呼ぶ）。
 function dropPartialAvatar() {
   if (partialAvatar !== null) {
@@ -461,6 +492,19 @@ function renderAi(ai) {
     }
     shown.clear = ai.clear;
   }
+  // 単純比較の 1 行だけを聞く合図（ai.prefill。REQ-366 §6）。番号が変わったときだけ、欄を決まった質問で置き換えて欄に移る。
+  // 最初の描画で見た番号は使わない（窓を開いただけでは入れない）。送るのは利用者が送ったときだけ（ここでは送らない）。
+  // 比較の窓と AI の窓のどちらも、この部品で同じに動く
+  const prefill = ai.prefill ?? null;
+  if (prefill !== null) {
+    if (shown.prefill === null) {
+      shown.prefill = prefill.seq;
+    } else if (prefill.seq !== shown.prefill) {
+      shown.prefill = prefill.seq;
+      question.value = prefill.text;
+      question.focus();
+    }
+  }
   renderAsk();
 }
 
@@ -503,6 +547,12 @@ function renderAsk() {
   const reasons = { send: view.ai.send_reason ?? null, ask: null, shown: view.ai.shown_reason ?? null };
   const reason = reasons[mode];
   $("ai-ask").title = !ready[mode] && reason !== null ? reason : "";
+  // 入力欄の中の送信のボタン（REQ-364）。#ai-ask と同じ値（押せるか・押せない理由）から決める。送れるのは、
+  // #ai-ask が押せて、欄に空白以外の文字があり、欄が使えるときだけ（空の欄の定型の質問は #ai-ask と Shift+Enter のまま）。
+  // 押せない理由があるときはその同じ文を title に、なければ名前（aria-label。ページが data-label で入れた文）を出す
+  const send = $("follow-up-send");
+  send.disabled = $("ai-ask").disabled || mode === "send" || question.disabled;
+  send.title = mode !== "send" && $("ai-ask").title !== "" ? $("ai-ask").title : (send.getAttribute("aria-label") ?? "");
   // 表示が前の答えと違うとき、欄に文字があるときだけ注意を出す（新しい質問として送り、前のやり取りは消える）
   note("ai-target-note", question.value.trim() !== "" ? (view.ai.target_note ?? null) : null);
 }
@@ -679,6 +729,12 @@ export function createAiView(options) {
     }
     event.preventDefault();
     if (!$("ai-ask").disabled) {
+      aiAction();
+    }
+  });
+  // 入力欄の中の送信のボタン（REQ-364）。上の Shift+Enter と同じ aiAction を呼ぶだけ（新しい送り方は作らない）
+  $("follow-up-send").addEventListener("click", () => {
+    if (!$("follow-up-send").disabled) {
       aiAction();
     }
   });

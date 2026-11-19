@@ -2,8 +2,11 @@
 
 窓ごとに RuleAi を 1 つ持つ(compare_api.CompareApi・settings_api.SettingsApi)。窓の状態(比較の門・保存)には触らない。
 
-- ask(lines, description, kind): 設定を読み(押すたびに読む)、貼った文と説明を確かめ、貼った行を変更後の全文と同じ判定
+- ask(lines, description, kind, selection=None): 設定を読み(押すたびに読む)、貼った文と説明を確かめ、貼った行を変更後の全文と同じ判定
   (build_after_text。伏せる・判定できない行を除く・設定の秘密の語)に通して、送る前の確認の中身を返す。送らない
+  selection は単純比較のタブで選んだ文字(REQ-360)。None なら今と 1 文字も同じ。あるときは、今の確かめの後に、空・200 字超・改行・
+  見えない文字・伏せる文字・証明書や鍵(説明と同じ check_question)・貼った元の行に無い、を確かめ、伏せた後の送る行にそのまま
+  残っていなければ断る(selection_masked)。断るときは決まった文だけを返す(選んだ文字・行は入れない)。送るときは「消したい部分: …」の 1 行を足す
 - answer(number, yes): 「送信する」(yes が True)のときだけ、確認に出した文をスレッドで 1 回だけ送る。答えが届いたら、
   そのスレッドで読み取りと式の確かめをして、画面へ {"type": "rule_ai.done", "id": 番号, "result": …} を知らせる
 - close(number)・closed(): 小さな窓・窓を閉じたとき。待っている確認を捨て、送信中なら取り消しの印を付けて元の行を捨てる。
@@ -16,7 +19,7 @@
 """
 
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,7 +27,7 @@ from driftpilot.gui_web.bridge import _failure
 from driftpilot.llm_analyzer import LLMClient, LLMConnectionError, LLMResponseError, normalize_newlines
 from driftpilot.llm_analyzer.follow_up import MAX_PROMPT_CHARS, check_question, prompt_too_long
 from driftpilot.llm_analyzer.masking import Masker, has_unseen_char, normalize_words
-from driftpilot.llm_analyzer.payload import build_after_text
+from driftpilot.llm_analyzer.payload import FULL_TEXT_OMITTED, build_after_text
 from driftpilot.llm_analyzer.rule_suggestion import KINDS, build_rule_prompt, check_rule, read_rule_answer
 from driftpilot.llm_settings import SettingsError, display_model, load_settings
 from driftpilot.messages import (
@@ -36,9 +39,11 @@ from driftpilot.messages import (
     RULE_AI_NOT_COMPARED,
     RULE_AI_NOTE,
     RULE_AI_PROMPT_TITLE,
+    RULE_AI_SELECTION_REFUSED,
     RULE_AI_SEND,
     RULE_AI_TITLE,
     RULE_AI_UNSEEN,
+    REREAD_NOT_SENT,
     gui_web_call_failed,
     rule_ai_destination,
     rule_ai_failed,
@@ -51,8 +56,9 @@ from driftpilot.messages import (
     rule_ai_unavailable,
     rule_ai_unreadable,
 )
+from driftpilot.raw_keys import MAX_PATTERN_CHARS
 from driftpilot.screen_model.batch_model import effective_base_url
-from driftpilot.screen_model.model import plan_llm
+from driftpilot.screen_model.model import SendBasis, basis_change, current_send_basis, plan_llm, send_basis
 from driftpilot.screen_model.settings_model import destination_of
 
 # Python から画面への知らせの種類(static/js/raw_options.js が受ける)
@@ -76,6 +82,11 @@ class _Pending:
     client: LLMClient
     kind: str
     lines: tuple[str, ...]
+    # 送る直前の読み直しに使う(REQ-371)。確認を出したときの設定の値と、送る文を作り直す入力(説明・選んだ文字)。
+    # 元の行と同じく確認の間だけ持ち、送る・送らない・閉じるときに捨てる
+    basis: SendBasis | None = None
+    description: str = ""
+    selection: str | None = None
 
 
 class _Asking:
@@ -111,15 +122,23 @@ class RuleAi:
 
     # --- 画面から(窓の公開のメソッドが _guarded で呼ぶ) ---
 
-    def ask(self, lines: Any, description: Any, kind: Any) -> dict[str, Any]:
-        """送る前の確認の中身を返す(送らない)。送れないときは理由の文だけ。形の違う引数は不正な呼び出し。"""
-        if not isinstance(lines, str) or not isinstance(description, str) or kind not in KINDS:
+    def ask(self, lines: Any, description: Any, kind: Any, selection: Any = None) -> dict[str, Any]:
+        """送る前の確認の中身を返す(送らない)。送れないときは理由の文だけ。形の違う引数は不正な呼び出し。
+
+        selection は単純比較のタブで選んだ文字(REQ-360)。None なら今と 1 文字も同じ動き。
+        """
+        if (
+            not isinstance(lines, str)
+            or not isinstance(description, str)
+            or kind not in KINDS
+            or not (selection is None or isinstance(selection, str))
+        ):
             return _failure(gui_web_call_failed())
         with self._lock:
             if self._closed:
                 return self._ok(None)
             self._drop()  # 新しい確認は、前の確認と送信を取り消す
-            refused, pending, view = self._prepare(lines, description, kind)
+            refused, pending, view = self._prepare(lines, description, kind, selection)
             if refused is not None:
                 return self._ok({"refused": refused})
             assert pending is not None and view is not None
@@ -137,6 +156,10 @@ class RuleAi:
                 if not isinstance(yes, bool):
                     return _failure(gui_web_call_failed())
                 return self._ok(None)  # 送らない。元の行は捨てた
+            # 送る直前に設定を読み直して、確認を出したときと比べる(REQ-371 / ADR-0245 決定1)。違えば送らず、元の行は捨てる
+            stopped = self._reread(pending)
+            if stopped is not None:
+                return self._ok({"refused": stopped})
             asking = _Asking(pending.number, pending.kind, pending.lines)
             self._asking = asking
             thread = threading.Thread(
@@ -192,8 +215,81 @@ class RuleAi:
             asking.lines = ()
             self._asking = None
 
+    @staticmethod
+    def _check_selection(selection: str, lines: tuple[str, ...], words: Sequence[str]) -> str | None:
+        """選んだ文字を、送る前に確かめる(REQ-360)。断る理由の種類(RULE_AI_SELECTION_REFUSED のキー)か、送ってよければ None。
+
+        空・200 字超・改行 → 見えない文字・伏せる文字・証明書や鍵(説明と同じ check_question。上限は式と同じ 200 字)
+        → 貼った元の行のどれにも無い。選んだ文字・行は返さない。
+        """
+        if not selection.strip():
+            return "blank"
+        if len(selection) > MAX_PATTERN_CHARS:
+            return "too_long"
+        if "\n" in selection or "\r" in selection:
+            return "newline"
+        refusal = check_question(selection, words, max_chars=MAX_PATTERN_CHARS)
+        if refusal is not None:
+            return refusal
+        if not any(selection in line for line in lines):
+            return "selection_not_found"
+        return None
+
+    def _reread(self, pending: _Pending) -> str | None:
+        """ロックの中で呼ぶ。承認した送信の直前に、設定を読み直して確認を出したときと比べる(REQ-371)。送ってよければ None、送らないなら知らせの文。
+
+        使用中のプロファイルの接続先かモデル・上限が違えば送らない。秘密の語が違えば、今の語で送る文を _compose で作り直し、
+        断られるか確認の文と 1 字でも違えば送らない(同じなら送ってよい)。設定を読めないときは、理由の文(_prepare と同じ)。
+        """
+        if pending.basis is None:
+            return REREAD_NOT_SENT["secret_words"]  # 起きないはずの形。確かめられないので送らない
+        try:
+            now = current_send_basis(**self._where)
+        except SettingsError as exc:
+            return str(exc)
+        kind = basis_change(pending.basis, now)
+        if kind in ("profile", "limits"):
+            return REREAD_NOT_SENT[kind]
+        if kind == "secret_words":
+            try:
+                composed = self._compose(
+                    normalize_words(now.secret_words), pending.lines, pending.description, pending.kind, pending.selection
+                )
+            except Exception:  # noqa: BLE001 - 作り直せないときも、送らない
+                return REREAD_NOT_SENT["secret_words"]
+            if isinstance(composed, str) or composed[0] != pending.prompt:
+                return REREAD_NOT_SENT["secret_words"]
+        return None
+
+    def _compose(
+        self, words: Sequence[str], lines: tuple[str, ...], description: str, kind: str, selection: str | None
+    ) -> str | tuple[str, Any]:
+        """今の確かめと組み立て(秘密の語 words を受ける)。断るときは理由の文、送れるときは (送る文, 伏せた後の全文の節)。ロックの中で呼ぶ。
+
+        _prepare(確認を作る)と _reread(承認の直前に作り直す)が同じ道を通る(REQ-371)。
+        """
+        refusal = check_question(description, words, max_chars=MAX_DESCRIPTION_CHARS)
+        if refusal is not None:
+            return RULE_AI_DESCRIPTION_REFUSED.get(refusal, RULE_AI_DESCRIPTION_REFUSED["unsent"])
+        if selection is not None:
+            reason = self._check_selection(selection, lines, words)
+            if reason is not None:
+                return RULE_AI_SELECTION_REFUSED[reason]
+        after = build_after_text(before_lines=[], after_lines=lines, masker=Masker(secret_words=words))
+        if after.lines == 0:
+            return RULE_AI_NO_SENDABLE
+        if selection is not None:
+            # 伏せた後の、送る行の中に選んだ文字がそのまま残っているか(省略の 1 行の文字に当たって通らないよう、その行は見ない)
+            sent_lines = [line for line in after.body.split("\n") if line != FULL_TEXT_OMITTED]
+            if not any(selection in line for line in sent_lines):
+                return RULE_AI_SELECTION_REFUSED["selection_masked"]
+        prompt = build_rule_prompt(kind, description, after.body, after.omitted, selection)
+        if prompt_too_long(prompt):
+            return rule_ai_prompt_too_long(MAX_PROMPT_CHARS)
+        return prompt, after
+
     def _prepare(
-        self, pasted: str, description: str, kind: str
+        self, pasted: str, description: str, kind: str, selection: str | None = None
     ) -> tuple[str | None, _Pending | None, dict[str, Any] | None]:
         """(送れない理由の文, 確認を待つもの, 確認の中身)。ロックの中で呼ぶ。"""
         try:
@@ -214,18 +310,13 @@ class RuleAi:
         if has_unseen_char(text):
             return RULE_AI_UNSEEN, None, None
         words = normalize_words(plan.send.extra_secret_words)
-        refusal = check_question(description, words, max_chars=MAX_DESCRIPTION_CHARS)
-        if refusal is not None:
-            return RULE_AI_DESCRIPTION_REFUSED.get(refusal, RULE_AI_DESCRIPTION_REFUSED["unsent"]), None, None
-        after = build_after_text(before_lines=[], after_lines=lines, masker=Masker(secret_words=words))
-        if after.lines == 0:
-            return RULE_AI_NO_SENDABLE, None, None
-        prompt = build_rule_prompt(kind, description, after.body, after.omitted)
-        if prompt_too_long(prompt):
-            return rule_ai_prompt_too_long(MAX_PROMPT_CHARS), None, None
+        composed = self._compose(words, lines, description, kind, selection)
+        if isinstance(composed, str):
+            return composed, None, None
+        prompt, after = composed
         self._serial += 1
         number = self._serial
-        pending = _Pending(number, prompt, plan.send.client, kind, lines)
+        pending = _Pending(number, prompt, plan.send.client, kind, lines, send_basis(settings), description, selection)
         view = {
             "id": number,
             "title": RULE_AI_TITLE,

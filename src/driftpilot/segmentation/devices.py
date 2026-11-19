@@ -19,6 +19,17 @@ Cisco ASA の形(`ASA_PROMPT`。`fw-01/pri/act# `・`fw-01/sec/stby# `・`fw-01/
 機器の名前は行の頭から状態の語の終わりまで(`fw-01/pri/act`。設定モード・終端の記号・空白は含まない。一般の候補で決まった短い ASA のプロンプトの名前と同じ決まり)。
 優先度か状態が違う形(`fw-01/pri/act` と `fw-01/sec/stby`)は別の機器(フェイルオーバーの 2 台。ADR-0214 決定7)。
 
+Huawei VRP の形(`<名前>`・`[名前]`・`[~名前]`・`[*名前]`・`[名前-<ビュー>]`。ADR-0248 決定1・ADR-0231 決定4)も見分ける。
+形の見分けと正規表現は `splitter` のもの(`_huawei_match`・`_huawei_forms`)を使う。機器の名前は `名前`(`~`・`*`・`-<ビュー>` を含めない。
+`<sw1>` と `[~sw1-GigabitEthernet0/0/1]` は同じ 1 台)。`[名前-ビュー]` は、採った名前のうち `名前-` で始まる最も長いものの台に入れる。
+基準は今の形と同じ(出るのが 2 回以上・コマンドの形が 1 回以上)で、Huawei だけにもう 1 つ足す: `<名前>` の直後に空白なしでコマンドが続く行が 1 回以上あること
+(富士通 Si-R のエラーの行 `<ERROR> xxx : Unknown command` を機器と取り違えないため。本物の Huawei のログは全行で `<名前>` の直後に空白なしでコマンドが続く。ADR-0231 の測定)。
+閉じタグ `</名前>` のある名前の `<名前>` の行は数えない(`splitter` と同じ)。
+
+F5 BIG-IP の形(tmsh の `<人>@(<名前>)(…)(tmos)# `・bash の `[<人>@<名前>:<状態>] <場所> # `。ADR-0248 決定1・ADR-0235 決定4)も同じ基準で見分ける。
+機器の名前は `<名前>`(人・状態・パーティション・場所を含めない。tmsh と bash が混ざっても同じ名前なら 1 台)。
+F5 の形の行は F5 の規則だけで読み、ほかの形では数えない(XR と同じ)。Huawei の名前と採った行も、ほかの形では数えない。
+
 今の区間の切り分け(`detect_prompt`・`split_log`)は変えない。ここは比較の窓の知らせと書き出しのためだけの部品。
 行の中身は変えない(見分けるときだけ、ページ送りの印と制御文字を外した行を見る)。
 """
@@ -37,9 +48,12 @@ from driftpilot.segmentation.splitter import (
     PAGER,
     _asa_command,
     _erase_pager,
+    _f5_match,
     _fortigate_match,
     _host,
     _host_head_ok,
+    _huawei_forms,
+    _huawei_match,
     _strip_dollar,
     _within_limit,
     _xr_command,
@@ -193,12 +207,90 @@ def _xr_hosts(plains: list[str]) -> list[str]:
     return [host for host in total if score[host] >= 1 and total[host] >= 2]
 
 
-def _line_host(plain: str, known: frozenset[str]) -> str | None:
-    """この行が、機器と決まった名前のプロンプトの行ならその名前。そうでなければ None。"""
+def _f5_hosts(plains: list[str]) -> list[str]:
+    """F5 の形のプロンプトで機器と決まった名前(ログに最初に出た順)。人・状態・パーティション・場所は名前に含めない。tmsh と bash はまとめて数える。"""
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in plains:
+        m = _f5_match(line)
+        if not m:
+            continue
+        host, _prefix, rest = m
+        total[host] += 1
+        if COMMAND_SHAPED.match(rest.strip()):
+            score[host] += 1
+    return [host for host in total if score[host] >= 1 and total[host] >= 2]
+
+
+def _huawei_name(plain: str, names_by_length: list[str]) -> str | None:
+    """この行が、名前の組に入る Huawei の形のプロンプトの行ならその名前(`~`・`*`・`-ビュー` を含めない)。そうでなければ None。
+
+    `<名前>` はその名前。`[名前]`・`[~名前]`・`[*名前]`・`[名前-ビュー]` は、括弧の中と同じか `名前-` で始まる最も長い名前
+    (`names_by_length` は長い順)。
+    """
+    m = _huawei_match(plain)
+    if not m:
+        return None
+    kind, host, _prefix, _rest = m
+    if kind == "user":
+        return host if host in names_by_length else None
+    for name in names_by_length:
+        if host == name or host.startswith(name + "-"):
+            return name
+    return None
+
+
+def _huawei_hosts(plains: list[str]) -> list[str]:
+    """Huawei の形のプロンプトで機器と決まった名前(ログに最初に出た順)。
+
+    候補は、`<名前>` の形でコマンドを打った行があり(閉じタグのある名前は除く)、その直後に空白なしでコマンドが続く行が 1 回以上ある名前。
+    その中で、出るのが 2 回以上・コマンドの形が 1 回以上のものを採る。
+    """
+    _forms, _total, _score, user = _huawei_forms(plains)
+    glued: collections.Counter = collections.Counter()
+    for line in plains:
+        m = _huawei_match(line)
+        if not m or m[0] != "user" or user[m[1]] < 1:
+            continue
+        after = line[len(m[2]) :]
+        if after[:1] not in ("", " ") and COMMAND_SHAPED.match(m[3].strip()):
+            glued[m[1]] += 1
+    names = sorted((h for h in glued if glued[h] >= 1), key=len, reverse=True)
+    if not names:
+        return []
+    total: collections.Counter = collections.Counter()
+    score: collections.Counter = collections.Counter()
+    for line in plains:
+        name = _huawei_name(line, names)
+        if name is None:
+            continue
+        m = _huawei_match(line)
+        shaped = bool(COMMAND_SHAPED.match(m[3].strip()))
+        if m[0] == "user" and not shaped:
+            continue  # `<名前>` の行は、後ろがコマンドの形のときだけ数える
+        total[name] += 1
+        if shaped:
+            score[name] += 1
+    return [name for name in total if score[name] >= 1 and total[name] >= 2]
+
+
+def _line_host(plain: str, known: frozenset[str], huawei: tuple[str, ...] = ()) -> str | None:
+    """この行が、機器と決まった名前のプロンプトの行ならその名前。そうでなければ None。
+
+    huawei は、採った Huawei の名前(長い順)。XR → F5 → Huawei → 今までの順に見る。
+    """
     m = _xr_match(plain)
     if m:
         # XR の形の行は XR の規則だけで読む(ほかの規則へは進まない)
         return m.group("host") if m.group("host") in known else None
+    m5 = _f5_match(plain)
+    if m5:
+        # F5 の形の行は F5 の規則だけで読む(XR と同じ)
+        return m5[0] if m5[0] in known else None
+    if huawei:
+        name = _huawei_name(plain, list(huawei))
+        if name is not None:
+            return name
     m = CANDIDATE.match(plain)
     if m and _within_limit(m.group("prefix")):
         key = device_key(m.group("prefix"))
@@ -219,21 +311,36 @@ def _line_host(plain: str, known: frozenset[str]) -> str | None:
     return None
 
 
-def _hosts_in_order(lines: list[str]) -> tuple[list[str], list[str]]:
+def _hosts_in_order(lines: list[str]) -> tuple[list[str], list[str], tuple[str, ...]]:
+    """(機器の名前を最初に出た順, 見分けるための行, 採った Huawei の名前を長い順)。"""
     plains = [_plain(line) for line in lines]
-    found = set(_general_hosts(plains)) | set(_fortigate_hosts(plains)) | set(_xr_hosts(plains)) | set(_bracket_hosts(plains)) | set(_asa_hosts(plains)) | set(_ax_hosts(plains))
+    # F5 の bash の形(`[root@bigip1:Active] config # `)は Huawei の括弧の形にも当たるので、F5 の形の行は Huawei の数えるところから除く
+    not_f5 = [p for p in plains if not _f5_match(p)]
+    huawei = tuple(sorted(_huawei_hosts(not_f5), key=len, reverse=True))
+    # ほかの形には、F5 の形の行と、採った Huawei の名前の行を除いた並びを渡す(二重に数えない)
+    rest = [p for p in not_f5 if not (huawei and _huawei_name(p, list(huawei)) is not None)]
+    found = (
+        set(_f5_hosts(plains))
+        | set(huawei)
+        | set(_general_hosts(rest))
+        | set(_fortigate_hosts(rest))
+        | set(_xr_hosts(rest))
+        | set(_bracket_hosts(rest))
+        | set(_asa_hosts(rest))
+        | set(_ax_hosts(rest))
+    )
     known = frozenset(found)
     order: list[str] = []
     for plain in plains:
-        host = _line_host(plain, known)
+        host = _line_host(plain, known, huawei)
         if host is not None and host not in order:
             order.append(host)
-    return order, plains
+    return order, plains, huawei
 
 
 def find_devices(text: str) -> tuple[str, ...]:
     """機器の名前を、ログに最初に出た順に返す。見つからなければ空。"""
-    order, _plains = _hosts_in_order(_lines(text))
+    order, _plains, _huawei = _hosts_in_order(_lines(text))
     return tuple(order)
 
 
@@ -244,7 +351,7 @@ def split_by_device(text: str) -> tuple[DeviceText, ...]:
     同じ機器が何度も出てくれば、出た順に 1 つの文につなぐ。
     """
     lines = _lines(text)
-    order, plains = _hosts_in_order(lines)
+    order, plains, huawei = _hosts_in_order(lines)
     if not order:
         return ()
     if len(order) == 1:
@@ -253,7 +360,7 @@ def split_by_device(text: str) -> tuple[DeviceText, ...]:
     parts: dict[str, list[str]] = {host: [] for host in order}
     current = order[0]
     for line, plain in zip(lines, plains):
-        host = _line_host(plain, known)
+        host = _line_host(plain, known, huawei)
         if host is not None:
             current = host
         parts[current].append(line)

@@ -4,7 +4,13 @@
 同名で対にする補助(ADR-0020)を持つ。比較と集計は core.batch にある(ADR-0016 決定1)。
 """
 
-from driftpilot.batch_io.device_split import DeviceSplitError, DeviceSplitWritten, write_device_split
+from driftpilot.batch_io.device_split import (
+    DeviceSplitError,
+    DeviceSplitSingleWritten,
+    DeviceSplitWritten,
+    write_device_split,
+    write_device_split_single,
+)
 from driftpilot.batch_io.hostnames import read_hostname
 from driftpilot.batch_io.inputs import make_prepare
 from driftpilot.batch_io.manifest import (
@@ -35,6 +41,7 @@ from driftpilot.segmentation import DeviceText, device_filenames, find_devices, 
 
 __all__ = [
     "DeviceSplitError",
+    "DeviceSplitSingleWritten",
     "DeviceSplitWritten",
     "DeviceText",
     "device_filenames",
@@ -42,6 +49,7 @@ __all__ = [
     "is_multi_device",
     "split_by_device",
     "write_device_split",
+    "write_device_split_single",
     "JSONL_SUFFIX",
     "SUMMARY_SCHEMA_VERSION",
     "JsonLinesWriter",

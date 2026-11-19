@@ -9,13 +9,13 @@ from driftpilot.segmentation.splitter import Segment
 _TEXTS_JA = {
     "both": "区間の指定は --*-command と --*-segment のどちらか一方にしてください",
     "none": "比較できる区間がありません",
-    "out_of_range": "区間 {number} はありません(1〜{count})",
+    "out_of_range": "区間 {number} はありません（1〜{count} から選んでください）",
     "no_match": "コマンドに {command} を含む区間がありません",
 }
 _TEXTS_EN = {
     "both": "Specify the segment with either --*-command or --*-segment, not both",
     "none": "There is no segment to compare",
-    "out_of_range": "Segment {number} does not exist (1 to {count})",
+    "out_of_range": "Segment {number} does not exist (choose from 1 to {count})",
     "no_match": "No segment has a command containing {command}",
 }
 _T = i18n.choose(_TEXTS_JA, _TEXTS_EN)

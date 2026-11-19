@@ -1,16 +1,27 @@
-# DriftPilot のアイコン（ADR-0173）
+# DriftPilot のアイコン（ADR-0173・ADR-0246）
+
+アプリのファイルのアイコン（既定）は、ピクセル風の**フォーマル版**。元は共通の置き場 `Pilot-DesignSheet/DesignSheet/DriftPilot/App_Icons/` の `DriftPilot_Business.*`（ADR-0246）。
+設定でキャラクターがオンのときだけ、動いている間のアイコン（Mac の Dock・Windows の窓の左上とタスクバー）をキャラクター版にする（下のとおり）。
 
 | ファイル | 使う場所 |
 |---|---|
-| `DriftPilot.icns` | Mac の `DriftPilot.app`（Dock・Finder・dmg）。16〜1024px |
-| `DriftPilot.ico` | Windows の `DriftPilot.exe`・`driftpilot-cli.exe`（エクスプローラー・タスクバー・窓の左上）。16・24・32・48・64・128・256px（中身は PNG） |
-| `DriftPilot-mac-1024.png` | Mac 用の元（1024 の中に 824 の角丸の四角。周りは透明） |
-| `DriftPilot-win-1024.png` | Windows 用の元（1024 の中に 984 の角丸の四角） |
-| `make_icon.py` | 正方形の絵から角丸の元を作る道具（標準ライブラリだけ） |
+| `DriftPilot.icns` | Mac の `DriftPilot.app`（Dock・Finder・dmg）。フォーマル版。ic10（1024）・ic07（128）など |
+| `DriftPilot.ico` | Windows の `DriftPilot.exe`・`driftpilot-cli.exe`（エクスプローラー・タスクバー・窓の左上）。フォーマル版。16・24・32・48・64・128・256px（中身は PNG） |
+| `DriftPilot-business-1024.png` | フォーマル版の元（1024×1024） |
+| `DriftPilot-mac-1024.png` | キャラクター版の Mac 用の元（1024 の中に 824 の角丸の四角。周りは透明） |
+| `DriftPilot-win-1024.png` | キャラクター版の Windows 用の元（1024 の中に 984 の角丸の四角） |
+| `make_icon.py` | 正方形の絵から角丸の元を作る道具（標準ライブラリだけ。キャラクター版の作り方として残す） |
+
+spec の `EXE(icon=…)`・`BUNDLE(icon=…)` は `DriftPilot.ico`・`DriftPilot.icns`（フォーマル版）を指す。
+
+## 動いている間のキャラクターのアイコン
+
+キャラクター版（と、オフのときのピクセル風）の画像は `src/driftpilot/gui_web/static/character/` の `app-icon-*.png`・`app-icon-*.ico`（4 つ）にある。
+起動のときと設定の保存のときに `gui_web/app_icon.py` が選び、ファイルのアイコンは書き換えない。
+
+## キャラクター版の作り直し方（Mac で）
 
 元の絵は、シリーズ共通の置き場 `Common-Pilot/DesignSheet/DriftPilot/Character/DriftPilot_Mac_Icon.png`（1024×1024、緑の地いっぱいに Mirarin）。
-
-## 作り直し方（Mac で）
 
 ```bash
 SRC=…/DriftPilot_Mac_Icon.png

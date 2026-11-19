@@ -75,7 +75,7 @@ from driftpilot.messages import (
 )
 from driftpilot.screen_model.batch_model import PreparedBatch, UnpairedRow, pair_rows, platform_undetected
 from driftpilot.screen_model.model import KIND_CHOICES, MODE_CHOICES, WEB_PLATFORM_CHOICES, raw_options_summary
-from driftpilot.core import DEFAULT_RAW_OPTIONS, RawOptions, RawOptionsError, options_from_plain
+from driftpilot.core import DEFAULT_RAW_OPTIONS, RawOptions, RawOptionsError, options_from_plain, options_to_plain
 from driftpilot.segmentation.input_forms import InputDecodeError, read_config_input
 
 SIDE_KEYS = ("before", "after")
@@ -114,6 +114,8 @@ class EditableBatch:
     excluded は外した組の id、auto_platform は機種が自動の組の id。edited は組を作った後に直したか(作り直す前に確かめる)。
     written は組のファイルから開いた組の、ファイルに書かれたままの両側のパス(job の id ごと)。結果の表示名(SideSpec.raw_path)を
     今までどおり書かれたままにするため(data は絶対パスで持つ)。
+    hand_platform は窓の中で機種を手で選んだ組の id(REQ-368 §4。「自動」を選んだら外す。組のファイルに書かれていた機種は入れない)。
+    組を作り直すと EditableBatch ごと作り直すので消える。保存の書き方は変えない(手で選んだ組は自動でないので機種の名前が書かれる)。
     """
 
     data: dict
@@ -123,6 +125,7 @@ class EditableBatch:
     only_after: tuple[Path, ...] = ()
     edited: bool = False
     written: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+    hand_platform: frozenset[str] = frozenset()
 
     @property
     def jobs(self) -> list[dict]:
@@ -269,14 +272,19 @@ def _move_default_platform(data: dict, keep: Collection[str]) -> None:
             job["platform"] = platform
 
 
-def _set_job_platform(data: dict, auto: set[str], job: dict, value: str) -> None:
-    """組の機種。auto は自動の組、"" は指定なし(defaults.platform があればほかの組へ写してから消す)、ほかは名前を書く。"""
+def _set_job_platform(data: dict, auto: set[str], job: dict, value: str, hand: set[str]) -> None:
+    """組の機種。auto は自動の組、"" は指定なし(defaults.platform があればほかの組へ写してから消す)、ほかは名前を書く。
+
+    hand は手で機種を選んだ組(REQ-368 §4)。「自動」なら外し、それ以外なら入れる。
+    """
     job_id = job["id"]
     job.pop("platform", None)
     if value == AUTO_PLATFORM:
         auto.add(job_id)
+        hand.discard(job_id)
         return
     auto.discard(job_id)
+    hand.add(job_id)
     if value:
         job["platform"] = value
     else:
@@ -294,17 +302,18 @@ def edit_job(batch: EditableBatch, job_id: str, changes: Mapping[str, Any]) -> E
     _unknown(changes, EDITABLE_JOB_KEYS, f"jobs[{job_id}]")
     data = copy.deepcopy(batch.data)
     auto = set(batch.auto_platform)
+    hand = set(batch.hand_platform)
     job = next(job for job in data["jobs"] if job["id"] == job_id)
     for key, value in changes.items():
         if key == "platform":
-            _set_job_platform(data, auto, job, value or "")
+            _set_job_platform(data, auto, job, value or "", hand)
         elif key in SIDE_KEYS:
             _side_selection(job[key], value)
         elif value is None or value == "" or value == []:
             job.pop(key, None)
         else:
             job[key] = value
-    return _checked(replace(batch, data=data, auto_platform=frozenset(auto), edited=True))
+    return _checked(replace(batch, data=data, auto_platform=frozenset(auto), hand_platform=frozenset(hand), edited=True))
 
 
 def edit_defaults(batch: EditableBatch, changes: Mapping[str, Any]) -> EditableBatch:
@@ -316,6 +325,7 @@ def edit_defaults(batch: EditableBatch, changes: Mapping[str, Any]) -> EditableB
     _unknown(changes, (*EDITABLE_DEFAULTS_KEYS, *ALL_JOBS_KEYS), "defaults")
     data = copy.deepcopy(batch.data)
     auto = set(batch.auto_platform)
+    hand = set(batch.hand_platform)
     if not isinstance(data.get("defaults"), dict):
         data["defaults"] = {}
     defaults = data["defaults"]
@@ -324,7 +334,7 @@ def edit_defaults(batch: EditableBatch, changes: Mapping[str, Any]) -> EditableB
             # defaults.platform は先に各組へ写して消す(show の機種の名前なら show_command も)。その後で全部の組に同じ値を入れる
             _move_default_platform(data, keep=())
             for job in data["jobs"]:
-                _set_job_platform(data, auto, job, value or "")
+                _set_job_platform(data, auto, job, value or "", hand)
         elif key == "show_command":
             for job in data["jobs"]:
                 if value:
@@ -341,7 +351,23 @@ def edit_defaults(batch: EditableBatch, changes: Mapping[str, Any]) -> EditableB
             defaults.pop(key, None)
         else:
             defaults[key] = value
-    return _checked(replace(batch, data=data, auto_platform=frozenset(auto), edited=True))
+    return _checked(replace(batch, data=data, auto_platform=frozenset(auto), hand_platform=frozenset(hand), edited=True))
+
+
+def with_default_raw_options(batch: EditableBatch, options: RawOptions) -> EditableBatch:
+    """defaults.raw_options だけを options に差し替えた組(REQ-361 §4。設定の窓で保存した単純比較の既定を、フォルダから作った組へ入れる)。
+
+    options が既定なら defaults.raw_options は書かない(from_pairing と同じ)。組ごとの raw_options・外した組・片方だけのファイル・
+    直したかどうか(edited)・機種の自動などはそのまま残す(直した組とは見なさない)。
+    """
+    data = copy.deepcopy(batch.data)
+    if not isinstance(data.get("defaults"), dict):
+        data["defaults"] = {}
+    if options.is_default():
+        data["defaults"].pop("raw_options", None)
+    else:
+        data["defaults"]["raw_options"] = options_to_plain(options)
+    return replace(batch, data=data)
 
 
 def set_platform(batch: EditableBatch, job_id: str, value: str) -> EditableBatch:
@@ -410,6 +436,7 @@ def unpair(batch: EditableBatch, job_id: str) -> EditableBatch:
             data=data,
             excluded=batch.excluded - {job_id},
             auto_platform=batch.auto_platform - {job_id},
+            hand_platform=batch.hand_platform - {job_id},
             written={key: value for key, value in batch.written.items() if key != job_id},
             only_before=_by_name({*batch.only_before, before}),
             only_after=_by_name({*batch.only_after, after}),

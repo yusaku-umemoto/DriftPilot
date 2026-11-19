@@ -39,6 +39,8 @@ from driftpilot.messages import (
     cli_render_segment_line,
     cli_render_select,
     cli_render_show_fallback,
+    cli_render_show_replaced_same,
+    cli_render_show_skipped_columns,
     cli_render_show_unexplained,
     cli_render_split_head,
     cli_render_unpaired_line,
@@ -147,6 +149,10 @@ def _show_text(result: ShowCompareResult) -> list[str]:
         lines.append(f"[{d['op']}] {label}: {detail}")
     if result.method == "both":
         lines.append(cli_render_show_unexplained(result.unexplained_lines))
+    if result.replaced_same >= 1:
+        lines.append(cli_render_show_replaced_same(result.replaced_same))
+    if result.skipped_columns:
+        lines.append(cli_render_show_skipped_columns(result.skipped_columns))
     return lines
 
 
@@ -195,6 +201,15 @@ def to_json(outcome: CompareOutcome) -> str:
     return json.dumps(_payload(outcome), ensure_ascii=False, indent=2)
 
 
+def _drop_empty_rule_hits(raw: dict[str, Any] | None) -> None:
+    """ルールが 0 個のときは options.rule_hits と options.line_hits のキーを書かない(今と同じ JSON。REQ-359・REQ-366)。"""
+    options = raw.get("options") if raw else None
+    if isinstance(options, dict):
+        for key in ("rule_hits", "line_hits"):
+            if options.get(key, "") is None:
+                del options[key]
+
+
 def _payload(outcome: CompareOutcome) -> dict[str, Any]:
     """1組の JSON の中身(to_json と、--all-segments の results の各要素で共通)。"""
     head: dict[str, Any] = {"schema_version": outcome.schema_version, "status": outcome.status}
@@ -219,6 +234,7 @@ def _payload(outcome: CompareOutcome) -> dict[str, Any]:
         if payload["raw"] is not None and payload["raw"].get("options", "") is None:
             # 既定の設定の単純比較では options のキーを書かない(今と同じ JSON。ADR-0166 決定12)
             del payload["raw"]["options"]
+        _drop_empty_rule_hits(payload["raw"])
         if outcome.kind == "show":
             show = outcome.show
             payload["show"] = (
@@ -230,8 +246,13 @@ def _payload(outcome: CompareOutcome) -> dict[str, Any]:
                 payload["show"]["raw"] = _plain(show.raw)
                 if show.raw is not None and show.raw.options is None:
                     del payload["show"]["raw"]["options"]
+                _drop_empty_rule_hits(payload["show"]["raw"])
             if show is not None and show.method == "both":
                 payload["show"]["unexplained_lines"] = show.unexplained_lines
+            if show is not None and show.replaced_same >= 1:
+                payload["show"]["replaced_same"] = show.replaced_same  # 0 のときはキーを書かない(今と同じ JSON。REQ-358)
+            if show is not None and show.skipped_columns:
+                payload["show"]["skipped_columns"] = list(show.skipped_columns)  # 空のときはキーを書かない(REQ-367)
         payload |= head
         payload["segmentation"] = {side: _split_json(seg[side]) for side, _ in SIDES}
         payload["default_exposure"] = (

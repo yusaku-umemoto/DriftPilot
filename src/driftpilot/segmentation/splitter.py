@@ -4,6 +4,7 @@
 プロンプト候補の終端に `$` を加えている(ADR-0012 決定2b の手順1)。
 候補の上限と、ホスト名が一致する候補のグループ採用は ADR-0014 決定1・2。
 コマンドの正体への変換はしない(決定3b)。打ち間違いや補完候補も見分けず、全区間をそのまま持つ。
+ただし、出力が空の区間のうち、次のコマンドが同じか語の途中で続くもの(Tab で補った跡。`show run` の次の `show running-config`)は外す(ADR-0237 決定1。REQ-355)。
 行頭のページ送りの印(--More--)は、制御文字を消す前に外し、外した数を持つ(ADR-0134 決定1・2)。
 FortiGate の形のプロンプト(`<host> # `・`<host> (<文脈>) # `)は別の規則でも見分ける(ADR-0134 決定3)。
 アラクサラ AX の形のプロンプト(`> `・`# `・`(config)# `・`!<host># `・20文字までのホスト名)も別の規則で見分ける。
@@ -741,6 +742,17 @@ def _is_asa_mode_prompt(prompt: str) -> bool:
     return bool(m and m.group("mode") and not m.group("rest"))
 
 
+def _tab_remnant(command: str, next_command: str) -> bool:
+    """Tab で補った跡か(ADR-0237 決定1)。次のコマンドが同じ文字か、このコマンドの文字で始まり、すぐ後ろが空白でないとき真。"""
+    a = " ".join(command.split())
+    b = " ".join(next_command.split())
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return b.startswith(a) and not b[len(a)].isspace()
+
+
 def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResult:
     """端末ログを区間に切り分ける。prompt を渡すと自己校正をせずそれを使う(1つでも複数でもよい)。"""
     text, marks = _strip_pager(text)
@@ -847,12 +859,24 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
         buf.append(line)
     flush()
 
+    # 各区間の後ろで最初にコマンドのある区間のコマンド(本文の有無は問わない。ADR-0237 決定1)
+    next_commands: list[str | None] = [None] * len(sections)
+    following: str | None = None
+    for i in range(len(sections) - 1, -1, -1):
+        next_commands[i] = following
+        if sections[i][0]:
+            following = sections[i][0]
+
     segments: list[Segment] = []
-    for name, body in sections:
+    for index, (name, body) in enumerate(sections):
         pre, rest = _finish(body)
         if any(line.strip() for line in rest):
             segments.append(Segment(len(segments) + 1, name, pre, rest, len(rest)))
         elif name and (_f5_keep_word(name) if f5_hosts is not None else _first_word(name)) in KEEP_EMPTY_COMMANDS:
-            # 出力が空でも、見るためのコマンドの区間は残す(ADR-0201 決定4)
+            # 出力が空でも、見るためのコマンドの区間は残す(ADR-0201 決定4)。
+            # ただし、次のコマンドが同じか語の途中で続くなら、Tab で補った跡なので残さない(ADR-0237 決定1)
+            following_command = next_commands[index]
+            if following_command is not None and _tab_remnant(name, following_command):
+                continue
             segments.append(Segment(len(segments) + 1, name, pre, (), 0))
     return SplitResult(prompts, source, tuple(segments), marks)

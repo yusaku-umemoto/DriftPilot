@@ -51,6 +51,7 @@ from driftpilot.messages import (
     EXPORT_COL_GROUP,
     EXPORT_COL_KIND,
     EXPORT_COL_PAIR,
+    EXPORT_COL_RAW_SETTINGS,
     EXPORT_COUNTS,
     EXPORT_FIRST_REQUEST,
     EXPORT_GAP,
@@ -60,6 +61,12 @@ from driftpilot.messages import (
     EXPORT_NO_ROWS,
     EXPORT_PAIRS,
     EXPORT_RAW,
+    EXPORT_RAW_COL_HITS,
+    EXPORT_RAW_COL_HITS_TOTAL,
+    EXPORT_RAW_COL_KIND,
+    EXPORT_RAW_COL_PATTERN,
+    EXPORT_RAW_COL_REPLACEMENT,
+    EXPORT_RAW_RULES,
     EXPORT_SAVED_AT,
     EXPORT_STATUS,
     EXPORT_STRUCTURED,
@@ -71,6 +78,7 @@ from driftpilot.messages import (
     OP_CHANGED,
     OP_REMOVED,
     export_omitted,
+    raw_rule_hits_text,
 )
 
 # CSV で式の頭とみなす文字(ADR-0156 決定6)
@@ -231,6 +239,35 @@ _MARK_OPEN = {"del": '<mark class="del">', "ins": '<mark class="ins">'}
 
 
 @dataclass(frozen=True)
+class ReportRawRule:
+    """報告書に出す単純比較のルール 1 つ(REQ-363)。pattern と replacement は秘密の判定に通した後の文字(断られた欄は代わりの文)。
+
+    kind は種類の文(無視する行・置き換え)。無視する行の replacement は空。hits は (変更前, 変更後) の当たった行の数で、無ければ None。
+    is_replace は置き換えのルールか(種類の文は言語で変わるため、CSV の「式 → 置き換える文字」はこれで決める)。
+    """
+
+    kind: str
+    pattern: str
+    replacement: str
+    hits: tuple[int, int] | None = None
+    is_replace: bool = False
+
+
+@dataclass(frozen=True)
+class ReportRawRules:
+    """報告書に出す、その組を比べた単純比較の設定(REQ-363 / ADR-0243)。既定の設定の組は持たない(ReportPair.raw_rules が None)。
+
+    summary は CSV に出す要約の文。others は空白・空行・大文字と小文字・移動・比べ方のうち既定でないものの 1 行(無ければ None)。
+    fingerprint は設定が同じかを比べる値(式の文字そのものは持たない。伏せた後の文字では違う式が同じに見えるため、伏せる前の設定から作る)。
+    """
+
+    summary: str
+    rules: tuple[ReportRawRule, ...] = ()
+    others: str | None = None
+    fingerprint: str = ""
+
+
+@dataclass(frozen=True)
 class ReportPair:
     """出力の 1 組。文字はどれも伏せた後のもの(名前とファイル名は判定に通した後)。
 
@@ -261,6 +298,9 @@ class ReportPair:
     status_key: str | None = None
     # まとめて比べた組(group がある組)のコマンド。枠の中の小見出しに出す(名前の形に左右されない。ADR-0190)。空なら名前を出す
     command: str = ""
+    # その組を比べた単純比較の設定(REQ-363)。既定の設定か、単純比較で比べていなければ None。raw_compared はその組を単純比較で比べたか
+    raw_rules: ReportRawRules | None = None
+    raw_compared: bool = False
 
 
 @dataclass(frozen=True)
@@ -538,9 +578,68 @@ def _answer_part(pair: ReportPair) -> list[str]:
     return out
 
 
-def _pair_content(pair: ReportPair) -> list[str]:
-    """1 組の中身。今の順(単純比較の設定の文・構造化比較の表・単純比較の表・AI の答え)。"""
+def _raw_rules_html(
+    rules: ReportRawRules, tag: str, hits: Sequence[tuple[int, int] | None] | None, hits_head: str | None = None
+) -> list[str]:
+    """単純比較の設定の見出しと表(REQ-363 §2)。tag は見出しのタグ(h2 か h3。このモジュールの決まった文字)。
+
+    hits はルールごとの (変更前, 変更後)。None なら「当たった行」の列を出さない。ルールが無ければ表は出さない。
+    表の下に、既定でない空白・空行・大文字と小文字・移動・比べ方の 1 行。文字はどれも _e を通る(_el・_td)。
+    """
+    out = [_el(tag, EXPORT_RAW_RULES)]
+    if rules.rules:
+        names: list[str | tuple[str, str]] = [EXPORT_RAW_COL_KIND, EXPORT_RAW_COL_PATTERN, EXPORT_RAW_COL_REPLACEMENT]
+        if hits is not None:
+            names.append(hits_head or EXPORT_RAW_COL_HITS)
+        rows: list[str] = []
+        for index, rule in enumerate(rules.rules):
+            cells = [_td(rule.kind, ""), _td(rule.pattern, "text"), _td(rule.replacement, "text")]
+            if hits is not None:
+                found = hits[index]
+                cells.append(_td("" if found is None else raw_rule_hits_text(found[0], found[1]), ""))
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+        out += _table(_head(names), rows)
+    if rules.others:
+        out.append(_el("p", rules.others))
+    return out
+
+
+def _pair_hits(rules: ReportRawRules) -> list[tuple[int, int] | None] | None:
+    """組ごとの表の「当たった行」。全部のルールが数を持つときだけ。1 つでも無ければ列を出さない(None)。"""
+    found = [rule.hits for rule in rules.rules]
+    return None if not found or any(item is None for item in found) else found
+
+
+def _shared_raw_rules(report: Report) -> tuple[ReportRawRules, list[tuple[int, int] | None] | None] | None:
+    """一括比較の報告書の先頭に 1 つだけ出す設定の表(REQ-363 §2)。出さないなら None。
+
+    単純比較で比べた組(raw_compared)だけを見る。その組の設定がちょうど 1 種類で既定でなければ出す(その表を持つ組の最初の設定と、
+    ルールごとの当たった行の全部の組の合計。比べた組のうち数を持たない組が 1 つでもあれば合計は None)。
+    2 種類以上(既定の組が混ざる場合も)なら None で、組ごとに出す。全部が既定でもどこにも出さない。
+    """
+    compared = [pair for pair in report.pairs if pair.raw_compared]
+    prints = {pair.raw_rules.fingerprint if pair.raw_rules is not None else None for pair in compared}
+    if len(prints) != 1 or None in prints:
+        return None
+    first = next(pair.raw_rules for pair in compared if pair.raw_rules is not None)
+    per_pair = [_pair_hits(pair.raw_rules) for pair in compared if pair.raw_rules is not None]
+    total: list[tuple[int, int] | None] | None = None
+    if first.rules and all(item is not None for item in per_pair):
+        total = [
+            (sum(item[index][0] for item in per_pair if item), sum(item[index][1] for item in per_pair if item))  # type: ignore[index]
+            for index in range(len(first.rules))
+        ]
+    return first, total
+
+
+def _pair_content(pair: ReportPair, show_rules: bool = True) -> list[str]:
+    """1 組の中身。今の順(単純比較の設定の文・単純比較の設定の表・構造化比較の表・単純比較の表・AI の答え)。
+
+    show_rules が偽なら設定の表は出さない(報告書の先頭に 1 つだけ出したとき。REQ-363)。
+    """
     out = [_el("p", line) for line in pair.raw_lines]
+    if show_rules and pair.raw_rules is not None:
+        out += _raw_rules_html(pair.raw_rules, "h3", _pair_hits(pair.raw_rules))
     if pair.redacted is not None:
         out += _structured_table(pair.redacted)
         out += _raw_table(pair.redacted)
@@ -582,7 +681,7 @@ def _command_of(pair: ReportPair) -> str:
     return pair.command or pair.name
 
 
-def _frame_html(number: int, pairs: Sequence[ReportPair]) -> list[str]:
+def _frame_html(number: int, pairs: Sequence[ReportPair], show_rules: bool = True) -> list[str]:
     """組ごとの枠(details.pair#pair-N)。差分なしの枠は閉じ、ほか(差分あり・失敗・選択待ち)は開く(ADR-0180 決定1 の 4・5)。
 
     id は番号だけ。summary に名前・状態の札・件数とファイル名。まとめた枠は中にコマンドごとの小見出しと今の表と答え。
@@ -600,7 +699,7 @@ def _frame_html(number: int, pairs: Sequence[ReportPair]) -> list[str]:
         '<div class="pair-body">',
     ]
     if not grouped:
-        out += _pair_content(first)
+        out += _pair_content(first, show_rules)
     else:
         for pair in pairs:
             kind = EXPORT_KIND_STRUCTURED if pair.structured is not None else EXPORT_KIND_RAW
@@ -613,7 +712,7 @@ def _frame_html(number: int, pairs: Sequence[ReportPair]) -> list[str]:
                 + (_el("span", counts, "meta") if counts else "")
                 + "</div>"
             )
-            out += _pair_content(pair)
+            out += _pair_content(pair, show_rules)
     out += ["</div>", "</details>"]
     return out
 
@@ -681,9 +780,13 @@ def render_html(report: Report, *, saved_at: datetime) -> str:
     if report.multiple:
         frames = _frames(report.pairs)
         numbers = [number for number, frame in enumerate(frames, start=1) for _pair in frame]
+        # 全部の組の設定が同じなら、設定の表は組の一覧の前に 1 つだけ出し、組ごとの枠には出さない(REQ-363 §2)
+        shared = _shared_raw_rules(report)
+        if shared is not None:
+            out += _raw_rules_html(shared[0], "h2", shared[1], EXPORT_RAW_COL_HITS_TOTAL)
         out += _pairs_table(report, numbers)
         for number, frame in enumerate(frames, start=1):
-            out += _frame_html(number, frame)
+            out += _frame_html(number, frame, show_rules=shared is None)
     else:
         for pair in report.pairs:
             out += ["<section>", *_pair_content(pair), "</section>"]
@@ -751,13 +854,24 @@ def render_diffs_csv(report: Report) -> bytes:
 def render_pairs_csv(report: Report) -> bytes:
     """組の一覧の CSV。AI の列は状態だけで、答えの文は入れない。件数は数のまま。
 
-    属する組(group)を持つ組が 1 つでもあれば、最後に列「元の組」を足す(ADR-0178 決定3。1 区間の組のその欄は空)。
-    1 つも無い出力(1 区間の組だけの一括比較・比較の窓)は今のまま。
+    属する組(group)を持つ組が 1 つでもあれば、列「元の組」を足す(ADR-0178 決定3。1 区間の組のその欄は空)。
+    最後に必ず列「単純比較の設定」を足す(REQ-363 §3。「元の組」がある形ではその後ろ)。
     """
     grouped = any(pair.group is not None for pair in report.pairs)
     head = [EXPORT_COL_PAIR, BATCH_COL_STATUS, BATCH_COL_STRUCTURED, BATCH_COL_RAW, BATCH_COL_UNPARSED, BATCH_COL_LLM]
-    rows: list[list[Any]] = [[*head, EXPORT_COL_GROUP] if grouped else head]
+    rows: list[list[Any]] = [[*head, *([EXPORT_COL_GROUP] if grouped else []), EXPORT_COL_RAW_SETTINGS]]
     for pair in report.pairs:
         row = [pair.name, pair.status, _line(pair.structured), _line(pair.raw), pair.unparsed, pair.ai]
-        rows.append([*row, pair.group or ""] if grouped else row)
+        rows.append([*row, *([pair.group or ""] if grouped else []), _raw_settings_cell(pair.raw_rules)])
     return _csv(rows)
+
+
+def _raw_settings_cell(rules: ReportRawRules | None) -> str:
+    """組の一覧の CSV の「単純比較の設定」の欄(REQ-363 §3)。既定なら空。ほかは要約と式の並びを " | " でつなぐ。
+
+    式の並びは、無視する行が「式」、置き換えが「式 → 置き換える文字」。当たった行の数は入れない。
+    """
+    if rules is None:
+        return ""
+    items = [f"{rule.pattern} → {rule.replacement}" if rule.is_replace else rule.pattern for rule in rules.rules]
+    return " | ".join([rules.summary, *items])

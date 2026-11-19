@@ -532,7 +532,7 @@ def character_of(data: bytes | None) -> bool:
 def character_enabled(
     *, env: Mapping[str, str] | None = None, platform: str | None = None, home: Path | None = None
 ) -> bool:
-    """利用者ごとの設定ファイルの [gui] character(窓を読み込んだときに読む。ADR-0174 決定1)。読めなければ偽。"""
+    """利用者ごとの設定ファイルの [gui] character(窓を描くたびに読む。窓は覚えた値を、設定の窓で保存したら捨てて読み直す。ADR-0174 決定1・ADR-0245 決定2)。読めなければ偽。"""
     try:
         data = read_bytes(user_config_path(platform=platform, env=env, home=home))
     except SettingsError:

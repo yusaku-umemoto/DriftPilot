@@ -17,7 +17,14 @@ from textfsm.clitable import CliTableError
 from driftpilot import i18n
 from driftpilot.diff_engine.normalization import NormalizationRule
 from driftpilot.diff_engine.raw import RawCompareResult, compare_raw
-from driftpilot.raw_keys import DEFAULT_RAW_OPTIONS, RawOptions
+from driftpilot.raw_keys import (
+    DEFAULT_RAW_OPTIONS,
+    CompiledReplacements,
+    RawOptions,
+    apply_replacements,
+    compile_replacements,
+    require_valid,
+)
 
 Row = dict[str, Any]
 
@@ -53,6 +60,10 @@ class ShowCompareResult:
     fallback_reason: str | None = None
     raw: RawCompareResult | None = None
     unexplained_lines: int = 0
+    # 単純比較の置き換えで「変わっていない」とみなした表の列の値の数(structured・both のとき。ADR-0239 決定4)
+    replaced_same: int = 0
+    # 比べない列(この窓だけの設定)のうち、どちらかの表に列として出てきたもの(大文字。比べない列の並びの順。REQ-367)
+    skipped_columns: list[str] = field(default_factory=list)
 
     @property
     def has_diff(self) -> bool:
@@ -148,9 +159,69 @@ def _changed_fields(row: Row, other: Row) -> dict[str, list[Any]]:
     return {c: [row.get(c), other.get(c)] for c in dict.fromkeys([*row, *other]) if row.get(c) != other.get(c)}
 
 
-def _compare_by_columns(before: list[Row], after: list[Row],
-                        columns: tuple[str, ...]) -> tuple[list[dict[str, Any]], str]:
-    """選んだ識別の列の値の並び(tuple)で行を突き合わせる。差分の key は値を ` / ` でつないだ文字列(ADR-0204 決定4)。"""
+class _SkipColumns:
+    """比べない列(REQ-367)。列の名前は大文字・小文字を区別せずに照らす。外した変化は、説明できる行の判定に使うために集める。"""
+
+    def __init__(self, names: tuple[str, ...]) -> None:
+        self.names = {n.upper() for n in names}
+        # 外した変化: (行のキー, {列: [前, 後]})
+        self.changes: list[tuple[Any, dict[str, list[Any]]]] = []
+
+    def take(self, key: Any, fields: dict[str, list[Any]]) -> dict[str, list[Any]]:
+        """変わった列から比べない列を外して残りを返す。外した列は変化として集める。"""
+        skipped = {c: pair for c, pair in fields.items() if c.upper() in self.names}
+        if not skipped:
+            return fields
+        self.changes.append((key, skipped))
+        return {c: pair for c, pair in fields.items() if c not in skipped}
+
+
+def _value_key(value: Any, replacements: CompiledReplacements) -> Any:
+    """列の値の鍵(ADR-0239 決定1)。文字は置き換えを上から順に当てた文字、リストは要素ごと(文字の要素だけ)、ほかはそのまま。"""
+    if isinstance(value, str):
+        return apply_replacements(value, replacements)
+    if isinstance(value, list):
+        return [apply_replacements(v, replacements) if isinstance(v, str) else v for v in value]
+    return value
+
+
+def _pair_fields(row: Row, other: Row, replacements: CompiledReplacements,
+                 skip: _SkipColumns | None = None, key: Any = None) -> tuple[dict[str, list[Any]] | None, int]:
+    """組になった 2 行の変わった列(元の値)と、置き換えで同じとみなした列の数(ADR-0239 決定2)。
+
+    差分にしない組(同じ行、または変わった列が全部、鍵では同じ)は None。置き換えが 0 組なら今と同じ(行が違えば変わった列を出す)。
+    """
+    if row == other:
+        return None, 0
+    fields = _changed_fields(row, other)
+    if skip is not None and fields:
+        # 比べない列の違いは変更の列にしない。残りが 0 の組は差分にしない(REQ-367)
+        fields = skip.take(key, fields)
+        if not fields:
+            return None, 0
+    if not replacements or not fields:
+        return fields, 0
+    kept = {c: pair for c, pair in fields.items()
+            if _value_key(pair[0], replacements) != _value_key(pair[1], replacements)}
+    if not kept:
+        return None, len(fields)
+    return kept, len(fields) - len(kept)
+
+
+def _changed_diff(key: Any, row: Row, other: Row, replacements: CompiledReplacements,
+                  skip: _SkipColumns | None = None) -> tuple[dict[str, Any] | None, int]:
+    fields, same = _pair_fields(row, other, replacements, skip, key)
+    if fields is None:
+        return None, same
+    return {"op": "changed", "key": key, "before": row, "after": other, "fields": fields}, same
+
+
+def _compare_by_columns(before: list[Row], after: list[Row], columns: tuple[str, ...],
+                        replacements: CompiledReplacements = (), skip: _SkipColumns | None = None) ->tuple[list[dict[str, Any]], str, int]:
+    """選んだ識別の列の値の並び(tuple)で行を突き合わせる。差分の key は値を ` / ` でつないだ文字列(ADR-0204 決定4)。
+
+    3 つめは置き換えで同じとみなした列の数。
+    """
 
     def ident(row: Row) -> tuple:
         return tuple(_norm_value(row.get(c)) for c in columns)
@@ -161,31 +232,42 @@ def _compare_by_columns(before: list[Row], after: list[Row],
     b_map = {ident(r): r for r in before}
     a_map = {ident(r): r for r in after}
     diffs: list[dict[str, Any]] = []
+    same = 0
     for k, row in b_map.items():
         other = a_map.get(k)
         if other is None:
             diffs.append({"op": "removed", "key": label(row), "before": row, "after": None, "fields": {}})
-        elif row != other:
-            diffs.append({"op": "changed", "key": label(row), "before": row, "after": other,
-                          "fields": _changed_fields(row, other)})
+        else:
+            diff, count = _changed_diff(label(row), row, other, replacements, skip)
+            same += count
+            if diff is not None:
+                diffs.append(diff)
     diffs += [{"op": "added", "key": label(row), "before": None, "after": row, "fields": {}}
               for k, row in a_map.items() if k not in b_map]
-    return diffs, "+".join(columns)
+    return diffs, "+".join(columns), same
 
 
 def _compare_rows(before: list[Row], after: list[Row]) -> tuple[list[dict[str, Any]], str | None]:
+    """置き換えなしの表の比較(2 つの値を返す形。数も要るときは _compare_rows_counted)。"""
+    diffs, key, _ = _compare_rows_counted(before, after)
+    return diffs, key
+
+
+def _compare_rows_counted(before: list[Row], after: list[Row], replacements: CompiledReplacements = (),
+                          skip: _SkipColumns | None = None) ->tuple[list[dict[str, Any]], str | None, int]:
+    """表の比較。3 つめは置き換えで同じとみなした列の値の数。行の組は元の値で決める(ADR-0239 決定2)。"""
     key = _unique_key(before, after)
     diffs: list[dict[str, Any]] = []
     if key is None:
         # 両側とも 1 行だけの表は、その 2 行を同じ行として比べる(ADR-0204 決定2)
         if len(before) == 1 and len(after) == 1:
-            if before[0] != after[0]:
-                diffs.append({"op": "changed", "key": "", "before": before[0], "after": after[0],
-                              "fields": _changed_fields(before[0], after[0])})
-            return diffs, None
+            diff, same = _changed_diff("", before[0], after[0], replacements, skip)
+            if diff is not None:
+                diffs.append(diff)
+            return diffs, None, same
         columns = _identity_key(before, after)
         if columns is not None:
-            return _compare_by_columns(before, after, columns)
+            return _compare_by_columns(before, after, columns, replacements, skip)
         # キーが無いときは同じ行の個数で比べる(ADR-0202 決定2)。相手に残っている同じ行を 1 つずつ使う
         remaining_after = Counter(_freeze(r) for r in after)
         for r in before:
@@ -201,18 +283,21 @@ def _compare_rows(before: list[Row], after: list[Row]) -> tuple[list[dict[str, A
                 remaining_before[frozen] -= 1
             else:
                 diffs.append({"op": "added", "key": None, "before": None, "after": r, "fields": {}})
-        return diffs, None
+        return diffs, None, 0
     b_map = {str(r[key]): r for r in before}
     a_map = {str(r[key]): r for r in after}
+    same = 0
     for k, row in b_map.items():
         if k not in a_map:
             diffs.append({"op": "removed", "key": k, "before": row, "after": None, "fields": {}})
-        elif row != a_map[k]:
-            diffs.append({"op": "changed", "key": k, "before": row, "after": a_map[k],
-                          "fields": _changed_fields(row, a_map[k])})
+        else:
+            diff, count = _changed_diff(k, row, a_map[k], replacements, skip)
+            same += count
+            if diff is not None:
+                diffs.append(diff)
     diffs += [{"op": "added", "key": k, "before": None, "after": row, "fields": {}}
               for k, row in a_map.items() if k not in b_map]
-    return diffs, key
+    return diffs, key, same
 
 
 def _is_short_value(value: str) -> bool:
@@ -270,10 +355,16 @@ class _Clues:
         return False
 
 
-def _replacer(mapping: dict[str, str]) -> re.Pattern[str]:
-    """値を語として(前後が空白か行の端のところだけ)置き換える正規表現。長い値を先に並べて同時に置き換える。"""
+def _replacer(mapping: dict[str, str], loose: bool = False) -> re.Pattern[str]:
+    """値を語として(前後が空白か行の端のところだけ)置き換える正規表現。長い値を先に並べて同時に置き換える。
+
+    loose のときは、値の前後が英数字・`.`・`:`・`/`・`-` でなければ語とみなす(`01:06:47,` のように区切りの記号が続く値のため。REQ-367)。
+    """
     values = sorted(mapping, key=len, reverse=True)
-    return re.compile(r"(?<!\S)(?:" + "|".join(re.escape(v) for v in values) + r")(?!\S)")
+    body = "|".join(re.escape(v) for v in values)
+    if loose:
+        return re.compile(r"(?<![\w.:/-])(?:" + body + r")(?![\w:/-])(?!\.\w)")
+    return re.compile(r"(?<!\S)(?:" + body + r")(?!\S)")
 
 
 @dataclass
@@ -286,13 +377,14 @@ class _Trial:
     clues: _Clues
     forward_re: re.Pattern[str] | None = None
     backward_re: re.Pattern[str] | None = None
+    loose: bool = False  # 比べない列の試し方(値の後ろに `,` などが続いてもよい。REQ-367)
 
     def __post_init__(self) -> None:
-        self.forward_re = _replacer(self.forward) if self.forward else None
-        self.backward_re = _replacer(self.backward) if self.backward else None
+        self.forward_re = _replacer(self.forward, self.loose) if self.forward else None
+        self.backward_re = _replacer(self.backward, self.loose) if self.backward else None
 
 
-def _build_trials(diffs: list[dict[str, Any]]) -> list[_Trial]:
+def _build_trials(diffs: list[dict[str, Any]], loose: bool = False) -> list[_Trial]:
     """表の差分の変わった行ごとに、置き換えの試し方を作る。列 1 つずつと、同じ表の行の列を全部いっしょに。"""
     # 同じ置き換え(値の対応が同じ)の試し方は 1 つにまとめ、手がかりの語は合わせる(行ごとの置き換えを 1 回にするため)
     merged: dict[tuple, _Trial] = {}
@@ -322,16 +414,19 @@ def _build_trials(diffs: list[dict[str, Any]]) -> list[_Trial]:
             signature = (tuple(sorted(forward.items())), tuple(sorted(backward.items())))
             trial = merged.get(signature)
             if trial is None:
-                trial = merged[signature] = _Trial(forward, backward, short, _Clues())
+                trial = merged[signature] = _Trial(forward, backward, short, _Clues(), loose=loose)
             trial.clues.update(_clue_words(diff.get("key"), [c for c, _, _ in group]))
     return list(merged.values())
 
 
-def _unexplained_lines(diffs: list[dict[str, Any]], raw: RawCompareResult) -> int:
+def _unexplained_lines(diffs: list[dict[str, Any]], raw: RawCompareResult,
+                       skipped_changes: list[tuple[Any, dict[str, list[Any]]]] | tuple = ()) -> int:
     """単純比較の差分の行のうち、表の差分で説明できない行の数を返す。
 
     説明できる行: (1) 変更列と追加・削除行の語が行にある、(2) 動いた行(消えた行と同じ文が足された行にもある)、
     (3) 値の置き換えで相手側の行になる。ADR-0200 の追記(決定 3 の補い)・REQ-283。
+    (4) 比べない列の値だけを相手の値に置き換えると、相手側の行とちょうど同じになる(REQ-367)。
+    比べない列の値は(1)の語には入れない。ほかの部分も変わった行は説明できない行に残す。
     """
     words: set[str] = set()
     for diff in diffs:
@@ -347,20 +442,32 @@ def _unexplained_lines(diffs: list[dict[str, Any]], raw: RawCompareResult) -> in
     removed_squeezed = {_squeeze(t) for t in removed}
     added_squeezed = {_squeeze(t) for t in added}
     # 置き換えの試し方を、置き換え元の値の先頭の語で引ける形にまとめる(値が語として行にあれば、その先頭の語は行の語になる)
-    by_before: dict[str, list[_Trial]] = {}
-    by_after: dict[str, list[_Trial]] = {}
-    for trial in _build_trials(diffs):
-        for value in trial.forward:
-            by_before.setdefault(value.split()[0], []).append(trial)
-        for value in trial.backward:
-            by_after.setdefault(value.split()[0], []).append(trial)
+    def index_trials(trials: list[_Trial]) -> tuple[dict[str, list[_Trial]], dict[str, list[_Trial]]]:
+        by_before: dict[str, list[_Trial]] = {}
+        by_after: dict[str, list[_Trial]] = {}
+        for trial in trials:
+            for value in trial.forward:
+                by_before.setdefault(value.split()[0], []).append(trial)
+            for value in trial.backward:
+                by_after.setdefault(value.split()[0], []).append(trial)
+        return by_before, by_after
 
-    def explained_by_replacement(text: str, forward: bool) -> bool:
-        index = by_before if forward else by_after
+    table_index = index_trials(_build_trials(diffs))
+    # 比べない列の変化から作る試し方(値の置き換えと同じ作り。表の差分には入れない)
+    skipped_index = index_trials(_build_trials(
+        [{"op": "changed", "key": key, "fields": fields} for key, fields in skipped_changes],
+        loose=True)) if skipped_changes else None
+
+    def explained_by_replacement(text: str, forward: bool, indexes: tuple) -> bool:
+        index = indexes[0] if forward else indexes[1]
         others = added_squeezed if forward else removed_squeezed
         base = _squeeze(text)
         seen: set[int] = set()
-        for word in dict.fromkeys(text.split()):
+        candidates = text.split()
+        if indexes is not table_index:
+            # 比べない列の値は `01:06:47,` のように記号が続くので、語の前後の記号を外した形でも引く
+            candidates += [w.strip(",;:()[]") for w in candidates]
+        for word in dict.fromkeys(candidates):
             for trial in index.get(word, ()):
                 if id(trial) in seen:
                     continue
@@ -383,7 +490,9 @@ def _unexplained_lines(diffs: list[dict[str, Any]], raw: RawCompareResult) -> in
             continue
         if text in (added if is_removed else removed):
             continue
-        if explained_by_replacement(text, is_removed):
+        if explained_by_replacement(text, is_removed, table_index):
+            continue
+        if skipped_index is not None and explained_by_replacement(text, is_removed, skipped_index):
             continue
         count += 1
     return count
@@ -398,10 +507,12 @@ def compare_show(
     rules: list[NormalizationRule] | None = None,
     enabled_ids: list[str] | None = None,
     options: RawOptions = DEFAULT_RAW_OPTIONS,
+    skip_columns: tuple[str, ...] = (),
 ) -> ShowCompareResult:
     """show 出力2つを比較する。テンプレートがなければ正規化付き raw 比較へ回す。
 
     options は常に併せて流す単純比較の設定(ADR-0166・ADR-0200)。
+    skip_columns は表の比較で値の違いを変更の列にしない列の名前(この窓だけの設定。REQ-367)。空なら今と同じ。
     """
 
     def fallback(reason: str) -> ShowCompareResult:
@@ -420,13 +531,24 @@ def compare_show(
     for side, text, rows in ((_T["side_before"], before, rows_before), (_T["side_after"], after, rows_after)):
         if text.strip() and not rows:
             return fallback(_T["no_rows"].format(side=side))
-    diffs, key = _compare_rows(rows_before, rows_after)
+    # 単純比較の置き換えを表の列の値にも当てる(ADR-0239)。0 組なら今の道。誤った式は今と同じ RawOptionsError で止める
+    replacements: CompiledReplacements = []
+    if options.replacements:
+        require_valid(options)
+        replacements = compile_replacements(options)
+    skip = _SkipColumns(skip_columns) if skip_columns else None
+    diffs, key, replaced_same = _compare_rows_counted(rows_before, rows_after, replacements, skip)
     raw = compare_raw(before, after, kind="show", rules=rules, enabled_ids=enabled_ids, options=options)
     # 動いた行・値の置き換えで説明できる行は数えない(REQ-283)。説明できない行がなければ表の結果だけにする
-    unexplained = _unexplained_lines(diffs, raw)
+    unexplained = _unexplained_lines(diffs, raw, skip.changes if skip is not None else ())
     if not diffs and unexplained:
         return ShowCompareResult(method="raw", fallback_reason=_T["outside_table"], raw=raw)
+    skipped: list[str] = []
+    if skip is not None:
+        present = {c.upper() for row in (*rows_before, *rows_after) for c in row}
+        skipped = [n for n in dict.fromkeys(c.upper() for c in skip_columns) if n in present]
     if diffs and unexplained:
         return ShowCompareResult(method="both", diffs=diffs, key_field=key, raw=raw,
-                                 unexplained_lines=unexplained)
-    return ShowCompareResult(method="structured", diffs=diffs, key_field=key)
+                                 unexplained_lines=unexplained, replaced_same=replaced_same, skipped_columns=skipped)
+    return ShowCompareResult(method="structured", diffs=diffs, key_field=key, replaced_same=replaced_same,
+                             skipped_columns=skipped)

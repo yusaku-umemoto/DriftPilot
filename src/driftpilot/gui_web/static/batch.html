@@ -232,6 +232,13 @@
   </div>
   <!-- ドロップの印の要素（REQ-205 / ADR-0147 決定2）。js/drop.js がドロップのファイルの一覧をここへ送り、Python はここの drop だけを受ける -->
   <div id="drop-anchor" hidden></div>
+  <!-- 組の行の右クリックのメニュー（REQ-368 / ADR-0244 決定1・4。比較の窓の右クリックのメニューと同じ部品 .pilot-menu）。
+       出す項目は js/batch.js が行ごとに決める（hidden）。開け閉め・矢印キー・Esc は js/row_menu.js。文は data-text の鍵 -->
+  <div class="pilot-menu" id="row-menu" role="menu" hidden>
+    <button type="button" class="pilot-menu-item" id="row-menu-handoff" role="menuitem" data-text="batch.menu.handoff"></button>
+    <button type="button" class="pilot-menu-item" id="row-menu-recheck" role="menuitem" data-text="batch.menu.recheck"></button>
+    <button type="button" class="pilot-menu-item" id="row-menu-platform" role="menuitem" data-text="batch.menu.platform"></button>
+  </div>
   <!-- 起動時の絵（ADR-0174 決定2）。--batch で最初に開いたときだけ（view の splash が真のとき）。窓いっぱいに重ね、
        1.2 秒後に 0.3 秒で薄くして消す。クリックかキーで、すぐ消す（js/character.js） -->
   <div class="pilot-splash" id="splash" hidden><img src="character/splash.png" alt="" aria-hidden="true" class="pilot-character" id="character-splash" hidden></div>

@@ -68,9 +68,15 @@
         <details class="pilot-details pilot-rawopt" id="raw-options">
           <summary><span data-text="raw_options.title"></span> <span class="pilot-note" id="raw-options-summary"></span></summary>
           <div class="pilot-details-body pilot-rawopt-body" id="rawopt-fields">
+            <!-- 比較の窓の欄は「この窓だけ」の設定（REQ-361 §5）。設定の窓にはこの注記を置かない（settings.html は別の見出しと注記） -->
+            <p class="pilot-note pilot-lines" data-text="raw_options.window_note"></p>
             <label for="rawopt-ignore" data-text="raw_options.ignore"></label>
             <textarea id="rawopt-ignore" class="pilot-input pilot-mono pilot-wide" rows="4" spellcheck="false"></textarea>
             <p class="pilot-note" data-text="raw_options.ignore.note"></p>
+            <!-- 無効にした無視する行の式があるときだけ出す注記（REQ-359 §5）。文の雛形（{count} を数に直す）は #rawopt-ignore-disabled-template。
+                 比較の窓と設定の窓で同じ id（雛形の文だけ窓ごとに違う） -->
+            <p class="pilot-note" id="rawopt-ignore-disabled" hidden></p>
+            <span id="rawopt-ignore-disabled-template" data-text="raw_options.ignore_disabled" hidden></span>
             <div class="pilot-row">
               <select id="rawopt-ignore-example" class="pilot-input" data-label="raw_options.example"><option value="" data-text="raw_options.example"></option></select>
             </div>
@@ -78,6 +84,7 @@
             <table class="pilot-table pilot-rawopt-replace" id="rawopt-replace">
               <thead>
                 <tr>
+                  <th scope="col" id="rawopt-replace-enabled-head" data-text="raw_options.replace.enabled"></th>
                   <th scope="col" id="rawopt-replace-pattern-head" data-text="raw_options.replace.pattern"></th>
                   <th scope="col" id="rawopt-replace-text-head" data-text="raw_options.replace.text"></th>
                   <th scope="col"><span id="rawopt-remove-label" data-text="raw_options.replace.remove" hidden></span></th>
@@ -85,10 +92,14 @@
               </thead>
               <tbody></tbody>
             </table>
+            <!-- 置き換えは show の表の比較の値にも当たる注記（ADR-0239 / REQ-358）。比較の窓と設定の窓で同じ id・同じ文のキー -->
+            <p class="pilot-note" id="rawopt-replace-note" data-text="raw_options.replace.note"></p>
             <div class="pilot-row">
               <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-replace-add" data-text="raw_options.replace.add"></button>
               <select id="rawopt-replace-example" class="pilot-input" data-label="raw_options.example"><option value="" data-text="raw_options.example"></option></select>
             </div>
+            <!-- 例から足そうとした式が既にあるとき、足さずに知らせる注記（ADR-0236 / REQ-353）。比較の窓と設定の窓で同じ id -->
+            <p class="pilot-note" id="rawopt-duplicate" data-text="raw_options.duplicate" hidden></p>
             <!-- 「AI に式を頼む…」（ADR-0218 決定 8 / REQ-314）。押すと小さな窓（下の #rawopt-ai-dialog）。比較の窓と設定の窓で同じ id・同じ中身 -->
             <div class="pilot-row">
               <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai" data-text="raw_options.ai.button"></button>
@@ -175,12 +186,32 @@
             <p class="pilot-band pilot-band--error pilot-lines" id="rawopt-problems" role="alert" hidden></p>
             <div class="pilot-row">
               <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-reset" data-text="raw_options.reset"></button>
+              <!-- この窓の欄の有効なルールのうち、既定のファイルに無いものを、既定のファイルの最後に足す（REQ-361 §5b。確認は dialog.js の confirm） -->
+              <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-add-defaults" data-text="raw_options.add_defaults"></button>
             </div>
+          </div>
+          <!-- この窓だけの「比べない列」（REQ-367 §3）。単純比較の設定の欄（#rawopt-fields）の外に置く（欄の値・いつも効く設定には入れない）。
+               構造化比較のタブの show の表の右クリックで足し、ここで 1 つずつ「外す」。「いつも効く設定に戻す」で空になる。
+               一覧は view のトップレベルの skip_columns から textContent だけで描く。文は data-text（{column} は画面が列の名前に直す） -->
+          <div class="pilot-details-body pilot-skip-columns" id="skip-columns">
+            <span class="pilot-rawopt-label" data-text="compare.skip_columns.title"></span>
+            <p class="pilot-note" data-text="compare.skip_columns.note"></p>
+            <ul class="pilot-note-list" id="skip-columns-list"></ul>
+            <span id="skip-columns-none" data-text="compare.skip_columns.none" hidden></span>
+            <span id="skip-columns-remove" data-text="compare.skip_columns.remove" hidden></span>
+            <span id="skip-columns-remove-template" data-text="compare.skip_columns.remove_label" hidden></span>
           </div>
         </details>
       </div>
     </section>
 
+    <!-- 設定の窓で保存した設定を受けたとき・「いつも効く設定に足す」で足したときの帯（REQ-361 §3・§5b）。変更の欄（#settings-panel）が
+         閉じていても見えるよう、欄の外に置く。文は Python が返し textContent で描く。ボタンは、この窓だけの設定を直接書いていて
+         入れ替えなかったときだけ（押すと「いつも効く設定に戻す」と同じ） -->
+    <div class="pilot-band pilot-band--info" id="raw-follow" role="status" hidden>
+      <span class="pilot-lines pilot-grow" id="raw-follow-text"></span>
+      <button type="button" class="pilot-button pilot-button--secondary" id="raw-follow-load" data-text="raw_follow.load" hidden></button>
+    </div>
     <!-- 起動したときに見つけた新しい版の知らせ（REQ-252 §5 / ADR-0188 決定2）。文は Python が返す。
          「更新…」で設定の窓を「更新」のタブで開き、「閉じる」でその起動の間は出さない -->
     <div class="pilot-band pilot-band--info" id="update-notice" role="status" hidden>
@@ -206,7 +237,7 @@
       <button type="button" class="pilot-button pilot-button--secondary" id="split-devices" data-text="compare.split_devices"></button>
     </div>
 
-    <!-- 左右の面（ADR-0148 決定2）。左が結果、右が AI の面。初めの幅は 58:42、どちらも最小 220px。760px 未満は縦に積む。幅は保存しない -->
+    <!-- 左右の面（ADR-0148 決定2）。左が結果、右が AI の面。初めの幅は 72:28、どちらも最小 220px。760px 未満は縦に積む。幅は利用者ごとの設定に覚える（REQ-370） -->
     <div class="pilot-fill pilot-split pilot-split--resizable" id="split">
     <!-- 結果の面。まとめて比べたとき（REQ-122）は左にコマンドの組の一覧を出し、選んだ組の結果を右のタブに出す。
          比較中は面の真ん中にスピナーと今の段階の文を重ねる（最後の #busy。REQ-205） -->
@@ -234,6 +265,15 @@
             <tbody></tbody>
           </table>
         </div>
+        <!-- 比べる対象から外した区間（REQ-367 §4）。見出しは「外した区間 {n}」、中は名前と「戻す」。0 個なら隠す。
+             中身は view.multi.excluded から textContent だけで描く。文は data-text（{n}・{name} は画面が直す） -->
+        <details class="pilot-details" id="multi-excluded" hidden>
+          <summary id="multi-excluded-title"></summary>
+          <ul class="pilot-note-list" id="multi-excluded-list"></ul>
+        </details>
+        <span id="multi-excluded-title-template" data-text="compare.multi.excluded.title" hidden></span>
+        <span id="multi-excluded-restore" data-text="compare.multi.excluded.restore" hidden></span>
+        <span id="multi-excluded-restore-template" data-text="compare.multi.excluded.restore_label" hidden></span>
         <!-- 組の手での選び直し（REQ-269）。まとめて比べた結果のときだけ出す（開いた保存の結果と 1 つのログの中で組にしたときは隠す）。
              押せるかは Python が決める（選んだ行が相手なし・エラーの出力なら「相手を選ぶ…」、組なら「組を外す」） -->
         <div class="pilot-row pilot-multi-pairing" id="multi-pairing" hidden>
@@ -296,7 +336,9 @@
           </details>
           <!-- カテゴリのチップ（ADR-0155 決定1）。「すべて N」とカテゴリごとの「名前 件数」。文字は Python が作る。カテゴリが 1 種類以下なら隠す -->
           <div class="pilot-chips" id="structured-chips" role="group" data-label="compare.filter.title" hidden></div>
-          <div class="pilot-table-wrap" tabindex="0">
+          <!-- 右クリックの「元の行を単純比較のタブで見る」「この列をこの窓だけ比べない」の知らせ（REQ-367 §2・§3）。最初は隠す。文は textContent だけで入れる -->
+          <p class="pilot-note" id="structured-menu-note" role="status" hidden></p>
+          <div class="pilot-table-wrap" id="structured-wrap" tabindex="0">
             <table class="pilot-table pilot-table--fixed" id="structured-table">
               <colgroup>
                 <col class="pilot-col-op-mark">
@@ -306,12 +348,15 @@
                 <col class="pilot-col-value-wide">
               </colgroup>
               <thead>
+                <!-- 見出しを押す・Enter・Space で、その列の並べ替え（昇順 → 降順 → 元の順。画面の中だけ。REQ-369）。
+                     列の境目（.pilot-col-resize）の上では並べ替えない。ボタンを入れ子にせず th 自体を押せるようにして、
+                     見出しのセルの意味と aria-sort をそのまま保つ -->
                 <tr>
-                  <th scope="col" data-text="compare.col.op"></th>
-                  <th scope="col" data-text="compare.col.category"></th>
-                  <th scope="col" data-text="compare.col.target_item"></th>
-                  <th scope="col" data-text="compare.col.before"></th>
-                  <th scope="col" data-text="compare.col.after"></th>
+                  <th scope="col" data-text="compare.col.op" aria-sort="none" tabindex="0"></th>
+                  <th scope="col" data-text="compare.col.category" aria-sort="none" tabindex="0"></th>
+                  <th scope="col" data-text="compare.col.target_item" aria-sort="none" tabindex="0"></th>
+                  <th scope="col" data-text="compare.col.before" aria-sort="none" tabindex="0"></th>
+                  <th scope="col" data-text="compare.col.after" aria-sort="none" tabindex="0"></th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -335,6 +380,32 @@
             <button type="button" class="pilot-button pilot-button--secondary" id="prev-diff" data-text="compare.button.prev"></button>
             <button type="button" class="pilot-button pilot-button--secondary" id="next-diff" data-text="compare.button.next"></button>
           </div>
+          <!-- 右クリックから足したルールが、同じで足せなかった・欄が満ちていて足せなかったときの知らせ（REQ-366 §2〜§4）。
+               比較の設定の欄が閉じていても分かるよう、ここに出す。文は js/compare.js が #rawopt-duplicate・#rawopt-ai-full の文を写す -->
+          <p class="pilot-note" id="raw-rule-note" role="status" hidden></p>
+          <!-- 効いているルール（REQ-359 / ADR-0240 決定 2）。閉じた折りたたみ。見出しと行は Python が返す（ルールが無ければ隠す）。
+               チェックを切り替えると、単純比較の設定の欄（#rawopt-fields）の無効が切り替わる（js/compare.js → js/raw_options.js）。
+               文字は textContent で入れる。表の部品は今の .pilot-table と同じ -->
+          <details class="pilot-details" id="raw-rules" hidden>
+            <summary id="raw-rules-title"></summary>
+            <div class="pilot-details-body">
+              <p class="pilot-note" data-text="raw_options.rules.note"></p>
+              <div class="pilot-table-wrap" tabindex="0">
+                <table class="pilot-table" id="raw-rules-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" data-text="raw_options.rules.col.enabled"></th>
+                      <th scope="col" data-text="raw_options.rules.col.kind"></th>
+                      <th scope="col" data-text="raw_options.rules.col.pattern"></th>
+                      <th scope="col" data-text="raw_options.rules.col.replacement"></th>
+                      <th scope="col" data-text="raw_options.rules.col.hits"></th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </details>
           <div class="pilot-table-wrap" id="raw-wrap" tabindex="0">
             <table class="pilot-table pilot-table--fixed pilot-mono" id="raw-table">
               <colgroup>
@@ -393,7 +464,7 @@
     </div>
 
     <!-- 境目。左右の矢印のキーで 20px ずつ、ドラッグ（pointer の事象）でも動く。名前は data-label の文 -->
-    <div class="pilot-split-handle" id="split-handle" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="result-pane" aria-valuenow="58" aria-valuemin="0" aria-valuemax="100" data-label="compare.split.label"></div>
+    <div class="pilot-split-handle" id="split-handle" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="result-pane" aria-valuenow="72" aria-valuemin="0" aria-valuemax="100" data-label="compare.split.label"></div>
 
     <!-- AI の面（ADR-0148 決定4・5・8）。いつも出す。上から見出し、答えと質問の吹き出し（スクロールは1本）、質問の欄、切り替えとボタン -->
     <section class="pilot-split-pane pilot-ai-pane" id="ai-pane" aria-labelledby="ai-title">
@@ -409,6 +480,7 @@
       <span id="ai-thinking-note" data-text="compare.ai.thinking.note" hidden></span>
       <!-- キャラクターがオンのときの空の面の案内（ADR-0181 決定2）。js/ai_view.js が読んで #ai-empty に入れる -->
       <span id="ai-empty-character" data-text="compare.ai.empty.character" hidden></span>
+      <span id="ai-empty-plain" data-text="compare.ai.empty" hidden></span>
       <div class="pilot-chat" id="ai-chat" tabindex="0">
         <!-- 答えが無いときの短い案内 -->
         <p class="pilot-note" id="ai-empty" data-text="compare.ai.empty"></p>
@@ -449,11 +521,17 @@
       <div class="pilot-ai-controls">
         <!-- 入力欄の横のマイクのボタン（ADR-0233 / REQ-341）。音声入力が使えないときは出さない（hidden）。状態・押せるか・文は Python が決める。
              録音中は音量の棒と経過の秒を出す。文字は入力欄のカーソルの位置に入れるだけで、送らない -->
-        <div class="pilot-voice-row">
+        <!-- 入力欄の枠（REQ-364）。右下にマイクのボタンと送信のボタン（#follow-up-send）を並べる。送信のボタンは Shift+Enter と同じ送り方を呼ぶだけ -->
+        <div class="pilot-chat-input">
           <textarea id="follow-up-question" class="pilot-input pilot-wide" rows="2" spellcheck="false" data-label="compare.ai.input" data-placeholder="compare.ai.input.hint"></textarea>
-          <button type="button" class="pilot-icon-button pilot-voice-button" id="voice-button" data-label="voice.button" aria-pressed="false" hidden disabled>
-            <svg class="pilot-voice-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
-          </button>
+          <div class="pilot-chat-input-buttons">
+            <button type="button" class="pilot-icon-button pilot-voice-button" id="voice-button" data-label="voice.button" aria-pressed="false" hidden disabled>
+              <svg class="pilot-voice-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+            </button>
+            <button type="button" class="pilot-icon-button pilot-chat-send" id="follow-up-send" data-label="compare.ai.send" disabled>
+              <svg class="pilot-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 4l7 8h-4.5v8h-5v-8H5z"/></svg>
+            </button>
+          </div>
         </div>
         <div class="pilot-voice-status" id="voice-status" hidden>
           <span class="pilot-voice-level" aria-hidden="true"><span class="pilot-voice-level-bar" id="voice-level-bar"></span></span>
@@ -506,6 +584,8 @@
     <!-- 人に渡す形の出力（ADR-0156）。形は選ぶダイアログで、秘密の行は必ず伏せる -->
     <button type="button" class="pilot-button pilot-button--secondary" id="export" data-text="compare.button.export"></button>
     <span class="pilot-note pilot-grow" id="save-note"></span>
+    <!-- 1 つのログを機器ごと・コマンドごとに分けて見る窓（ADR-0248 決定2 / REQ-377）。比べずに手元で読むだけ -->
+    <button type="button" class="pilot-button pilot-button--secondary" id="open-log-view" data-text="compare.button.log_view"></button>
     <button type="button" class="pilot-button pilot-button--secondary" id="open-batch" data-text="compare.button.batch"></button>
     <button type="button" class="pilot-button pilot-button--secondary" id="open-settings" data-text="compare.button.settings"></button>
   </footer>
@@ -515,6 +595,42 @@
     <span class="pilot-status-note" id="raw-settings-line" hidden></span>
     <span class="pilot-status-side" id="status-side"></span>
   </div>
+  <!-- 単純比較のタブの右クリックしたときの、窓の中の小さなメニュー（REQ-360 / ADR-0240 決定 3、REQ-366 / ADR-0244 決定 1・2）。
+       項目は 6 つ。どれも最初は隠し、右クリックした場所（選んだ文字・行）で出すものだけ見せる。動きは js/compare.js。
+       説明の決まった文は隠した要素に持つ（HTML に文は書かない。文は data-text） -->
+  <div class="pilot-menu" id="raw-menu" role="menu" data-label="compare.raw.menu.ai" hidden>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="raw-menu-ai" data-text="compare.raw.menu.ai" hidden></button>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="raw-menu-replace" data-text="compare.raw.menu.replace" hidden></button>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="raw-menu-digits" data-text="compare.raw.menu.digits" hidden></button>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="raw-menu-ignore" data-text="compare.raw.menu.ignore" hidden></button>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="raw-menu-rules" data-text="compare.raw.menu.rules" hidden></button>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="raw-menu-ask" data-text="compare.raw.menu.ask" hidden></button>
+  </div>
+  <span id="raw-menu-description" data-text="compare.raw.menu.description" hidden></span>
+  <!-- 構造化比較のタブの行の右クリックしたときのメニュー（REQ-367 §2・§3）。項目は「元の行を単純比較のタブで見る」と、
+       show の表の変更の行で変わった列ごとの「この列をこの窓だけ比べない: 列」（列の項目は #structured-menu-columns に textContent だけで作る）。
+       どれも最初は隠し、右クリックした行で出すものだけ見せる。動きは js/compare.js -->
+  <div class="pilot-menu" id="structured-menu" role="menu" data-label="compare.structured.menu.source" hidden>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="structured-menu-source" data-text="compare.structured.menu.source" hidden></button>
+    <div id="structured-menu-columns"></div>
+  </div>
+  <span id="structured-menu-skip-template" data-text="compare.structured.menu.skip_column" hidden></span>
+  <span id="structured-menu-not-found" data-text="compare.structured.menu.not_found" hidden></span>
+  <span id="structured-menu-skip-duplicate" data-text="compare.structured.menu.skip_duplicate" hidden></span>
+  <span id="structured-menu-skip-full" data-text="compare.structured.menu.skip_full" hidden></span>
+  <!-- コマンドの組の一覧の行の右クリックしたときのメニュー（REQ-367 §4）。項目は「この区間を比べる対象から外す」の 1 つ -->
+  <div class="pilot-menu" id="multi-menu" role="menu" data-label="compare.multi.menu.exclude" hidden>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="multi-menu-exclude" data-text="compare.multi.menu.exclude"></button>
+  </div>
+  <!-- 「この行に効いているルールを見る」の小さな窓（REQ-366 §5）。見出しと本文は textContent だけで入れる。
+       本文は側（変更前・変更後）ごとに、当たったルールの種類・式・置き換える文字。Esc か「閉じる」で閉じ、フォーカスを表に戻す -->
+  <dialog id="raw-line-rules" class="pilot-dialog" aria-labelledby="raw-line-rules-title">
+    <h2 class="pilot-dialog-title" id="raw-line-rules-title" data-text="compare.raw.line_rules.title"></h2>
+    <div class="pilot-dialog-body" id="raw-line-rules-body"></div>
+    <div class="pilot-dialog-buttons">
+      <button type="button" class="pilot-button pilot-button--secondary" id="raw-line-rules-close" data-text="raw_options.ai.close"></button>
+    </div>
+  </dialog>
   <!-- 「AI に式を頼む…」の小さな窓（ADR-0218 決定 8 / REQ-314）。比較の窓と設定の窓で同じ id・同じ中身。動きは js/raw_options.js。
        欄（#rawopt-fields）の外に置く（中で打った文字の change を欄の外側に届かせないため）。段は 4 つ（入力・確認・待つ間・結果）で、
        文はすべて data-text か Python が返した文（textContent）。式・置き換える文字・説明・貼った行も textContent だけで入れる -->
@@ -527,6 +643,8 @@
         <label for="rawopt-ai-description" data-text="raw_options.ai.description"></label>
         <input id="rawopt-ai-description" class="pilot-input pilot-wide" type="text" autocomplete="off" spellcheck="false" aria-describedby="rawopt-ai-description-hint">
         <p class="pilot-note" id="rawopt-ai-description-hint" data-text="raw_options.ai.description.hint"></p>
+        <!-- 右クリックから開いたときだけ出す、選んだ文字（REQ-360）。ボタンから開いたときと窓を閉じたときは隠す。中身は textContent -->
+        <p class="pilot-note pilot-lines" id="rawopt-ai-selection" hidden><span data-text="raw_options.ai.selection"></span> <code class="pilot-mono" id="rawopt-ai-selection-text"></code></p>
         <fieldset class="pilot-radio-group">
           <legend data-text="raw_options.ai.kind"></legend>
           <label class="pilot-radio"><input class="pilot-check" type="radio" name="rawopt-ai-kind" id="rawopt-ai-kind-replace" value="replace" checked><span data-text="raw_options.ai.kind.replace"></span></label>
@@ -564,6 +682,7 @@
     <div class="pilot-rawopt-ai-stage" id="rawopt-ai-result" hidden>
       <div class="pilot-dialog-body">
         <p class="pilot-band pilot-band--error pilot-lines" id="rawopt-ai-failure" role="alert" hidden></p>
+        <span id="rawopt-ai-duplicate" data-text="raw_options.ai.duplicate" hidden></span>
         <div class="pilot-rawopt-ai-found" id="rawopt-ai-found" hidden>
           <span class="pilot-rawopt-label" data-text="raw_options.ai.result.pattern"></span>
           <code class="pilot-mono pilot-lines" id="rawopt-ai-pattern"></code>

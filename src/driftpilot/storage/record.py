@@ -60,6 +60,14 @@ CONVERSATION_KEY = "conversation"
 # REQ-281 で足した result.show の項目(ADR-0200)。表で比べたときも単純比較を流し、説明できなかった行の数を持つ。
 # 版を据え置いたため、これが無い保存(REQ-281 より前)も 0 として読む(show の組は method が structured か raw のまま)
 SHOW_UNEXPLAINED_KEY = "unexplained_lines"
+# REQ-358 で足した result.show の項目(ADR-0239 決定4)。置き換えで同じとみなした表の列の値の数。1 以上のときだけ書く
+# (0 の保存は今と 1 文字も変えない)。版を据え置いたため、無い保存も 0 として読む
+SHOW_REPLACED_SAME_KEY = "replaced_same"
+# REQ-367 で足した result.show の項目。比べない列(この窓だけの設定)のうち表に出てきた列の名前。空のときは書かない
+# (空の保存は今と 1 文字も変えない)。版を据え置いたため、無い保存も空として読む
+SHOW_SKIPPED_COLUMNS_KEY = "skipped_columns"
+RULE_HITS_KEY = "rule_hits"  # result.raw.options.rule_hits(ルールごとの当たった行の数。REQ-359。ルールが 0 個なら書かない)
+LINE_HITS_KEY = "line_hits"  # result.raw.options.line_hits(行ごとに当たったルールの番号。REQ-366。ルールが 0 個なら書かない)
 DEFAULT_LABEL = "compare"
 _UNSAFE_LABEL = re.compile(r"[^A-Za-z0-9._-]")
 _MISSING = object()
@@ -334,6 +342,14 @@ def build_record(
     for raw in _raw_dicts(result):
         if raw.get(RESULT_RAW_OPTIONS_KEY, _MISSING) is None:
             del raw[RESULT_RAW_OPTIONS_KEY]
+        elif isinstance(record := raw.get(RESULT_RAW_OPTIONS_KEY), dict):
+            for key in (RULE_HITS_KEY, LINE_HITS_KEY):
+                if record.get(key, _MISSING) is None:
+                    del record[key]  # ルールが 0 個のときは書かない(今と 1 文字も変えない。REQ-359・REQ-366)
+    if isinstance(show := result.get("show"), dict) and not show.get(SHOW_REPLACED_SAME_KEY):
+        show.pop(SHOW_REPLACED_SAME_KEY, None)  # 0 のときは書かない(今と 1 文字も変えない。REQ-358)
+    if isinstance(show := result.get("show"), dict) and not show.get(SHOW_SKIPPED_COLUMNS_KEY):
+        show.pop(SHOW_SKIPPED_COLUMNS_KEY, None)  # 空のときは書かない(今と 1 文字も変えない。REQ-367)
     conversation = conversation_plain(outcome)
     if conversation is None:
         del result[CONVERSATION_KEY]  # 答えが無い・やり取りの無い保存は今と1文字も変えない(auto_platform と同じ)
@@ -491,6 +507,8 @@ def from_record(record: Any) -> StoredRecord:
         result = _fill_pager_marks(result)
         result = _fill_raw_options(result)
         result = _fill_show_unexplained(result)
+        result = _fill_show_replaced_same(result)
+        result = _fill_show_skipped_columns(result)
         # REQ-242 より前の保存・答えが無い保存・やり取りの無い保存には result.conversation が無い。None として読む
         # (auto_platform と同じ扱い)。あれば形を確かめてから、(質問, 回答) の並びに直して組み立てる
         result = {**result, CONVERSATION_KEY: _read_conversation(result.get(CONVERSATION_KEY))}
@@ -590,6 +608,8 @@ def _fill_raw_options(result: dict[str, Any]) -> dict[str, Any]:
 
     REQ-227 の形の保存には、REQ-228 で足した項目が無い。options の中の detect_moves・algorithm は False・"standard"、
     moves・moves_skipped・algorithm_used は []・False・options.algorithm(それも無ければ "standard")を入れてから組み立てる。
+    REQ-359: rule_hits(ルールごとの当たった行の数)が無い保存は None として読む。
+    REQ-366: line_hits(行ごとに当たったルールの番号)が無い保存も None として読む。
     """
     filled = dict(result)
     if isinstance(raw := filled.get("raw"), dict):
@@ -610,6 +630,22 @@ def _fill_show_unexplained(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _fill_show_replaced_same(result: dict[str, Any]) -> dict[str, Any]:
+    """0 のときは result.show.replaced_same を書かない(REQ-358)。無ければ 0 として読む(_fill_show_unexplained と同じ書き方)。"""
+    show = result.get("show")
+    if isinstance(show, dict) and SHOW_REPLACED_SAME_KEY not in show:
+        return {**result, "show": {**show, SHOW_REPLACED_SAME_KEY: 0}}
+    return result
+
+
+def _fill_show_skipped_columns(result: dict[str, Any]) -> dict[str, Any]:
+    """空のときは result.show.skipped_columns を書かない(REQ-367)。無ければ空として読む。"""
+    show = result.get("show")
+    if isinstance(show, dict) and SHOW_SKIPPED_COLUMNS_KEY not in show:
+        return {**result, "show": {**show, SHOW_SKIPPED_COLUMNS_KEY: []}}
+    return result
+
+
 def _fill_raw_dict(raw: dict[str, Any]) -> dict[str, Any]:
     """result.raw(か result.show.raw)の写しに、無い項目を入れる(_fill_raw_options)。"""
     if RESULT_RAW_OPTIONS_KEY not in raw:
@@ -621,7 +657,7 @@ def _fill_raw_dict(raw: dict[str, Any]) -> dict[str, Any]:
     if isinstance(plain, dict):
         plain = {"detect_moves": False, "algorithm": "standard", **plain}
     algorithm = plain.get("algorithm", "standard") if isinstance(plain, dict) else "standard"
-    filled = {"moves": [], "moves_skipped": False, "algorithm_used": algorithm, **record}
+    filled = {"moves": [], "moves_skipped": False, "algorithm_used": algorithm, RULE_HITS_KEY: None, LINE_HITS_KEY: None, **record}
     if isinstance(plain, dict):
         filled["options"] = plain
     return {**raw, RESULT_RAW_OPTIONS_KEY: filled}

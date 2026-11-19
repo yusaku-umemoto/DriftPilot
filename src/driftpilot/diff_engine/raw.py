@@ -14,8 +14,9 @@ from driftpilot.diff_engine.raw_moves import RawMove
 from driftpilot.raw_keys import (
     DEFAULT_RAW_OPTIONS,
     Algorithm,
+    LineRuleHit,
     RawOptions,
-    compute_keys,
+    compute_keys_traced,
     options_to_plain,
     require_valid,
 )
@@ -54,6 +55,39 @@ class RawOptionsPlain(TypedDict):
     algorithm: str  # REQ-228(standard・minimal・patience)
 
 
+class RuleHit(TypedDict):
+    """ルール 1 つの当たった行の数(側ごと。REQ-359 §3)。"""
+
+    before: int
+    after: int
+
+
+class RuleHitsPlain(TypedDict):
+    """ルールごとの当たった行の数。渡されたルールの並びと同じ順(無視する行・置き換えのそれぞれ)。"""
+
+    ignore_lines: list[RuleHit]
+    replacements: list[RuleHit]
+
+
+class LineHit(TypedDict):
+    """1 行に当たったルール(REQ-366 §5)。番号は 1 から数える。
+
+    ignore_line は無視した式の番号(無視していなければ None)。replacements は文字を変えた置き換えの組の番号(上から順)。
+    番号は記録の options の ignore_lines・replacements の並びの位置。
+    """
+
+    line_no: int
+    ignore_line: int | None
+    replacements: list[int]
+
+
+class LineHitsPlain(TypedDict):
+    """行ごとに当たったルール。当たったルールのある行だけを、行番号の順に並べる。"""
+
+    before: list[LineHit]
+    after: list[LineHit]
+
+
 class EquatedPair(TypedDict):
     before_line_no: int
     after_line_no: int
@@ -68,6 +102,12 @@ class RawOptionsRecord:
 
     REQ-228: moves は見つけた行の移動(detect_moves が偽なら [])。moves_skipped は差分の行が多くて探さなかったとき真。
     algorithm_used は実際に使った比べ方(minimal が上限を超えて standard に戻ったときは "standard")。作るときに省けば設定の algorithm。
+
+    REQ-359: rule_hits はルールごとの当たった行の数。無視する行も置き換えも 0 個のときは None(JSON・保存に欄を出さない)。
+    無視する行は、その式で比べなかった行の数(1 行に複数の式が当たれば最初の式に数える)。置き換えは、その組で文字が変わった行の数
+    (無視した行は数えない)。
+
+    REQ-366: line_hits は行ごとに当たったルールの番号(側ごと)。rule_hits と同じ条件で None(JSON・保存に欄を出さない)。
     """
 
     options: RawOptionsPlain
@@ -76,6 +116,8 @@ class RawOptionsRecord:
     moves: list[RawMove] = field(default_factory=list)
     moves_skipped: bool = False
     algorithm_used: Algorithm | None = None
+    rule_hits: RuleHitsPlain | None = None
+    line_hits: LineHitsPlain | None = None
 
     def __post_init__(self) -> None:
         if self.algorithm_used is None:
@@ -162,7 +204,7 @@ def _keyed_diffs(
     before_lines: list[str], after_lines: list[str], options: RawOptions
 ) -> tuple[list[RawDiffLine], RawOptionsRecord]:
     """鍵で比べる(ADR-0166 決定3)。無視した行(鍵が None)は比べない。番号と文字は元の行のもの。"""
-    before_keys, after_keys = compute_keys(before_lines, after_lines, options)
+    before_keys, after_keys, before_counts, after_counts = compute_keys_traced(before_lines, after_lines, options)
     before_kept = [(i, k) for i, k in enumerate(before_keys) if k is not None]
     after_kept = [(j, k) for j, k in enumerate(after_keys) if k is not None]
     # 比べ方(REQ-228 §4)。standard なら REQ-227 と同じ SequenceMatcher(autojunk=False) の呼び出し
@@ -195,6 +237,34 @@ def _keyed_diffs(
         else:
             moves = result
     plain: RawOptionsPlain = options_to_plain(options)  # type: ignore[assignment]
+    hits: RuleHitsPlain | None = None
+    lines_hit: LineHitsPlain | None = None
+    if options.ignore_lines or options.replacements:
+        lines_hit = {
+            "before": [_line_hit(h) for h in before_counts.lines],
+            "after": [_line_hit(h) for h in after_counts.lines],
+        }
+        hits = {
+            "ignore_lines": [
+                {"before": b, "after": a}
+                for b, a in zip(before_counts.ignore_lines, after_counts.ignore_lines, strict=True)
+            ],
+            "replacements": [
+                {"before": b, "after": a}
+                for b, a in zip(before_counts.replacements, after_counts.replacements, strict=True)
+            ],
+        }
     return diffs, RawOptionsRecord(
-        options=plain, ignored=ignored, equated=equated, moves=moves, moves_skipped=skipped, algorithm_used=used
+        options=plain,
+        ignored=ignored,
+        equated=equated,
+        moves=moves,
+        moves_skipped=skipped,
+        algorithm_used=used,
+        rule_hits=hits,
+        line_hits=lines_hit,
     )
+
+
+def _line_hit(hit: LineRuleHit) -> LineHit:
+    return {"line_no": hit.line_no, "ignore_line": hit.ignore_line, "replacements": list(hit.replacements)}

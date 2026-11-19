@@ -113,7 +113,7 @@ You need an AI profile first ([Settings → AI profiles](#ai-profiles)).
    - **Differences (masked, read only)** — exactly what will be sent. In the example, the SNMP community names became `<secret:1>` and `<secret:2>`.
    - The first line tells you how many differences are sent (`Sending 5 of 5 differences`).
    - Click **Send** or **Don't send**.
-4. The answer appears in the AI area. Type a follow-up question in the box below it (Shift+Enter to send, Enter for a new line).
+4. The answer appears in the AI area. Type a follow-up question in the box below it (Shift+Enter to send, Enter for a new line). You can also send it with the arrow button at the bottom right of the box.
 
 What DriftPilot does before sending:
 

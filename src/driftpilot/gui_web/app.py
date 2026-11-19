@@ -18,6 +18,9 @@
   一括比較の窓は単独で開いたとき(--batch)も受ける
 - AI の窓(static/ai_pane.html。ADR-0160 / REQ-220)は比較の窓の AI の面の「↗」で開く。560×800(最小 360×480)、文字を選べる。
   比較の画面のときだけ WebSession に渡す(--batch・--settings では開かない)
+- 「ログを見る」の窓(static/log_view.html。ADR-0248 決定2 / REQ-377)は比較の窓の「ログを見る…」で開く。1180×860(最小 800×600)、
+  文字を選べる、作業領域の中央。比較の画面のときだけ WebSession に渡す(--batch・--settings では開かない。起動の引数は無い)。
+  ファイルのドロップは、窓の読み込みの後に WebSession が watch_drop で受ける
 - Windows の exe で動いているときだけ、start に storage_path として設定のフォルダーの webview を渡す(ADR-0186 決定2。
   WebView2 の作業のデータを、展開したフォルダーの外に作らない)。private_mode は渡さない(既定の真のまま)
 - start が戻った後は、ほかの非デーモンのスレッドを合わせて最大2秒待ってから os._exit で終わる(REQ-111。pywebview の
@@ -30,6 +33,11 @@
   知らせる(ADR-0192 / REQ-263。gui_web/bundled_files.py。run の 3 か所の知らせ)
 - Windows の exe では、run の最初(import webview の前)に同梱のフォルダーの「インターネットから取った」印を外す。
   欠けが無いのに印が残っていて開けなかったときは、「許可する」で展開し直すよう知らせる(ADR-0196 / REQ-274)
+
+- 動いている間のアイコン(ADR-0246 / REQ-373。gui_web/app_icon.py): start の直前に AppIcon.startup() で設定の
+  [gui] character を読み、オンならキャラクター版、オフならピクセル風の画像のパス(Mac は PNG、Windows は .ico)を icon= に渡す。
+  画像が無い・ほかの OS なら icon= を渡さない。保存したときの切り替えは WebSession.settings_saved(--settings だけのときは
+  SettingsApi の保存の後の口)が AppIcon.follow を呼ぶ
 
 webview は run() の中で読む(このモジュールは pywebview 無しでも読める。テストは偽物に差し替える)。
 """
@@ -44,6 +52,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from driftpilot.gui_web import app_icon as app_icon_module
 from driftpilot.gui_web import bundled_files
 from driftpilot.gui_web import theme as theme_module
 from driftpilot.gui_web.bridge import Api
@@ -80,6 +89,11 @@ BATCH_PAGE = "static/batch.html"
 AI_PANE_SIZE = (560, 800)
 AI_PANE_MIN_SIZE = (360, 480)
 AI_PANE_PAGE = "static/ai_pane.html"
+# 「ログを見る」の窓(ADR-0248 決定2 / REQ-377)。比較の窓の「ログを見る…」で開く。窓の題は LOG_VIEW_TITLE。
+# 大きさ・最小の大きさは比較の窓と同じ。位置と大きさは保存しない。起動の引数は無い
+LOG_VIEW_SIZE = (1180, 860)
+LOG_VIEW_MIN_SIZE = (800, 600)
+LOG_VIEW_PAGE = "static/log_view.html"
 # Windows の WebView2 の表示部品の名前(webview.renderer)。これ以外は WebView2 が無いとみなす
 WEBVIEW2 = "edgechromium"
 # Windows の exe のときに WebView2 の作業のデータを置く、設定のフォルダーの中のフォルダー(ADR-0186 決定2)
@@ -266,7 +280,14 @@ def run(
         "text_select": True,
         **window_geometry(screens, size=AI_PANE_SIZE),
     }
+    log_view_window = {
+        "url": page_url(LOG_VIEW_PAGE),
+        "min_size": LOG_VIEW_MIN_SIZE,
+        "text_select": True,
+        **window_geometry(screens, size=LOG_VIEW_SIZE),
+    }
     voice: VoiceHub | None = None
+    app_icon = app_icon_module.AppIcon(webview_module=webview)  # 動いている間のアイコン(REQ-373)
     launch_args = (
         {}
         if launch is None
@@ -280,6 +301,8 @@ def run(
         api = SettingsApi()
         window = webview.create_window(SETTINGS_TITLE, js_api=api, **themed_window(settings_window, theme))
         api._attach(window)  # 知らせ(送っている最中)と「閉じる」に使う
+        # 保存できたら動いている間のアイコンを切り替える(WebSession が無いので、ここで直接つなぐ。REQ-373)
+        api._set_on_saved(lambda: app_icon.follow([window]))
         # 窓の上の × で閉じたときも「更新する」の準備を止めて捨てる(REQ-253 §5)。偽の窓に events が無くても動く
         events = getattr(window, "events", None)
         if events is not None and hasattr(events, "closed"):
@@ -290,6 +313,7 @@ def run(
             settings_window=settings_window,
             batch_window=batch_window,
             watch_drop=watch_drop,
+            app_icon=app_icon,
             **launch_args,
         )
         session.open_batch()  # 比較の窓をつながないので「比較画面で開く」は押せない
@@ -303,6 +327,8 @@ def run(
             batch_window=batch_window,
             watch_drop=watch_drop,
             ai_window=ai_window,
+            log_view_window=log_view_window,
+            app_icon=app_icon,
             **launch_args,
         )
         # 音声入力(ADR-0233)。比較の画面のときだけ持つ。子の起動・止めるのは hub(窓を閉じる処理は待たせない)
@@ -323,11 +349,15 @@ def run(
         # gui= と http_server= は渡さない(既定のまま)。Windows の exe のときだけ、WebView2 の作業のデータを
         # 設定のフォルダーの webview の中に置く(ADR-0186 決定2)。private_mode は渡さない(既定の真のまま)。
         # フォルダーが作れないときは pywebview が WebViewException を出し、下の「画面を開けない」の扱いに乗る
+        # icon= は画像があるときだけ渡す(キャラクターがオンならキャラクター版、オフならピクセル風。REQ-373)
+        start_args: dict[str, Any] = {}
         portable = portable_settings_dir()
-        if portable is None:
-            webview.start()
-        else:
-            webview.start(storage_path=str(portable / WEBVIEW_STORAGE_DIR))
+        if portable is not None:
+            start_args["storage_path"] = str(portable / WEBVIEW_STORAGE_DIR)
+        icon = app_icon.startup()
+        if icon is not None:
+            start_args["icon"] = icon
+        webview.start(**start_args)
     except webview.WebViewException as exc:
         if voice is not None:
             voice.close()

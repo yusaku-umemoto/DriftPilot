@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script type="module" blocking="render" src="js/theme.js"></script>
+  <title>DriftPilot</title>
+  <link rel="stylesheet" href="pilot.css">
+  <script type="module" src="js/log_view.js"></script>
+</head>
+<!--
+  「ログを見る」の画面（ADR-0248 決定2 / REQ-377）。比べずに、1 つのログを機器ごと・コマンドごとに分けて手元で読むだけの窓。何も送らない。
+  上から ①上の行（ファイル名・機器と行の数・「開く…」「貼り付け…」） ②左右の面（左に機器の一覧とコマンドの一覧、右に選んだコマンドの出力。
+  境目はドラッグと矢印のキーで動く） ③操作（機器ごとのファイルに書き出す…） ④ステータス。
+  文は書かず、data-text・data-label（title と aria-label）の鍵で messages.py の文を取る。半角の括弧を含む文（機器の数・行の数・状態の行）は
+  Python が返す状態から描く。状態は Python（gui_web/log_view_api.py）が返す JSON を js/log_view.js が描く。
+  窓の中身は縦にスクロールさせず、左右の面の表がそれぞれスクロールする。出力の表は折り返さず、横にもスクロールする。
+  ファイル名の欄は後ろ（ファイル名の側）を見せる（js/path_tail.js）。ファイルのドロップは #drop-anchor（js/drop.js）
+-->
+<body class="pilot-window">
+  <main class="pilot-body">
+    <!-- ①上の行 -->
+    <section class="pilot-group pilot-compare-top">
+      <div class="pilot-row pilot-settings-line">
+        <label for="file-name" data-text="log_view.file"></label>
+        <input id="file-name" class="pilot-input pilot-grow" type="text" readonly>
+        <span id="summary"></span>
+        <button type="button" class="pilot-button pilot-button--secondary" id="open" data-text="log_view.button.open"></button>
+        <button type="button" class="pilot-button pilot-button--secondary" id="paste" data-text="log_view.button.paste"></button>
+      </div>
+    </section>
+
+    <!-- ②左右の面。左の面の初めの幅は 32%、どちらも最小 220px。760px 未満は縦に積む。幅は覚えない -->
+    <div class="pilot-fill pilot-split pilot-split--resizable pilot-split--log" id="split">
+      <div class="pilot-split-pane pilot-log-lists" id="lists">
+        <!-- 機器の一覧（ホスト名・コマンドの数） -->
+        <section class="pilot-log-list" aria-labelledby="devices-title">
+          <h2 class="pilot-group-title" id="devices-title" data-text="log_view.devices.title"></h2>
+          <div class="pilot-table-wrap" id="devices-wrap" tabindex="0">
+            <table class="pilot-table pilot-table--fixed" id="devices-table">
+              <colgroup>
+                <col>
+                <col class="pilot-col-log-count">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col" data-text="log_view.devices.col.host"></th>
+                  <th scope="col" class="pilot-num" data-text="log_view.devices.col.commands"></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+        <!-- 選んだ機器のコマンドの一覧（コマンド・行の数・印）。印は「エラーの出力」「前置き」 -->
+        <section class="pilot-log-list">
+          <div class="pilot-table-wrap" id="commands-wrap" tabindex="0">
+            <table class="pilot-table pilot-table--fixed" id="commands-table">
+              <colgroup>
+                <col>
+                <col class="pilot-col-log-count">
+                <col class="pilot-col-log-mark">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col" data-text="log_view.commands.col.command"></th>
+                  <th scope="col" class="pilot-num" data-text="log_view.commands.col.lines"></th>
+                  <th scope="col" data-text="log_view.commands.col.mark"></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+      <!-- 一覧と出力の境目。左右の矢印のキーで 20px ずつ、ドラッグでも動く。名前は data-label の文 -->
+      <div class="pilot-split-handle" id="split-handle" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="lists" aria-valuenow="32" aria-valuemin="0" aria-valuemax="100" data-label="log_view.split.label"></div>
+      <section class="pilot-split-pane pilot-log-output-pane" id="output-pane">
+        <!-- 探す（文字そのまま・大文字と小文字を区別しない。今の区間の行だけ）とコピー -->
+        <div class="pilot-row pilot-log-tools">
+          <label for="find" data-text="log_view.find.label"></label>
+          <input id="find" class="pilot-input" type="search" autocomplete="off" spellcheck="false">
+          <button type="button" class="pilot-button pilot-button--secondary" id="find-prev" data-text="log_view.find.prev"></button>
+          <button type="button" class="pilot-button pilot-button--secondary" id="find-next" data-text="log_view.find.next"></button>
+          <span class="pilot-note pilot-log-count" id="find-count" role="status"></span>
+          <span class="pilot-spacer"></span>
+          <button type="button" class="pilot-button pilot-button--secondary" id="copy-output" data-text="log_view.copy.output"></button>
+          <button type="button" class="pilot-button pilot-button--secondary" id="copy-with-command" data-text="log_view.copy.with_command"></button>
+        </div>
+        <p class="pilot-note" id="empty" data-text="log_view.empty"></p>
+        <!-- 選んだコマンドの出力（行番号つき・等幅・折り返しなし）。選んだ区間の行だけを描く -->
+        <div class="pilot-table-wrap pilot-log-output-wrap" id="output-wrap" tabindex="0" hidden>
+          <table class="pilot-table pilot-table--fixed pilot-log-output" id="output-table">
+            <colgroup>
+              <col id="output-number-col">
+              <col id="output-text-col">
+            </colgroup>
+            <thead>
+              <tr>
+                <th scope="col" class="pilot-num" data-text="log_view.output.col.number"></th>
+                <th scope="col" data-text="log_view.output.col.text"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- ③下のボタン: 機器が 2 台以上のときだけ押せる（押せないときは disabled） -->
+  <footer class="pilot-footer">
+    <button type="button" class="pilot-button pilot-button--secondary" id="export" data-text="log_view.button.export" disabled></button>
+  </footer>
+  <!-- ④ステータス（読み込み中・読めた・読めなかった・書き出した） -->
+  <div class="pilot-statusbar" role="status">
+    <span class="pilot-status-main" id="status-main"></span>
+  </div>
+  <!-- ドロップの印の要素（REQ-205 / ADR-0147 決定2）。js/drop.js がドロップのファイルの一覧をここへ送り、Python はここの drop だけを受ける -->
+  <div id="drop-anchor" hidden></div>
+</body>
+</html>

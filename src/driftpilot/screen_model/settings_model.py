@@ -2795,9 +2795,10 @@ def raw_defaults_pane(
     """既定のファイルを読んで、タブの欄の値を作る。読めなければ欄を既定で出し、帯の文を返す。"""
     from driftpilot.screen_model.model import raw_examples, raw_form_defaults, raw_form_values
 
-    options, context_lines, error = raw_form_defaults(platform=platform, env=env, home=home)
+    loaded, error = raw_form_defaults(platform=platform, env=env, home=home)
     path = raw_settings_path(platform=platform, env=env, home=home).absolute()
-    return RawDefaultsPane(path, raw_form_values(options, context_lines), error, raw_examples())
+    values = raw_form_values(loaded.options, loaded.context_lines, loaded.disabled)
+    return RawDefaultsPane(path, values, error, raw_examples())
 
 
 @dataclass(frozen=True)
@@ -2816,11 +2817,12 @@ def save_raw_defaults_form(
     from driftpilot.screen_model.model import read_raw_form
 
     form = read_raw_form(values)
-    if form.options is None:
+    if form.options is None or form.all_options is None:
         return RawDefaultsSaved(form.problems)
     path = raw_settings_path(platform=platform, env=env, home=home).absolute()
     try:
-        _save_raw_defaults(path, form.options, form.context_lines)
+        # 保存するのは無効のルールも含めた全部のルールと、無効のルール(REQ-359)
+        _save_raw_defaults(path, form.all_options, form.context_lines, form.disabled)
     except SettingsError as exc:
         return RawDefaultsSaved([], error=str(exc))
     return RawDefaultsSaved([], notice=raw_defaults_saved(path))

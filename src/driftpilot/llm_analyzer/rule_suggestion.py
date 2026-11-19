@@ -81,6 +81,7 @@ _ANSWER_NOTE_JA = f"{HEAD_NOTE} 何に当たるかの 1 文"
 _DESCRIPTION_HEADER_JA = "=== 利用者の説明 ==="
 _LINES_HEADER_JA = "=== 貼られた行（伏せた後。判定できなかった {omitted} 行は除いています）==="
 _END_JA = "=== ここまで ==="
+_SELECTION_JA = "消したい部分: {selection}"
 
 _HEAD_EN = (
     "You help create a regular expression that aligns the parts of network device output that should not be treated as differences when comparing.",
@@ -106,6 +107,7 @@ _ANSWER_NOTE_EN = f"{HEAD_NOTE} one sentence on what it matches"
 _DESCRIPTION_HEADER_EN = "=== User description ==="
 _LINES_HEADER_EN = "=== Pasted lines (after masking; {omitted} lines that could not be judged are left out) ==="
 _END_EN = "=== End ==="
+_SELECTION_EN = "Part to remove: {selection}"
 
 _HEAD = i18n.choose(_HEAD_JA, _HEAD_EN)
 _REPLACE_RULE = i18n.choose(_REPLACE_RULE_JA, _REPLACE_RULE_EN)
@@ -117,10 +119,14 @@ _ANSWER_NOTE = i18n.choose(_ANSWER_NOTE_JA, _ANSWER_NOTE_EN)
 _DESCRIPTION_HEADER = i18n.choose(_DESCRIPTION_HEADER_JA, _DESCRIPTION_HEADER_EN)
 _LINES_HEADER = i18n.choose(_LINES_HEADER_JA, _LINES_HEADER_EN)
 _END = i18n.choose(_END_JA, _END_EN)
+_SELECTION = i18n.choose(_SELECTION_JA, _SELECTION_EN)
 
 
-def build_rule_prompt(kind: str, description: str, masked_body: str, omitted: int) -> str:
+def build_rule_prompt(kind: str, description: str, masked_body: str, omitted: int, selection: str | None = None) -> str:
     """AI に送る文(§3.1)。description は説明、masked_body は伏せた後の貼った行(build_after_text の body)、omitted は除いた行の数。
+
+    selection は単純比較のタブで選んだ文字(REQ-360)。None でなければ、説明の行のすぐ後に「消したい部分: …」の 1 行を足す。
+    None なら足さず、文は今と 1 文字も同じ。
 
     kind が replace なら「置き換え」の説明と REPLACEMENT の行を、ignore なら「行ごと比べない」の説明を入れる。kind が違えば ValueError。
     """
@@ -137,6 +143,7 @@ def build_rule_prompt(kind: str, description: str, masked_body: str, omitted: in
         "",
         _DESCRIPTION_HEADER,
         description.strip(),
+        *(() if selection is None else (_SELECTION.format(selection=selection),)),
         _LINES_HEADER.format(omitted=omitted),
         masked_body,
         _END,

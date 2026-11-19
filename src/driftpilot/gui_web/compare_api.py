@@ -100,7 +100,10 @@ JavaScript(static/js/compare.js)は返した JSON を描くことと、操作を
 - 送り先の確かめ(ADR-0148 決定7): 承認して送った回と自動送信の回の送り先のプロファイルを組ごとに覚え、追加の質問の前に今の使用中と比べる。
   違えば送らずに confirm を返し、画面が同じ番号で呼び直したときだけ送る(その組の記録を今の送り先に替える)
 - AI の面の切り替え(use_ai_profile・use_prompt_profile): 比較中・質問中は断る。settings_model の use_selected・use_prompt で
-  使用中を変え、設定の窓が開いていれば WebSession.settings_changed で読み直させる。結果と答えは消さない
+  使用中を変え、設定の窓が開いていれば WebSession.settings_changed で読み直させ、一括比較の窓へは
+  WebSession._profiles_switched で描き直しを知らせる(REQ-372。AI の窓へは _notify_other が届く)。結果と答えは消さない
+- キャラクターの設定(ADR-0245 決定2): 設定の窓で保存したら WebSession.settings_saved が _reload_character を呼び、覚えた値を捨てて
+  次の state() で今の設定を読み直す(送っている途中でも絵の出し方だけが変わる)
 - 「HTML・CSV で出力…」(export_result。ADR-0156 / REQ-216): 押せるのは保存と同じ条件で、保存した結果を開いていないとき(can_export)。
   設定の秘密の語を読めなければ出さない。差分の行・組の名前・ファイル名は AI に送るときと同じ判定で伏せ(model の compare_report・
   multi_report)、新しいファイルに書く(上書きしない)。伏せずに出す口は無い
@@ -131,9 +134,13 @@ JavaScript(static/js/compare.js)は返した JSON を描くことと、操作を
   (LlmRequest の prefer_source・category・question)、自動送信がオンでもいつも送信前の確認を出す。
   答えの対象は _answer_target、まとめての比較で組を選んで聞いた答えは _llm_holder(組の位置と聞く前のその組の llm)で持つ。
   view の ai の can_ask_shown・shown_reason・can_follow_up・shown_label・target・target_note・shown がその材料
-- AI の欄を隠す・出す(set_ai_hidden。ADR-0216 決定5 / REQ-309): 状態は _ai_hidden にだけ持つ(窓の間だけ。設定・ファイルに書かない。
-  比較中・送信中でも変えられる表示だけの操作)。自動の AI への送信が始まったとき(_auto_send)と、一括比較から持ってきた答えが
-  結果に付いたとき(_on_done)に偽に戻す(届いた答えを見落とさないため)。view の ai_hidden で画面に渡す
+- AI の欄を隠す・出す(set_ai_hidden。ADR-0216 決定5 / REQ-309 / REQ-370): 状態は _ai_hidden に持つ(比較中・送信中でも変えられる
+  表示だけの操作)。利用者が押したときだけ、窓の配置のファイル(ui-state.json。REQ-374)の compare_ai_hidden に書く(値が変わったときだけ。
+  書けなくても画面は止めず知らせない)。窓を作るときにそのファイルから読んで始める。自動の AI への送信が始まったとき(_auto_send)と、一括比較から
+  持ってきた答えが結果に付いたとき(_on_done)に偽に戻すが、これは書かない(届いた答えを見落とさないため)。view の ai_hidden で画面に渡す
+- 左右の境目の割合を覚える(remember_split。REQ-370): 画面が境目を動かし終えたときに呼ぶ。割合を小数 3 桁に丸めて ui-state.json の
+  compare_split_left に書く(値が変わったときだけ。AI を別の窓に出している間は書かない。書けなくても画面は止めず知らせない)。
+  窓を作るときに ui-state.json から読んだ割合(0.3〜0.9 の外・数でなければ null)を _split_left に持ち、view の split_left で画面に渡す(あとで変えない)
 - AI の面を別の窓で出す(open_ai_pane。ADR-0160 / REQ-220): 窓は WebSession.open_ai_pane が開き、_ai_attached・_ai_detached で
   知らせる。状態と門はここに持ったまま。AI の窓の Python の側(ai_pane_api.AiPaneApi)は _call_as("ai", …) でここの処理を呼ぶ
   (form は _form_copy。返す view は "ai" 向け)。view は窓ごとに描く(_render(pane))。別の窓が開いている間は、比較の窓の view の
@@ -156,6 +163,8 @@ webview は読まない(窓は app.py が開いて WebSession.attach_compare で
 """
 
 import dataclasses
+import math
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -168,12 +177,14 @@ from typing import Any
 from driftpilot.batch_io import JSONL_SUFFIX, DeviceSplitError, ResultsWriteError, write_new_bytes
 from driftpilot.core import (
     DEFAULT_MAX_TOTAL_DIFFS,
+    MAX_PATTERNS,
     CompareCancelled,
     CompareOutcome,
     CompareRequest,
     Conversation,
     LlmRequest,
     MultiCompareOutcome,
+    Unpaired,
     attach_whole_answer,
     llm_inputs,
     run_compare,
@@ -232,6 +243,17 @@ from driftpilot.llm_settings import (
     voice_settings,
 )
 from driftpilot.messages import (
+    RAW_ADD_CONFIRM_NO,
+    RAW_ADD_CONFIRM_TITLE,
+    RAW_ADD_CONFIRM_YES,
+    RAW_ADD_NONE,
+    RAW_ADD_TITLE,
+    RAW_DEFAULTS_TITLE,
+    RAW_FOLLOW_KEPT,
+    RAW_FOLLOW_LOADED,
+    RAW_HANDOFF_DIFFERS,
+    raw_add_over_limit,
+    raw_added_band,
     DEVICE_SPLIT_CONFIRM_TITLE,
     DIALOG_CANCEL,
     DEVICE_SPLIT_CONFIRM_YES,
@@ -240,12 +262,14 @@ from driftpilot.messages import (
     device_split_not_opened,
     BATCH_NOT_SENT_TITLE,
     BATCH_SAVED_TITLE,
+    REREAD_NOT_SENT,
     COMPARE_AI_ANALYZE,
     COMPARE_AI_ANALYZE_CHARACTER,
     COMPARE_AI_ASK_FOLLOW_UP,
     COMPARE_AI_ASK_SHOWN,
     COMPARE_AI_ASK_TARGET_NOTE,
     COMPARE_AI_NO_PAIRS,
+    COMPARE_AI_ROW_QUESTION,
     COMPARE_AI_SHOWN_NO_DIFF,
     COMPARE_AI_SHOWN_NO_RAW,
     COMPARE_AI_SHOWN_ROW,
@@ -421,6 +445,10 @@ from driftpilot.screen_model.model import (
     suggested_filename,
     suggested_multi_filename,
     unpair_screen,
+    exclude_rows,
+    exclude_screen,
+    excluded_names,
+    restore_screen,
     view_outcome,
     wants_preview,
     web_kind_platform,
@@ -430,20 +458,36 @@ from driftpilot.screen_model.model import (
     with_full_text,
     with_question,
 )
-from driftpilot.screen_model.batch_model import CompareHandoff, HandedAnswer
+from driftpilot.raw_keys import DEFAULT_RAW_OPTIONS, RawOptions
+from driftpilot.screen_model.batch_model import BatchOrigin, CompareHandoff, HandedAnswer
 from driftpilot.screen_model.model import (
     DeviceNotice,
+    SendBasis,
+    basis_change,
+    current_send_basis,
+    send_basis,
     device_notice,
     device_split_reason,
     write_device_files,
     RAW_FOLD_CONTEXT,
     RAW_MARK_LABEL,
-    RawForm,
+    append_raw_rules,
+    raw_add_confirm_body,
+    raw_additions,
+    raw_baseline,
+    raw_defaults_file,
+    raw_typed_differs,
+    write_raw_defaults_file,
+    RawSettings,
     raw_examples,
+    outcome_raw_options,
     raw_form_defaults,
+    raw_form_from_settings,
     raw_form_values,
+    raw_line_rules,
     raw_move_labels,
     raw_options_summary,
+    raw_rule_rows,
     raw_set_aside_rows,
     read_context_lines,
     read_raw_form,
@@ -460,6 +504,13 @@ from driftpilot.screen_model.settings_model import (
 )
 from driftpilot.screen_model.worker import CompareWorker
 from driftpilot.storage import StorageError, StoredRecord, resaved_record
+from driftpilot.ui_state import (
+    COMPARE_AI_HIDDEN_KEY,
+    COMPARE_SPLIT_LEFT_KEY,
+    load_compare_layout,
+    save_compare_layout,
+    ui_state_path,
+)
 
 # Python から画面への知らせの種類。static/js/compare.js が受け、state() を呼び直す
 CHANGED_EVENT = "compare.changed"
@@ -554,6 +605,11 @@ def _tab_states(off: str | None) -> dict[str, Any]:
     return {"tabs": {"structured": dict(state), "unparsed": dict(state)}, "fallback_tab": FALLBACK_TAB}
 
 
+# 比べない列(REQ-367 §3)。名前は ntc-templates の列の名前(英数字と _ だけ)。この窓だけの設定で、20 個まで
+SKIP_COLUMN_MAX = 20
+_SKIP_COLUMN_NAME = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
 def _run_at_once(fn: Callable[..., Any], *args: Any) -> None:
     """CompareWorker の post。wx の wx.CallAfter の代わりに、受け取った関数をそのまま(ワーカーのスレッドで)呼ぶ。"""
     fn(*args)
@@ -640,6 +696,8 @@ VOICE_CONTEXT_LIMIT = 20
 # 表示中の差分の対象(REQ-312 / ADR-0218 決定3): (タブ, カテゴリ, まとめての比較で組を選んでいるときの pairs の位置)。
 # 全コマンド比較結果のタブは ("all", None, None)
 _Target = tuple[str, str | None, int | None]
+# 単純比較の表の 1 行だけを聞くときの対象の行(REQ-366 §6): (変更前の行番号, 変更後の行番号)。片側が無い行はその側が None
+_Row = tuple[int | None, int | None]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -652,6 +710,8 @@ class _AskMeta:
 
     target: _Target
     holder: tuple[int, LlmAnalysis | None] | None = None
+    # 単純比較の 1 行だけを聞いたときの (変更前の行番号, 変更後の行番号)。それ以外は None(REQ-366 §6)
+    row: _Row | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -672,6 +732,7 @@ class _ShownInfo:
     position: int | None = None
     whole: bool = False
     text: str | None = None
+    raw_lines: _Row | None = None  # 単純比較の 1 行だけを聞くときの対象の行(REQ-366 §6)
 
 
 def _prompt_name(settings: LlmSettings) -> str:
@@ -882,10 +943,24 @@ class CompareApi(Api):
         # _raw は読んだ設定(誤りがあれば options が None)、_raw_values は欄の値(打っている途中の文字を消さないよう受け取ったまま)、
         # _raw_band は既定のファイルを読めないときの帯の文、_raw_fill は変わったら画面が欄に値を入れ直す番号
         # _raw_context は「差分のみ表示」の前後の行数(REQ-228 §2。表示だけの値。変えても比べ直さない)
-        raw_options, self._raw_context, self._raw_band = raw_form_defaults(env=env, platform=platform, home=home)
-        self._raw = RawForm(raw_options, [], self._raw_context)
-        self._raw_values: dict[str, Any] = raw_form_values(raw_options, self._raw_context)
+        # REQ-359: _raw は無効のルールを除いた比べるときの設定(options)と、全部のルール・無効のルールも持つ
+        raw_settings, self._raw_band = raw_form_defaults(env=env, platform=platform, home=home)
+        self._raw_context = raw_settings.context_lines
+        self._raw = raw_form_from_settings(raw_settings)
+        self._raw_values: dict[str, Any] = raw_form_values(
+            raw_settings.options, self._raw_context, raw_settings.disabled
+        )
         self._raw_fill = 0
+        # REQ-361: 最後に既定を読んだときの値(全部のルール, 無効のルール)。窓を開いたとき・「いつも効く設定に戻す」・保存の知らせで
+        # 入れ替えたとき・「いつも効く設定に足す」で更新する。欄の値がこれと違えば「直接書いた値あり」(raw_typed_differs)。
+        # _raw_follow は欄の下の帯 {text, load}(load が真ならボタン「いつも効く設定を読み込む」も出す)。
+        # _handoff_raw_band は「比較画面で開く」で組の設定と窓の設定が違ったときの帯の文(次に比べるまで残す)
+        self._raw_baseline = raw_baseline(raw_settings)
+        self._raw_follow: dict[str, Any] | None = None
+        self._handoff_raw_band: str | None = None
+        # 比べない列(REQ-367 §3。show の表の比較で値の違いを変更の列にしない列。大文字の名前の並び)。この窓だけの設定で、単純比較の
+        # 設定の欄の値(read_raw_form の形)・RawOptions・いつも効く設定のファイルには入れない。「いつも効く設定に戻す」でだけ空にする
+        self._skip_columns: tuple[str, ...] = ()
         self._kind_shown = self._form["kind"]  # 機種の欄を合わせた種類(show から変わったときだけ系統の選択を戻す)
         self._last: tuple[ScreenInput, CompareRequest, CompareOutcome] | None = None
         self._outcome: OutcomeView | None = None  # 表示中の結果
@@ -904,6 +979,8 @@ class CompareApi(Api):
         # 待っている送信前のプレビュー: (番号, 計画, 比較した入力, 要求, 1回目の LLM の結果, 送り先のプロファイル, 全体の上限)
         # 全体の上限はまとめての比較の承認した2回目に使う(1組の比較では使わない)
         self._preview: tuple[int, LlmPlan, ScreenInput, CompareRequest, Any, tuple[str, str], int] | None = None
+        # 確認を出したときの設定の値(REQ-371)。確認の番号と組で持つ(タプルの形は変えない)。承認の直前に今の設定と比べる
+        self._preview_basis: tuple[int, SendBasis] | None = None
         self._late_notice: dict[str, Any] | None = None  # ワーカーから戻った知らせ(画面は番号で1回だけ出す)
         # 追加の質問(ADR-0081): 答えが届いたやり取り (質問, 回答) の並び・送っている間のワーカー・やり取りの番号(消すと変わる)
         self._turns: list[tuple[str, str]] = []
@@ -934,16 +1011,27 @@ class CompareApi(Api):
         # 待っている追加の質問の確認 (番号, 送る文, 質問, client, 結果, 組の番号, やり取りの番号, 秘密の語)。
         # 質問の文は確認を待っている間だけ持ち、答えたら・やり取りを消したら・窓を閉じたら消す(ログ・例外・知らせに入れない)
         self._full_text = False
-        # AI の欄を隠しているか(ADR-0216 決定5。窓の間だけ。設定・ファイルに書かない)。自動送信が始まる・一括比較の答えが付くと偽に戻す
-        self._ai_hidden = False
+        # 開いたときの左の面の割合(null は初めの幅)と AI の欄を隠すか(REQ-370。窓の配置のファイル ui-state.json から 1 回だけ読む。REQ-374)。
+        # _ai_hidden は自動送信が始まる・一括比較の答えが付くと偽に戻す(ファイルには書かない)。
+        # _remembered_* は最後に読んだ・書いた値(同じ値なら書かないために持つ)
+        self._split_left, self._ai_hidden = load_compare_layout(ui_state_path(**self._where_user()))
+        self._remembered_split: float | None = self._split_left
+        self._remembered_hidden: bool = self._ai_hidden
         self._first_full_text: dict[int, bool] = {}
         self._after_sections: dict[int, AfterText] = {}
         self._full_text_confirmed: set[int] = set()
         self._follow_up_preview: tuple[int, str, str, LLMClient, object, int, int, tuple[str, ...]] | None = None
+        # 追加の質問の全文の確認を出したときの設定の値(REQ-371)。確認の番号と組で持つ
+        self._follow_up_basis: tuple[int, SendBasis] | None = None
         self._focus: str | None = None
         # 待っている一括比較の答え(ADR-0170): (持ってきたときの入力, 答え)。比べ終わったら必ず消す(使うのは入力が同じときだけ)。
         # 入力や比較の設定を変えた・結果を消した・窓を閉じたときも消す(決定4)
         self._handed: tuple[ScreenInput, HandedAnswer] | None = None
+        # 一括比較の組から受け取った入力と、元の組の目印(REQ-362 / ADR-0242 決定1): (単純比較の設定を既定に替えた入力, 目印)。
+        # 比べ終わったとき、比べた入力(単純比較の設定を除く)が同じで誤りでなければ、結果を一括比較の窓の組の行へ返す。
+        # 入力を差し替えた(参照・貼り付け・ドロップ・次の「比較画面で開く」)・入れ替えた・結果を開いた・窓を閉じたときに捨てる。
+        # 種類・機種・比較方式・区間を変えただけでは捨てない(入力が違う回は返さないだけで、元に戻せばまた返す)
+        self._back: tuple[ScreenInput, BatchOrigin] | None = None
         # 開いた保存の結果(REQ-120)の帯の文。表示していなければ None
         self._opened: str | None = None
         # 開いた保存の中身(REQ-242 §4。読み込んだ JSON と組み立てた行)。保存し直しと、保存の答えへの追加の質問に使う。
@@ -971,6 +1059,12 @@ class CompareApi(Api):
         # _llm_holder はまとめての比較で組を選んで聞いた答えを入れた組の (pairs の位置, 差し替える前のその組の llm)。
         # _preview_ask は送信前の確認と組で持つ質問の持ち物(承認した2回目に運ぶ)
         self._shown: tuple[str, str | None] = DEFAULT_SHOWN
+        # 単純比較の表の 1 行だけを聞く対象の行(REQ-366 §6。shown_changed が row 付きで呼ばれたときだけ。タブ・カテゴリを
+        # 知らせ直す・比べ直す・入力を変える・結果を消す・組を選び直すと消える)と、その答えの行(_answer_target と同じ決まりで覚える)。
+        # _row_prefill は AI の欄に決まった質問を入れる合図の番号(行を覚えるたびに進む。画面は変わったときだけ入れる)
+        self._shown_row: _Row | None = None
+        self._answer_row: _Row | None = None
+        self._row_prefill = 0
         self._answer_target: _Target | None = None
         self._llm_holder: tuple[int, LlmAnalysis | None] | None = None
         self._preview_ask: _AskMeta | None = None
@@ -1012,7 +1106,8 @@ class CompareApi(Api):
         # AI の窓(ADR-0160)。開いている間だけ窓を持つ。どの窓からの呼び出しかはスレッドごとの値で持つ(_call_as)
         self._ai_window: Any = None
         self._pane = threading.local()
-        # キャラクターの絵(ADR-0174 決定1)。窓ごとに、最初に描いたときの [gui] character を覚える(開いている窓は変えない)。
+        # キャラクターの絵(ADR-0174 決定1)。窓ごとに、描いたときの [gui] character を覚える。
+        # 設定の窓で保存したら捨てて読み直す(ADR-0245 決定2。_reload_character)。
         # 鍵は窓("compare"・"ai")。AI の窓を開き直したら、その窓の分だけ読み直す
         self._characters: dict[str, bool] = {}
         # この窓で一度でも比べたか(始めた・保存した結果を開いた・一括比較から受け取った)。空の窓の絵に使う(ADR-0174 決定2)
@@ -1063,13 +1158,17 @@ class CompareApi(Api):
         """
         return self._call(self._send_llm, form, instruction)
 
-    def shown_changed(self, form: Any, tab: Any, category: Any = None) -> dict[str, Any]:
+    def shown_changed(self, form: Any, tab: Any, category: Any = None, row: Any = None) -> dict[str, Any]:
         """画面が今表示している差分(タブと構造化比較の表のカテゴリの絞り込み)を知らせる(REQ-312 §2 / ADR-0218 決定2)。
 
         tab は "all"・"structured"・"raw"・"unparsed"、category は絞っていなければ None。値の確かめは使うときに今の結果で行う
         (合わなければ質問を送れない)。タブとカテゴリ以外の型は形の誤り。状態は変えるだけで、送らない。
+
+        row は単純比較の表の 1 行だけを聞くときの {before_no, after_no}(REQ-366 §6。省くと今と同じ)。tab が raw でない・category がある・
+        番号が 1 以上の整数か null でない・両方 null のときは形の誤り。今の結果の差分の行(変更前は削除の行、変更後は追加の行)でなければ、
+        行は覚えない。覚えたら入力欄に決まった質問を入れる合図(view.ai.prefill)を進める。
         """
-        return self._call(self._shown_changed, form, tab, category)
+        return self._call(self._shown_changed, form, tab, category, row)
 
     def ask_shown(self, form: Any, question: Any) -> dict[str, Any]:
         """「表示中の差分に質問」。今表示している差分だけに質問を送る(REQ-312 §4 / ADR-0218 決定2〜5)。
@@ -1122,6 +1221,40 @@ class CompareApi(Api):
         """「組を外す」(REQ-269 §2・§3)。index は一覧の行の番号。組の行のときだけ、2つの相手なし(エラーの出力は戻す)にする。比べない。"""
         return self._call(self._unpair, form, index)
 
+    def exclude_row(self, form: Any, index: Any) -> dict[str, Any]:
+        """一覧の右クリック「この区間を比べる対象から外す」(REQ-367 §4)。index は一覧の行の番号。組・相手なし・エラーの出力・1回だけの区間。
+
+        外した組・区間は、一覧・全コマンド比較結果・AI に送る組・保存・報告書に入れない。比べない。押せないとき(比較中・開いた保存の結果・
+        最後の1行など)は何も変えない。
+        """
+        return self._call(self._exclude_row, form, index)
+
+    def restore_excluded(self, form: Any, k: Any) -> dict[str, Any]:
+        """「外した区間」の 1 つの「戻す」(REQ-367 §4)。k は外した区間の番号(0始まり、外した順)。
+
+        区間なら比べずに戻す。組ならその1組だけを比べ直して戻す(ほかの組は比べ直さない)。押せないときは何も変えない。
+        """
+        return self._call(self._restore_excluded, form, k)
+
+    def skip_column(self, form: Any, name: Any) -> dict[str, Any]:
+        """構造化比較の show の表の右クリック「この列をこの窓だけ比べない」(REQ-367 §3)。name は ntc-templates の列の名前。
+
+        名前は英数字と _ だけで 1〜64 文字(違えば扱えない要求として断る)。大文字にして、この窓だけの「比べない列」に足す。
+        すでにあれば skip_column="duplicate"、20 個あれば "full" を返して足さない。足せたら "added" を返し、自動の比較がオンなら比べ直す。
+        """
+        return self._call(self._skip_column, form, name)
+
+    def unskip_column(self, form: Any, name: Any) -> dict[str, Any]:
+        """この窓だけの「比べない列」の 1 つの「外す」(REQ-367 §3)。自動の比較がオンなら比べ直す。"""
+        return self._call(self._unskip_column, form, name)
+
+    def structured_source(self, form: Any, index: Any) -> dict[str, Any]:
+        """構造化比較のタブの右クリック「元の行を単純比較のタブで見る」(REQ-367 §2)。index は構造化比較の行の番号。
+
+        読むだけ。表示中の単純比較の行から元の行を探し、source={row: 行の番号 | None} を返す(None は見つからない)。
+        """
+        return self._call(self._structured_source, form, index)
+
     def ask_follow_up(self, form: Any, question: Any, confirm: Any = None) -> dict[str, Any]:
         """「質問する」。AI の答えに追加で質問する(ADR-0081)。question は確かめて送るだけ(返す値・知らせ・属性に残さない)。
 
@@ -1138,6 +1271,10 @@ class CompareApi(Api):
         """「AI の欄を隠す」「AI の欄を出す」(ADR-0216 決定5)。hidden は真偽値。表示だけの操作なので、比較中・送信中でも変えられる。"""
         return self._call(self._set_ai_hidden, form, hidden)
 
+    def remember_split(self, form: Any, ratio: Any) -> dict[str, Any]:
+        """利用者が左右の境目を動かし終えたとき(REQ-370)。ratio は左の面の割合(数)。窓の配置のファイル(ui-state.json。REQ-374)に覚える。"""
+        return self._call(self._remember_split, form, ratio)
+
     def use_ai_profile(self, form: Any, index: Any, label: Any) -> dict[str, Any]:
         """AI の面の「AI プロファイル」を選んだとき(ADR-0148 決定4)。index は選択肢の位置、label はその名前。使用中を変える。"""
         return self._call(self._use_profile, form, index, label, "llm")
@@ -1150,9 +1287,12 @@ class CompareApi(Api):
         """単純比較の設定の「既定に戻す」。既定のファイルを読み直して欄に入れる(比べ直しはしない。ADR-0166 決定10)。"""
         return self._call(self._reset_raw_options)
 
-    def ask_rule_ai(self, lines: Any, description: Any, kind: Any) -> dict[str, Any]:
-        """単純比較の設定の「AI に式を頼む…」(REQ-314)。送らずに、送る全文の確認(rule_ai.confirm)か送れない理由(rule_ai.refused)を返す。"""
-        return _guarded(self._rule_ai.ask, lines, description, kind)
+    def ask_rule_ai(self, lines: Any, description: Any, kind: Any, selection: Any = None) -> dict[str, Any]:
+        """単純比較の設定の「AI に式を頼む…」(REQ-314)。送らずに、送る全文の確認(rule_ai.confirm)か送れない理由(rule_ai.refused)を返す。
+
+        selection は単純比較のタブで選んだ文字(REQ-360。右クリックから開いたときだけ)。省くと(None)今と同じ動き。
+        """
+        return _guarded(self._rule_ai.ask, lines, description, kind, selection)
 
     def answer_rule_ai(self, number: Any, yes: Any) -> dict[str, Any]:
         """式を頼む確認の答え。number は rule_ai.confirm.id。「送信する」(yes が True)のときだけ 1 回送る。答えは rule_ai.done の知らせで届く。"""
@@ -1196,6 +1336,10 @@ class CompareApi(Api):
     def open_batch(self) -> dict[str, Any]:
         """「一括比較…」。一括比較の窓を開く(開いていれば前に出す。REQ-106)。"""
         return self._call(self._open_batch)
+
+    def open_log_view(self) -> dict[str, Any]:
+        """「ログを見る…」。「ログを見る」の窓を開く(開いていれば前に出す。ADR-0248 決定2 / REQ-377)。"""
+        return self._call(self._open_log_view)
 
     def split_devices(self, form: Any, confirmed: Any = False) -> dict[str, Any]:
         """「機器ごとに分けて一括比較で開く…」(ADR-0194 / REQ-267)。
@@ -1348,7 +1492,7 @@ class CompareApi(Api):
             # 入力を変えたらやり取りを消す(元に戻しても消えたまま)。開いた保存の結果のやり取りは入力によらない
             # (新しい入力を入れると開いた結果の表示ごと消える。REQ-242 §4)
             self._clear_follow_up()
-            self._shown = DEFAULT_SHOWN  # 表示中の差分の知らせも消える(画面が次に知らせるまで既定とみなす。REQ-312 §2)
+            self._reset_shown()  # 表示中の差分の知らせも消える(画面が次に知らせるまで既定とみなす。REQ-312 §2)
 
     def _drop_handed_if_changed(self, previous: tuple[Any, ...]) -> None:
         """ロックの中で呼ぶ。比較の設定(_settings_key)が previous から変わっていれば、待っている一括比較の答えを捨てる。
@@ -1504,6 +1648,11 @@ class CompareApi(Api):
         ]
         return dataclasses.replace(outcome, pairs=pairs)
 
+    def _reset_shown(self) -> None:
+        """ロックの中で呼ぶ。画面が知らせた表示中の差分(タブ・カテゴリ・1 行だけの対象)を、既定の「構造化比較のタブ・絞り込み無し」に戻す。"""
+        self._shown = DEFAULT_SHOWN
+        self._shown_row = None
+
     def _current_target(self) -> _Target | None:
         """ロックの中で呼ぶ。今表示している差分の対象(画面が知らせたタブとカテゴリを、今の結果で確かめた値)。読み取れなければ None。
 
@@ -1529,7 +1678,7 @@ class CompareApi(Api):
         if self._opened_saved is not None:
             return True
         target = self._current_target()
-        return target is not None and target == self._answer_target
+        return target is not None and target == self._answer_target and self._shown_row == self._answer_row
 
     def _follow_up_turns(self, first: LlmAnalysis) -> list[tuple[str, str]]:
         """送る文に入れるやり取り。最初の答えから始まり、答えと質問が交互に並び、答えで終わる。"""
@@ -1774,9 +1923,24 @@ class CompareApi(Api):
                 True, prefer="structured", category=sent_category, kind=kind, target=target, position=position, text=text
             )
         raw = outcome.raw if outcome.raw is not None else (outcome.show.raw if outcome.show is not None else None)
-        text = compare_ai_target("raw", None, command)
+        row = self._shown_row if tab == "raw" and category is None else None
+        text = compare_ai_target("raw", None, command, row)
         if raw is None:
             return _ShownInfo(False, COMPARE_AI_SHOWN_NO_RAW, target=target, text=text)
+        if row is not None:
+            # 1 行だけを聞く(REQ-366 §6)。その行の差分が今の結果に無ければ、表示している差分が無いとして断る
+            before_no, after_no = row
+            kept = [
+                d
+                for d in raw.diffs
+                if (d["op"] == "removed" and d["before_line_no"] == before_no)
+                or (d["op"] == "added" and d["after_line_no"] == after_no)
+            ]
+            if not kept:
+                return _ShownInfo(False, COMPARE_AI_SHOWN_NO_DIFF, target=target, text=text)
+            return _ShownInfo(
+                True, prefer="raw", kind="raw", target=target, position=position, text=text, raw_lines=row
+            )
         if not raw.diffs:
             return _ShownInfo(False, COMPARE_AI_SHOWN_NO_DIFF, target=target, text=text)
         return _ShownInfo(True, prefer="raw", kind="raw", target=target, position=position, text=text)
@@ -1786,11 +1950,19 @@ class CompareApi(Api):
 
         llm はいつも偽(AI の有無で「入力が変わった」としない。AI を送った後も保存できる。ADR-0080 決定1)。
         """
-        before, after = self._sources["before"], self._sources["after"]
-        if before is None or after is None:
-            return None
         if self._raw.options is None:
             # 単純比較の設定に誤りがある間は、比べられる入力が無い(保存・AI に送る・追加の質問を止める)
+            return None
+        return self._input_with(self._raw.options)
+
+    def _input_with(self, raw_options: RawOptions) -> ScreenInput | None:
+        """今の欄の入力を、単純比較の設定 raw_options で作る。両側の入力がそろっていなければ None。
+
+        _current_input は窓の設定で、結果を返す元の入力の覚え(_back。REQ-362)は既定の設定で作る
+        (窓の設定に誤りがあっても作れる。設定の違いは入力の違いとして見ない)。
+        """
+        before, after = self._sources["before"], self._sources["after"]
+        if before is None or after is None:
             return None
         form = self._form
         kind, platform = web_kind_platform(form["kind"], form["platform"], form["config_platform"])
@@ -1804,7 +1976,8 @@ class CompareApi(Api):
             show_command=form["command"] if kind == "show" else "",
             before_segment=segment_number(self._side_views["before"], form["before_segment"]),
             after_segment=segment_number(self._side_views["after"], form["after_segment"]),
-            raw_options=self._raw.options,
+            raw_options=raw_options,
+            skip_columns=self._skip_columns,
         )
 
     def _summary_outcome(self) -> CompareOutcome | None:
@@ -1850,8 +2023,9 @@ class CompareApi(Api):
         self._sources[side] = source
         self._summaries[side] = input_summary(source)
         self._clear_follow_up()
-        self._shown = DEFAULT_SHOWN  # 入力を変えたら、画面が次に知らせるまで構造化比較のタブ・絞り込み無しとみなす(REQ-312 §2)
+        self._reset_shown()  # 入力を変えたら、画面が次に知らせるまで構造化比較のタブ・絞り込み無しとみなす(REQ-312 §2)
         self._handed = None  # 入力を変えたら一括比較の答えは捨てる(知らせは出さない。ADR-0170 決定4)
+        self._back = None  # 結果を返す元の組も捨てる。その後に元の入力へ戻しても返さない(REQ-362 / ADR-0242 決定1)
         self._full_text = False  # 入力を変えたら「差分＋全文を送る」は外す(ADR-0158 決定1)
         # 入力を変えたら区間は「自動」に戻す(区間数は次の比較の結果で分かる)
         self._side_views[side] = None
@@ -1922,6 +2096,7 @@ class CompareApi(Api):
                 self._form["command"],
                 self._summary_outcome(),
                 self._raw.options,
+                self._raw.disabled.count(),
             ),
             "segments_shown": self._segments_shown(),
             "form": dict(self._form),
@@ -1983,18 +2158,26 @@ class CompareApi(Api):
             "ai_detached": detached,
             # AI の欄を隠しているか(ADR-0216 決定5)。別の窓で出していない間だけ、比較の窓が右の面と境目を隠し、「« AI」を出す
             "ai_hidden": self._ai_hidden,
+            # 開いたときの左の面の割合(REQ-370。0.3〜0.9 の数。無い・範囲の外は null=初めの幅)。窓の間は変えない
+            "split_left": self._split_left,
             # 単純比較の設定の欄(ADR-0166 / REQ-227 §11)。values は欄の値、problems は誤りの文、summary は折りたたみの見出しの
-            # 要約、examples は例から足す選択肢、fill は変わったら画面が欄に値を入れ直す番号
+            # 要約、examples は例から足す選択肢、fill は変わったら画面が欄に値を入れ直す番号。
+            # rules・rules_title は単純比較のタブの「効いているルール」の一覧の行と見出し(REQ-359。ルールが無ければ [] と null)
             "raw_options": {
                 "values": dict(self._raw_values),
                 "problems": list(self._raw.problems),
-                "summary": raw_options_summary(self._raw.options),
+                "summary": raw_options_summary(self._raw.options, self._raw.disabled.count()),
                 "examples": raw_examples(),
                 "fill": self._raw_fill,
+                **self._raw_rules_view(),
             },
+            # この窓だけの「比べない列」(REQ-367 §3。大文字の名前の並び)。単純比較の設定の欄(raw_options)の値には入れない
+            "skip_columns": list(self._skip_columns),
+            # 設定の窓で保存した設定を受けたとき・「いつも効く設定に足す」で足したときの帯 {text, load}(REQ-361)。無ければ null
+            "raw_follow": dict(self._raw_follow) if self._raw_follow is not None else None,
             # 窓の下の行に出す、使っている単純比較の設定の要約(ADR-0166 決定11-1)。既定なら null
             "raw_settings_line": self._raw_settings_line(),
-            # キャラクターの絵を出すか(ADR-0174 決定1。その窓を最初に描いたときの設定)。偽なら絵の要素は hidden のまま
+            # キャラクターの絵を出すか(ADR-0174 決定1。設定の窓で保存したら読み直す。ADR-0245 決定2)。偽なら絵の要素は hidden のまま
             "character": self._character_for(pane),
             # 起動時の絵を出すか(ADR-0174 決定2)。真にするのは比較の窓の最初の state() だけ(_state)
             "splash": False,
@@ -2002,8 +2185,17 @@ class CompareApi(Api):
             "update_notice": self._session.update_notice_view(),
         }
 
+    def _reload_character(self) -> None:
+        """設定の窓でキャラクターの設定を保存した後に呼ぶ(WebSession.settings_saved。ADR-0245 決定2・REQ-372)。
+
+        覚えた値を捨てるだけ。次の state() で、比較の窓と AI の窓がそれぞれ今の設定を読み直す。
+        送っている途中でも止めない(絵の出し方だけが変わる)。起動時の絵(splash)は変えない。
+        """
+        with self._lock:
+            self._characters.clear()
+
     def _character_for(self, pane: str) -> bool:
-        """ロックの中で呼ぶ。pane の窓のキャラクターの設定。最初に描いたときに読み、その窓の間は変えない(ADR-0174 決定1)。"""
+        """ロックの中で呼ぶ。pane の窓のキャラクターの設定。描いたときに読んで覚え、設定の窓で保存したら読み直す(ADR-0245 決定2)。"""
         if pane not in self._characters:
             self._characters[pane] = character_enabled(
                 env=self._where["env"], platform=self._where["platform"], home=self._where["home"]
@@ -2022,8 +2214,32 @@ class CompareApi(Api):
         self._compared_once = True
 
     def _banner_lines(self) -> list[str]:
-        """ロックの中で呼ぶ。帯の行(結果の帯と、単純比較の既定のファイルを読めないときの帯)。"""
-        return [*self._banner, *([self._raw_band] if self._raw_band is not None else [])]
+        """ロックの中で呼ぶ。帯の行(結果の帯と、単純比較の既定のファイルを読めないときの帯、「比較画面で開く」で組の設定と違ったときの帯)。"""
+        return [
+            *self._banner,
+            *([self._raw_band] if self._raw_band is not None else []),
+            *([self._handoff_raw_band] if self._handoff_raw_band is not None else []),
+        ]
+
+    def _raw_rules_outcome(self) -> CompareOutcome | None:
+        """ロックの中で呼ぶ。「効いているルール」の一覧の当たった行の数に使う、表示中の結果。1 組の比較は最後の比較か開いた保存の結果、
+        まとめての比較(開いた保存の .jsonl も)は選んでいる組の結果。無ければ None(まだ比べていない・相手なしの行)。
+        """
+        if self._mview is not None and 0 <= self._pair < len(self._mview.entries) and self._last is None:
+            return self._mview.entries[self._pair].outcome
+        if self._last is not None:
+            return self._last[2]
+        saved = self._opened_saved
+        if self._opened is not None and saved is not None and not saved.multi and saved.records:
+            return saved.records[0].outcome
+        return None
+
+    def _raw_rules_view(self) -> dict[str, Any]:
+        """ロックの中で呼ぶ。state の raw_options.rules と rules_title(REQ-359 §4)。"""
+        rows, title = raw_rule_rows(
+            self._raw.all_options, self._raw.disabled, outcome_raw_options(self._raw_rules_outcome())
+        )
+        return {"rules": rows, "rules_title": title}
 
     def _raw_settings_line(self) -> str | None:
         """ロックの中で呼ぶ。窓の下の行の文。保存した結果を開いているときは保存の設定(「保存した結果の」を頭に付ける)、
@@ -2033,7 +2249,7 @@ class CompareApi(Api):
             if self._mview is not None and 0 <= self._pair < len(self._mview.entries):
                 return saved_raw_settings_line(self._mview.entries[self._pair].outcome)
             return self._outcome.raw_settings_saved if self._outcome is not None else None
-        return raw_options_summary(self._raw.options)
+        return raw_options_summary(self._raw.options, self._raw.disabled.count())
 
     def _notice_for(self, pane: str, detached: bool) -> dict[str, Any] | None:
         """ロックの中で呼ぶ。pane の窓の view に入れる知らせ(ADR-0160 決定6)。形は今と同じ(印のキーは外す)。
@@ -2156,6 +2372,8 @@ class CompareApi(Api):
             "send": self._send_view(mv),
             # 一覧の下の「相手を選ぶ…」「組を外す」(REQ-269)。開いた保存の結果と1つのログの中で組にしたときは null(出さない)
             "pairing": self._pairing_view(),
+            # 比べる対象から外した区間と、外す・戻すを押せるか(REQ-367 §4)
+            **self._exclude_view(),
         }
 
     def _current_all_rows(self) -> list[AllRow]:
@@ -2216,7 +2434,7 @@ class CompareApi(Api):
             # そうでなければ shown_label にする。判断に要る真偽は Python が作る。ADR-0074 決定3)
             "ask_label": COMPARE_AI_ASK_FOLLOW_UP,
             "shown_label": COMPARE_AI_ASK_SHOWN,
-            # pane の窓のキャラクターがオンなら「AI（Mirarin）に定型の質問」(ADR-0181 決定2。設定はその窓を最初に描いたときのもの)
+            # pane の窓のキャラクターがオンなら「AI（Mirarin）に定型の質問」(ADR-0181 決定2。設定は描いたときに読み、設定の窓で保存したら読み直す。ADR-0245 決定2)
             "send_label": COMPARE_AI_ANALYZE_CHARACTER if self._character_for(pane) else COMPARE_AI_ANALYZE,
             # 表示中の差分に質問を押せるか・押せない理由・今の対象の文と、答えの対象が違うときの注意(REQ-312 §4.1)。
             # shown は画面が最後に知らせた {tab, category}(画面は今のタブと比べ、違うときだけ shown_changed を呼ぶ)
@@ -2227,9 +2445,12 @@ class CompareApi(Api):
             "target_note": COMPARE_AI_ASK_TARGET_NOTE
             if self._opened_saved is None
             and self._first_answer() is not None
-            and self._current_target() != self._answer_target
+            and (self._current_target() != self._answer_target or self._shown_row != self._answer_row)
             else None,
             "shown": {"tab": self._shown[0], "category": self._shown[1]},
+            # 単純比較の 1 行だけを聞く合図(REQ-366 §6)。seq は行を覚えるたびに進む番号、text は入力欄に入れる決まった質問。
+            # 画面は seq が変わったときだけ欄に入れ、欄に移る(最初に見た seq では入れない)。送るのは利用者が送ったときだけ
+            "prefill": {"seq": self._row_prefill, "text": COMPARE_AI_ROW_QUESTION},
             # 開いた保存の結果では、送って届いた AI の答えがあるときだけ欄を使える(「質問する」だけ。REQ-242 §4)
             "input_enabled": not busy
             and not self._closing
@@ -2524,23 +2745,130 @@ class CompareApi(Api):
             # 単純比較の設定(誤りのある間は None。自動の比較は始めない)。前後の行数は表示だけの値なので入れない
             # (前後の行数の誤りだけなら、読めた設定のまま。REQ-228 §2)
             self._raw.compare_options,
+            # 比べない列(この窓だけの設定。REQ-367)。変えたら、欄を変えたときと同じく比べ直す
+            self._skip_columns,
         )
 
     def _reset_raw_options(self) -> dict[str, Any]:
+        """「いつも効く設定に戻す」(REQ-361。今までの「既定に戻す」)と、帯のボタン「いつも効く設定を読み込む」。同じ処理。"""
         with self._lock:
-            previous = self._settings_key()
-            options, context, self._raw_band = raw_form_defaults(
+            loaded, band = raw_form_defaults(
                 env=self._where["env"], platform=self._where["platform"], home=self._where["home"]
             )
-            if context != self._raw_context:
-                self._raw_context = context
-                self._result_changed()
-            self._raw = RawForm(options, [], context)
-            self._raw_values = raw_form_values(options, context)
-            self._raw_fill += 1
-            # 「既定に戻す」で単純比較の設定が変わったら、一括比較の答えは捨てる(知らせは出さない。ADR-0170 決定4)
-            self._drop_handed_if_changed(previous)
-            self._refresh_save()
+            self._replace_raw_with(loaded, band, clear_skip=True)  # 利用者が押したときだけ、比べない列も空にする(REQ-367)
+            self._raw_follow = None  # 帯(いつも効く設定を読み込みました・保存されました)は消す
+            return self._ok()
+
+    def _replace_raw_with(self, loaded: RawSettings, band: str | None, *, clear_skip: bool = False) -> None:
+        """ロックの中で呼ぶ。単純比較の設定の欄を、既定のファイルの中身 loaded で入れ替える(REQ-361 §3。_reset_raw_options と同じ処理)。
+
+        「最後に既定を読んだときの値」も loaded にする。band は既定のファイルを読めないときの帯の文(読めたら None)。
+        比べ直すかは呼ぶ側が決める(ここでは始めない)。比較の設定が変わったら、待っている一括比較の答えは捨てる
+        (知らせは出さない。ADR-0170 決定4)。
+        """
+        previous = self._settings_key()
+        if clear_skip:
+            # 「いつも効く設定に戻す」(帯のボタンも同じ)だけ、この窓だけの比べない列も空にする。設定の窓で保存した後の読み直しでは空にしない
+            self._skip_columns = ()
+        self._raw_band = band
+        context = loaded.context_lines
+        if context != self._raw_context:
+            self._raw_context = context
+            self._result_changed()
+        self._raw = raw_form_from_settings(loaded)
+        self._raw_values = raw_form_values(loaded.options, context, loaded.disabled)
+        self._raw_baseline = raw_baseline(loaded)
+        self._raw_fill += 1
+        self._drop_handed_if_changed(previous)
+        self._refresh_save()
+
+    def _raw_defaults_saved(self) -> None:
+        """設定の窓の「単純比較」タブで既定を保存できた後に、WebSession がロックの外で呼ぶ(REQ-361 §3。画面からは呼べない)。
+
+        窓への「状態が変わった」は呼び出し側(WebSession.settings_saved)が 1 回だけ送るので、ここでは送らない。
+        - 既定のファイルが読めない: 入れ替えない。今の「読めない」の帯だけ
+        - 直接書いた値なし(欄の値が「最後に既定を読んだときの値」と同じ): 既定を読み直して入れ替え、帯「いつも効く設定を読み込みました」。
+          比べ直すかは欄の値を変えたときと同じ決まり(自動の比較がオンで、比較の設定が変わったときだけ。オフなら「入力か設定を変えました」の状態の文)
+        - 直接書いた値あり: 入れ替えない。帯「いつも効く設定が保存されました。…」と、ボタン「いつも効く設定を読み込む」
+        """
+        started = False
+        with self._lock:
+            if self._closing:
+                return
+            loaded, band = raw_form_defaults(
+                env=self._where["env"], platform=self._where["platform"], home=self._where["home"]
+            )
+            if band is not None:
+                self._raw_band = band
+                return
+            if raw_typed_differs(self._raw, self._raw_baseline):
+                self._raw_follow = {"text": RAW_FOLLOW_KEPT, "load": True}
+                return
+            previous = self._settings_key()
+            self._replace_raw_with(loaded, None)
+            if self._settings_key() != previous:
+                _notice, started = self._auto_begin()
+            # 帯は、比べ始めたとき(_start が前の帯を消す)より後に入れる
+            self._raw_follow = {"text": RAW_FOLLOW_LOADED, "load": False}
+        if started:
+            self._session.gate_changed(self)
+
+    def add_raw_to_defaults(self, form: Any, confirmed: Any = False) -> dict[str, Any]:
+        """「いつも効く設定に足す」(REQ-361 §5b)。窓の欄の有効なルールのうち、既定のファイルに無いものを、既定のファイルの最後に足す。
+
+        1 回目は、足すものがあれば確認(raw_add_confirm。題・足す式の一覧・ボタン「足す」「やめる」)を返す(まだ何も書かない)。
+        足すものが無ければ知らせて終わる。画面が「足す」を押したときだけ confirmed=True で呼び直し、書く。
+        """
+        return self._call(self._add_raw_to_defaults, form, confirmed)
+
+    def _add_raw_to_defaults(self, form: Any, confirmed: Any) -> dict[str, Any]:
+        if not isinstance(confirmed, bool):
+            raise _BadRequest
+        with self._lock:
+            self._take(form)
+            options = self._raw.options
+            if options is None:
+                # 欄に誤りがあるときは書かない(誤りの文は「比較実行」と同じ)
+                return self._ok(notice=self._notice("\n".join(self._raw.problems), RAW_OPTIONS_INVALID_TITLE))
+            where = self._where
+            try:
+                # 読み直す(設定の窓で書いた後・足す前に変わっていてもよいように)
+                path, saved = raw_defaults_file(platform=where["platform"], env=where["env"], home=where["home"])
+            except SettingsError as exc:
+                return self._ok(notice=self._notice(str(exc), RAW_DEFAULTS_TITLE))
+            additions = raw_additions(options, saved)
+            if additions.count() == 0:
+                return self._ok(notice=self._notice(RAW_ADD_NONE, RAW_ADD_TITLE))
+            if not confirmed:
+                confirm = {
+                    "title": RAW_ADD_CONFIRM_TITLE,
+                    "body": raw_add_confirm_body(additions),
+                    "yes": RAW_ADD_CONFIRM_YES,
+                    "no": RAW_ADD_CONFIRM_NO,
+                }
+                # AI の窓が開いていると confirm は外されるため、別のキー(split_confirm と同じ)
+                return self._ok(raw_add_confirm=confirm)
+            appended = append_raw_rules(saved, additions)
+            if appended.settings is None:
+                return self._ok(
+                    notice=self._notice(raw_add_over_limit(appended.ignore, appended.replace, MAX_PATTERNS), RAW_ADD_TITLE)
+                )
+            try:
+                # 設定の窓の保存と同じ書き方(無効のルール・前後の行数はファイルのまま)
+                write_raw_defaults_file(path, appended.settings)
+            except SettingsError as exc:
+                return self._ok(notice=self._notice(str(exc), RAW_DEFAULTS_TITLE))
+            # 足した後の既定を「最後に既定を読んだときの値」にする(窓の値と同じなら「直接書いた値なし」になる)
+            self._raw_baseline = raw_baseline(appended.settings)
+            self._raw_follow = {"text": raw_added_band(additions.count()), "load": False}
+        # 設定の窓・一括比較の窓へ届ける(保存した窓以外の口を呼んでから、「状態が変わった」を 1 回送る)。ロックの外で呼ぶ
+        raw_saved = getattr(self._session, "_raw_defaults_saved", None)
+        if raw_saved is not None:
+            raw_saved(origin=self)
+        settings_saved = getattr(self._session, "settings_saved", None)
+        if settings_saved is not None:
+            settings_saved()
+        with self._lock:
             return self._ok()
 
     def _form_changed(self, form: Any) -> dict[str, Any]:
@@ -2568,6 +2896,7 @@ class CompareApi(Api):
             self._handed = None  # 入れ替えを押したら一括比較の答えは捨てる(知らせは出さない。ADR-0170 決定4)
             if self._busy() or self._closing or self._opened is not None:
                 return self._ok()  # 開いた保存の結果の表示中も入れ替えない(REQ-120)
+            self._back = None  # 入れ替えると入力が変わる。結果を返す元の組も捨てる(REQ-362)
             # 入力の中身と名前・区間の選択肢・要約・区間の選択を入れ替える(片方だけでも入れ替える)
             # 貼り付けの入力の名前は、入った側の名前に直す(REQ-199 §6)。ファイルの名前はそのまま動く
             self._sources = {
@@ -2599,8 +2928,9 @@ class CompareApi(Api):
         self._preview = None
         self._preview_first_request = None
         self._preview_ask = None
-        self._shown = DEFAULT_SHOWN  # 結果を消すと、画面が次に知らせるまで構造化比較のタブ・絞り込み無しとみなす(REQ-312 §2)
+        self._reset_shown()  # 結果を消すと、画面が次に知らせるまで構造化比較のタブ・絞り込み無しとみなす(REQ-312 §2)
         self._answer_target = None
+        self._answer_row = None
         self._llm_holder = None
         self._sent_profiles = {}
         self._sent_name_only = False
@@ -2611,6 +2941,7 @@ class CompareApi(Api):
         self._words_confirm = None
         self._saved_words_confirmed = False
         self._handed = None  # 一括比較の答えも捨てる(「結果を開く…」もここを通る。ADR-0170 決定4)
+        self._back = None  # 結果を返す元の組も捨てる(REQ-362)
         # 「差分＋全文を送る」は外す(開いた結果を閉じたときも。ADR-0158 決定1)
         self._full_text = False
         self._first_full_text = {}
@@ -2852,13 +3183,55 @@ class CompareApi(Api):
             self._session.gate_changed(self)
         return result
 
-    def _shown_changed(self, form: Any, tab: Any, category: Any) -> dict[str, Any]:
+    @staticmethod
+    def _read_row(tab: str, category: str | None, row: Any) -> _Row | None:
+        """shown_changed の row を読む。row が None なら None。形が違えば _BadRequest(値の中身は文に入れない)。"""
+        if row is None:
+            return None
+        if tab != "raw" or category is not None or not isinstance(row, dict) or set(row) != {"before_no", "after_no"}:
+            raise _BadRequest
+        numbers = (row["before_no"], row["after_no"])
+        for number in numbers:
+            if number is not None and (isinstance(number, bool) or not isinstance(number, int) or number < 1):
+                raise _BadRequest
+        if numbers[0] is None and numbers[1] is None:
+            raise _BadRequest
+        return numbers
+
+    def _shown_raw_result(self) -> Any:
+        """ロックの中で呼ぶ。今表示している単純比較の結果(1 組の比較は最後の結果、まとめての比較は選んでいる組)。無ければ None。"""
+        if self._last is not None:
+            outcome = self._last[2]
+        elif self._multi is not None and 0 <= self._pair < len(self._multi[2].pairs):
+            outcome = self._multi[2].pairs[self._pair].outcome
+        else:
+            return None
+        if outcome is None:
+            return None
+        return outcome.raw if outcome.raw is not None else (outcome.show.raw if outcome.show is not None else None)
+
+    def _is_diff_row(self, row: _Row) -> bool:
+        """ロックの中で呼ぶ。row が今の単純比較の結果の差分の行か(変更前は削除の行、変更後は追加の行)。"""
+        raw = self._shown_raw_result()
+        if raw is None:
+            return False
+        before_no, after_no = row
+        found_before = before_no is None or any(d["op"] == "removed" and d["before_line_no"] == before_no for d in raw.diffs)
+        found_after = after_no is None or any(d["op"] == "added" and d["after_line_no"] == after_no for d in raw.diffs)
+        return found_before and found_after
+
+    def _shown_changed(self, form: Any, tab: Any, category: Any, row: Any = None) -> dict[str, Any]:
         with self._lock:
             self._take(form)
             if not isinstance(tab, str) or not (category is None or isinstance(category, str)):
                 raise _BadRequest
-            # 値の確かめは使うときに今の結果で行う(_current_target)。ここでは持つだけ
+            shown_row = self._read_row(tab, category, row)
+            # 値の確かめは使うときに今の結果で行う(_current_target)。ここでは持つだけ。row が無ければ 1 行だけの対象は消える
             self._shown = (tab, category)
+            self._shown_row = None
+            if shown_row is not None and self._opened_saved is None and self._is_diff_row(shown_row):
+                self._shown_row = shown_row
+                self._row_prefill += 1
             return self._ok()
 
     def _ask_shown(self, form: Any, question: Any) -> dict[str, Any]:
@@ -2880,12 +3253,14 @@ class CompareApi(Api):
             if refused is not None:
                 return self._follow_up_notice(follow_up_refused(refused, MAX_QUESTION_CHARS))
             assert info.kind is not None and info.target is not None
-            plan = with_question(plan, question, info.prefer, info.category, info.kind)  # type: ignore[arg-type]
+            plan = with_question(
+                plan, question, info.prefer, info.category, info.kind, info.raw_lines  # type: ignore[arg-type]
+            )
             # 差分＋全文は付けない(表示中の差分だけを聞く。ADR-0218 決定2)。自動送信の設定は読まず、いつも確認を出す(決定5)
             sink = _PartsSink()
             self._parts_sink = sink
             plan = LlmPlan(first=dataclasses.replace(plan.first, on_prompt_parts=sink), send=plan.send)
-            ask = _AskMeta(info.target)
+            ask = _AskMeta(info.target, row=info.raw_lines)
             if self._last is not None:
                 inp, request, outcome = self._last
                 runner: Callable[..., Any] = partial(analyze_screen, outcome=outcome, max_total_diffs=settings.max_total_diffs)
@@ -2899,7 +3274,7 @@ class CompareApi(Api):
                 else:
                     assert info.position is not None
                     previous = base.pairs[info.position].outcome.llm
-                    ask = _AskMeta(info.target, (info.position, previous))
+                    ask = _AskMeta(info.target, (info.position, previous), info.raw_lines)
                     runner = partial(analyze_pair_screen, outcome=base, position=info.position)
             started = self._start(
                 inp,
@@ -2955,8 +3330,14 @@ class CompareApi(Api):
             self._voice_cancel_recording()  # 比べ直すと、録音中の音声入力は取り消す(AI への送信だけの始まりでは取り消さない)
         self._clear_follow_up()  # 比較し直すと、追加の質問のやり取りは消える(ADR-0081 決定5)
         if kind not in AI_ONLY_RUNS:
-            self._shown = DEFAULT_SHOWN  # 比べ直すと、画面が次に知らせるまで構造化比較のタブ・絞り込み無しとみなす(REQ-312 §2)
+            self._reset_shown()  # 比べ直すと、画面が次に知らせるまで構造化比較のタブ・絞り込み無しとみなす(REQ-312 §2)
         self._late_notice = None
+        if kind not in AI_ONLY_RUNS:
+            # 比べ直したら、設定を受けたときの帯(読み込みました・足しました)と「組の設定と違います」の帯は消す(REQ-361。
+            # ボタン付きの「保存されました」の帯は、ボタン・「いつも効く設定に戻す」・足すまで残す)。続けて入れる帯は、始めた後に入れる
+            self._handoff_raw_band = None
+            if self._raw_follow is not None and not self._raw_follow["load"]:
+                self._raw_follow = None
         self._run_kind = kind
         self._mark_compared()
         # 全文も付けた要求か(承認して送った回の答えなら、追加の質問でその全文を確かめ直さない。ADR-0158 決定6)
@@ -3114,6 +3495,7 @@ class CompareApi(Api):
         first_request: str | None = None,
         ask: _AskMeta | None = None,
     ) -> None:
+        back: tuple[BatchOrigin, CompareRequest, CompareOutcome | MultiCompareOutcome] | None = None
         with self._lock:
             # 流れの考えは途中の答えを消す前に読む(結果に入れるときだけ残す。ADR-0169 決定4)
             stream = self._stream
@@ -3124,6 +3506,8 @@ class CompareApi(Api):
             handed, self._handed = self._handed, None
             check = handed is not None and kind in (RUN_COMPARE, RUN_HANDOFF) and is_current(handed[0], inp)
             if not self._finish():
+                # 一括比較の組から受け取った入力のまま比べ終わったら、結果を元の組の行へ返す(REQ-362)。送るのはロックの外
+                back = self._back_for(inp, request, outcome, kind)
                 if kind == RUN_AUTO_SEND and not is_current(inp, self._current_input()):
                     pass  # 送っている間に入力を変えた。届いた答えは捨てる(保存の可否は _finish で見直した)
                 elif isinstance(outcome, MultiCompareOutcome):
@@ -3207,6 +3591,7 @@ class CompareApi(Api):
                             self._preview = (
                                 self._next_serial(), plan, inp, request, outcome.llm, destination, max_total_diffs
                             )
+                            self._keep_preview_basis(settings)
                             self._preview_first_request = first_request  # 承認した2回目に運ぶ(ADR-0179 決定1)
                             self._preview_ask = ask  # 質問の持ち物も承認した2回目に運ぶ(REQ-312)
                             self._preview_result = self._last  # 確認を作ったときの結果(承認した2回目は同じ結果からだけ送る。REQ-264 §2)
@@ -3217,7 +3602,40 @@ class CompareApi(Api):
                     elif kind == RUN_COMPARE and not check:
                         self._auto_send()  # 比較の結果を先に出してから、裏で送る(自動送信の結果からは始めない)
         self._session.gate_changed(self)
+        if back is not None:
+            self._session.compare_result_back(*back)  # 単一比較の窓には何も出さない(返したかどうかは知らせない)
         self._changed()
+
+    def _back_for(
+        self,
+        inp: ScreenInput,
+        request: CompareRequest,
+        outcome: CompareOutcome | MultiCompareOutcome,
+        kind: str,
+    ) -> tuple[BatchOrigin, CompareRequest, CompareOutcome | MultiCompareOutcome] | None:
+        """ロックの中で呼ぶ。比べ終わった結果を一括比較の窓へ返すなら (目印, 使った要求, 結果)、返さないなら None(REQ-362 / ADR-0242 決定1)。
+
+        返すのは次の全部を満たすとき: 一括比較の組から受け取った覚え(_back)がある・比べた回が比較だけの回(RUN_COMPARE は「比較」・自動の比較・
+        読み込みの後の比べ直し、RUN_HANDOFF は受け取った直後。AI の回と手で 1 組だけ組み直す回 RUN_PAIRING は比べ直していない・組の比べ方と
+        違うので返さない)・比べた入力が、単純比較の設定を除いて受け取った入力と同じ・結果が誤りでない。
+        1 つの比較の結果もまとめて比べた結果も返す。
+        """
+        if self._back is None or kind not in (RUN_COMPARE, RUN_HANDOFF):
+            return None
+        remembered, origin = self._back
+        if outcome.status == "error":
+            return None
+        if dataclasses.replace(inp, raw_options=DEFAULT_RAW_OPTIONS, skip_columns=()) != remembered:
+            return None
+        return origin, request, outcome
+
+    def _keep_preview_basis(self, settings: LlmSettings | None) -> None:
+        """ロックの中で呼ぶ(self._preview を作った直後)。確認を出したときの設定の値を、確認の番号と組で持つ(REQ-371)。
+
+        設定が無い(起きないはずの形)ときは持たない。持っていない確認は、承認しても送らない。
+        """
+        assert self._preview is not None
+        self._preview_basis = None if settings is None else (self._preview[0], send_basis(settings))
 
     def _keep_preview_parts(self, llm: LlmAnalysis) -> None:
         """ロックの中で呼ぶ。今の確認(self._preview)と組で、送る文の部分を持つ(指示を直せる確認にする。REQ-266 §2)。
@@ -3268,6 +3686,8 @@ class CompareApi(Api):
         まとめてなら全コマンド比較結果のタブ。
         """
         first = self._first_answer()
+        # 答えの行(REQ-366 §6)。1 行だけを聞いた答えだけが持つ
+        self._answer_row = ask.row if ask is not None and first is not None else None
         if first is None:
             self._answer_target = None
         elif ask is not None:
@@ -3357,6 +3777,7 @@ class CompareApi(Api):
             assert plan is not None and destination is not None
             # 全部の組をまとめた文の確認は1回だけ。「送信する」まで送らない(ADR-0018 決定6)
             self._preview = (self._next_serial(), plan, inp, request, llm, destination, max_total_diffs)
+            self._keep_preview_basis(settings)
             self._preview_first_request = first_request  # 承認した2回目に運ぶ(ADR-0179 決定1)
             self._preview_ask = ask  # 質問の持ち物も承認した2回目に運ぶ(REQ-312)
             self._preview_result = self._multi  # 確認を作ったときの結果(承認した2回目は同じ結果からだけ送る。REQ-264 §2)
@@ -3422,6 +3843,7 @@ class CompareApi(Api):
         ask, self._preview_ask = self._preview_ask, None  # 確認と組の質問の持ち物(REQ-312)
         basis, self._preview_result = self._preview_result, None  # 確認を作ったときの結果
         kept_parts, self._preview_parts = self._preview_parts, None  # 確認と組の送る文の部分
+        kept_basis, self._preview_basis = self._preview_basis, None  # 確認を出したときの設定の値(REQ-371)
         if not yes or pending is None or self._busy() or self._closing:
             return self._ok(), False
         number, plan, inp, request, llm, destination, total = pending
@@ -3431,6 +3853,19 @@ class CompareApi(Api):
         held = self._last if self._last is not None else self._multi
         if held is None or held is not basis:
             return self._ok(), False
+        # 送る直前に設定を読み直して、確認を出したときと比べる(REQ-371 / ADR-0245 決定1)。違えば送らない
+        confirmed = kept_basis[1] if kept_basis is not None and kept_basis[0] == number else None
+        now, reply = self._reread_before_send(confirmed)
+        if reply is not None:
+            return reply, False
+        assert confirmed is not None and now is not None
+        words_changed = basis_change(confirmed, now) == "secret_words"
+        now_words = normalize_words(now.secret_words)
+        if words_changed:
+            # 今の秘密の語で、送る文を確認のときと同じ道で作り直す。1 字でも違えば送らない
+            reply = self._check_rebuilt_first(plan, held, request, ask, total, llm, now_words)
+            if reply is not None:
+                return reply, False
         edit: InstructionEdit | None = None
         if instructions is not None:
             parts = kept_parts[1] if kept_parts is not None and kept_parts[0] == number else None
@@ -3438,7 +3873,7 @@ class CompareApi(Api):
                 return self._ok(), False  # 直せない確認で指示を渡された。送らない
             if instructions != parts.instructions:
                 # 直した指示(直していなければ今の道を 1 字も変えずに通る)
-                edited = self._check_edited_instructions(plan, parts, instructions)
+                edited = self._check_edited_instructions(plan, parts, instructions, now_words)
                 if isinstance(edited, dict):
                     return edited, False  # 断った(中身は出さない)。確認は答えた時点で消える
                 edit = InstructionEdit(shown=llm.payload, parts=instructions, text=edited)
@@ -3456,6 +3891,9 @@ class CompareApi(Api):
             on_thinking=stream.thinking,
             on_api_error=sink,
         )
+        if words_changed:
+            # 作り直した文が同じと確かめた今の語で送る(送る要求の語も今の語にそろえる)
+            approved = dataclasses.replace(approved, extra_secret_words=tuple(now.secret_words))
         if ask is not None and ask.holder is not None:
             # まとめての比較で組を選んで聞いたときは、その組だけを送る(REQ-312 §4.3)。ほかの組の行は確認を作ったときのまま
             runner: Callable[..., Any] = partial(analyze_pair_screen, outcome=held[2], position=ask.holder[0])
@@ -3479,8 +3917,66 @@ class CompareApi(Api):
         )
         return self._ok(), started
 
+    def _reread_before_send(
+        self, confirmed: SendBasis | None, title: str = BATCH_NOT_SENT_TITLE
+    ) -> tuple[SendBasis | None, dict[str, Any] | None]:
+        """ロックの中で呼ぶ。承認した送信の直前に設定を読み直し、確認を出したときの値と比べる(REQ-371 / ADR-0245 決定1)。
+
+        返すのは (今の値, 返す値)。送ってよい(プロファイルと上限が同じ。秘密の語が違うときは呼ぶ側が送る文を作り直して確かめる)なら
+        (今の値, None)。送らないなら (None, 知らせを付けた返す値)。確認の値を持っていない(起きないはずの形)ときも送らない。
+        設定を読めないときは、今の「AI の設定を読めません」の題で理由を出す。AI は呼ばない。
+        """
+        if confirmed is None:
+            return None, self._ok()
+        try:
+            now = current_send_basis(**self._where)
+        except SettingsError as exc:
+            return None, self._ok(notice=self._notice(str(exc), COMPARE_LLM_SETTINGS_TITLE))
+        kind = basis_change(confirmed, now)
+        if kind in ("profile", "limits"):
+            return None, self._ok(notice=self._notice(REREAD_NOT_SENT[kind], title))
+        return now, None
+
+    def _check_rebuilt_first(
+        self,
+        plan: LlmPlan,
+        held: tuple[ScreenInput, CompareRequest, Any],
+        request: CompareRequest,
+        ask: _AskMeta | None,
+        total: int,
+        shown: Any,
+        words: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        """ロックの中で呼ぶ。秘密の語が変わったとき、最初の解析の送る文を今の語で作り直して確認の文と比べる(REQ-371 §3)。
+
+        送ってよければ None。送らないなら知らせを付けた返す値(AI は呼ばない)。
+        打った質問・指示は今の語で確かめ直す(伏せずに送る文なので、作り直しても変わらないが、語が入っていれば送らない)。
+        作り直しは承認で使うのと同じ工程(送らない1回目を、持っている結果から。比較はやり直さない)で、確認の文と 1 字でも違えば送らない。
+        """
+        refused: str | None = None
+        if plan.first.question is not None:
+            refused = check_question(plan.first.question, words)
+        elif plan.first.extra_instruction is not None:
+            refused = check_question(plan.first.extra_instruction, words)
+        if refused is not None:
+            return self._follow_up_notice(follow_up_refused(refused, MAX_QUESTION_CHARS))
+        try:
+            probe = dataclasses.replace(plan.first, extra_secret_words=tuple(words), on_prompt_parts=None)
+            if ask is not None and ask.holder is not None:
+                rebuilt = analyze_pair_screen(request, outcome=held[2], llm=probe, position=ask.holder[0])
+                analysis = rebuilt.pairs[ask.holder[0]].outcome.llm
+            else:
+                rebuilt = analyze_screen(request, outcome=held[2], llm=probe, max_total_diffs=total)
+                analysis = rebuilt.llm
+            same = analysis is not None and analysis.payload is not None and analysis.payload == shown.payload
+        except Exception:  # noqa: BLE001 - 作り直せないときも、送らない(文面は出さない)
+            same = False
+        if not same:
+            return self._ok(notice=self._notice(REREAD_NOT_SENT["secret_words"], BATCH_NOT_SENT_TITLE))
+        return None
+
     def _check_edited_instructions(
-        self, plan: LlmPlan, parts: PromptParts, instructions: tuple[str, ...]
+        self, plan: LlmPlan, parts: PromptParts, instructions: tuple[str, ...], words: tuple[str, ...]
     ) -> str | dict[str, Any]:
         """ロックの中で呼ぶ。直した指示を確かめる(REQ-266 §3)。送ってよければ直した後の送る文、送れないなら返す値(知らせ)。
 
@@ -3495,7 +3991,6 @@ class CompareApi(Api):
             return self._ok()
         if prompt_too_long(text):
             return self._follow_up_notice(instruction_too_long(MAX_PROMPT_CHARS))
-        words = normalize_words(plan.first.extra_secret_words)
         refused = check_question("\n".join(instructions), words, max_chars=MAX_PROMPT_CHARS)
         if refused is not None:
             return self._follow_up_notice(follow_up_refused(refused, MAX_PROMPT_CHARS))
@@ -3510,15 +4005,56 @@ class CompareApi(Api):
         """
         pending, self._follow_up_preview = self._follow_up_preview, None
         assert pending is not None
-        _number, prompt, question, client, last, pair, epoch, words = pending
+        number, prompt, question, client, last, pair, epoch, words = pending
+        kept_basis, self._follow_up_basis = self._follow_up_basis, None  # 確認を出したときの設定の値(REQ-371)
         if not yes or self._closing or not self._can_ask():
             return self._ok(), False
         if self._result_key() is not last or self._pair != pair or self._follow_up_epoch != epoch:
             return self._ok(), False  # 確認を出した後に結果・組・やり取りが変わった。送らない
+        # 送る直前に設定を読み直して、確認を出したときと比べる(REQ-371 / ADR-0245 決定1)。違えば送らない
+        confirmed = kept_basis[1] if kept_basis is not None and kept_basis[0] == number else None
+        now, reply = self._reread_before_send(confirmed, COMPARE_FOLLOW_UP_NOTICE_TITLE)
+        if reply is not None:
+            return reply, False
+        assert confirmed is not None and now is not None
+        if basis_change(confirmed, now) == "secret_words":
+            # 今の秘密の語で、送る文を追加の質問と同じ道で作り直す。1 字でも違えば送らない
+            rebuilt_words = self._check_rebuilt_follow_up(prompt, question, now.secret_words)
+            if isinstance(rebuilt_words, dict):
+                return rebuilt_words, False
+            words = rebuilt_words
         if not self._send_follow_up(client, prompt, question, last, words):
             return self._ok(), False  # 一括比較が走っている
         self._full_text_confirmed.add(pair)
         return self._ok(), True
+
+    def _check_rebuilt_follow_up(
+        self, prompt: str, question: str, secret_words: tuple[str, ...]
+    ) -> tuple[str, ...] | dict[str, Any]:
+        """ロックの中で呼ぶ。秘密の語が変わったとき、追加の質問で全文を送る文を今の語で作り直して確認の文と比べる(REQ-371 §3)。
+
+        送ってよければ、送るときに使う秘密の語(最初に送ったときの語と今の語を合わせたもの。_ask_follow_up と同じ)。
+        送らないなら知らせを付けた返す値。作り直しは _ask_follow_up と同じ順(質問の確かめ → 全文の節 → 文を組む)で、
+        確認の文と 1 字でも違えば送らない(作った全文の節は _after_sections に入れない)。
+        """
+        refused_reply = self._follow_up_notice(REREAD_NOT_SENT["secret_words"])
+        first = self._first_answer()
+        if first is None or first.payload is None:
+            return refused_reply
+        try:
+            words = normalize_words([*(first.secret_words or ()), *secret_words])
+            refused = check_question(question, words)
+            if refused is not None:
+                return self._follow_up_notice(follow_up_refused(refused, MAX_QUESTION_CHARS))
+            built = self._rebuild_after_text(first, secret_words)
+            if not isinstance(built, AfterText):
+                return refused_reply
+            base = with_after_text(first.payload, built)
+            rebuilt = build_follow_up(base, self._follow_up_turns(first), question, full_text=True)
+            same = rebuilt == prompt
+        except Exception:  # noqa: BLE001 - 作り直せないときも、送らない(文面は出さない)
+            return refused_reply
+        return words if same else refused_reply
 
     # --- まとめての比較の一覧(REQ-122 §2) ---
 
@@ -3534,6 +4070,8 @@ class CompareApi(Api):
                 # AI の答えと追加の質問のやり取りは全体で1つ(ADR-0152 決定3)。行を選び直しても、やり取りと途中の答えは消さない。
                 # 待っている全文の確認は前の組の全文なので送らない(全文の確認は組ごと。ADR-0152 決定10)
                 self._follow_up_preview = None
+                if index != self._pair:
+                    self._shown_row = None  # 組を選び直したら、1 行だけの対象は消える(行の番号は組ごと。REQ-366 §6)
                 self._pair = index
                 self._show_pair()
                 # 行に合うタブを開く(ADR-0152 決定8。相手なし・1回だけの行は今のタブのまま)
@@ -3610,6 +4148,7 @@ class CompareApi(Api):
         """
         self._clear_follow_up()
         self._answer_target = None
+        self._answer_row = None
         self._llm_holder = None
         self._sent_profiles = {}
         self._sent_name_only = False
@@ -3721,9 +4260,186 @@ class CompareApi(Api):
                 k for k, (u, _error) in enumerate(rest) if u.side == "before" and u.segment.number == removed.before_number
             )
             self._pair = len(new.pairs) + slot
+            self._shown_row = None
             self._show_pair()
             self._refresh_save()
             return self._ok()
+
+    # --- 比べる対象から外す・戻す(REQ-367 §4) ---
+
+    def _exclude_editable(self) -> bool:
+        """ロックの中で呼ぶ。区間を外す・戻すを押せるか。「AI に送る」のチェックを変えられる場面(_send_editable)と同じ。
+
+        まとめて比べた結果があり、開いた保存の結果でなく、比較中・送信中でない。
+        """
+        return self._multi is not None and self._send_editable()
+
+    def _exclude_view(self) -> dict[str, Any]:
+        """ロックの中で呼ぶ。view の multi に足す、外した区間の欄(REQ-367 §4)。
+
+        excluded は外した区間の名前の並び(外した順。一覧の行と同じ決まりの名前)、exclude は外せる行が 1 つでもあるか、
+        exclude_rows は一覧の行ごとに外せるか(最後の1行は外せない)、restore は「戻す」を押せるか。
+        """
+        if self._multi is None:
+            return {"excluded": [], "exclude": False, "exclude_rows": [], "restore": False}
+        outcome = self._multi[2]
+        editable = self._exclude_editable()
+        rows = [editable and ok for ok in exclude_rows(outcome)]  # 行数に比例する時間で決める
+        return {
+            "excluded": [{"name": name} for name in excluded_names(outcome)],
+            "exclude": any(rows),
+            "exclude_rows": rows,
+            "restore": editable,
+        }
+
+    def _exclude_row(self, form: Any, index: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise _BadRequest
+            mv = self._mview
+            if mv is None:
+                return self._ok()
+            if not _is_index(index, len(mv.entries)):
+                raise _BadRequest
+            if not self._exclude_editable():
+                return self._ok()
+            assert self._multi is not None
+            inp, request, outcome = self._multi
+            outcome = self._restored(outcome)  # 組を選んで聞いた答えを外した土台から外す(組を外すと同じ。REQ-312 §4.3)
+            try:
+                new = exclude_screen(outcome, index)  # 比べない
+            except ValueError:
+                return self._ok()  # 最後の1行など。何も変えない
+            self._forget_answer()
+            self._multi = (inp, request, new)
+            self._send_candidates = tuple(whole_candidates(new))
+            self._send_pairs = carry_send_checks(outcome, self._send_pairs, new, None)
+            self._show_multi(inp, multi_view(new), keep=True)
+            # 同じ位置の行(最後なら 1 つ上)を選ぶ。タブは変えない
+            self._pair = min(index, len(new.pairs) + len(multi_rest(new)) - 1)
+            self._shown_row = None
+            self._show_pair()
+            self._refresh_save()
+            return self._ok()
+
+    def _restore_excluded(self, form: Any, k: Any) -> dict[str, Any]:
+        started = False
+        with self._lock:
+            self._take(form)
+            if isinstance(k, bool) or not isinstance(k, int):
+                raise _BadRequest
+            if self._multi is None:
+                return self._ok()
+            inp, request, outcome = self._multi
+            if not _is_index(k, len(outcome.excluded)):
+                raise _BadRequest
+            if not self._exclude_editable():
+                return self._ok()
+            outcome = self._restored(outcome)
+            target = outcome.excluded[k]
+            if isinstance(target, Unpaired):
+                # 区間は比べずに、その場で戻して、その行を選ぶ
+                new = restore_screen(request, outcome=outcome, k=k)
+                self._forget_answer()
+                self._multi = (inp, request, new)
+                self._send_candidates = tuple(whole_candidates(new))
+                self._send_pairs = carry_send_checks(outcome, self._send_pairs, new, None)
+                self._show_multi(inp, multi_view(new), keep=True)
+                rest = multi_rest(new)
+                slot = next(
+                    n for n, (u, _error) in enumerate(rest) if u.side == target.side and u.segment.number == target.segment.number
+                )
+                self._pair = len(new.pairs) + slot
+                self._shown_row = None
+                self._show_pair()
+                self._refresh_save()
+                result = self._ok()
+            else:
+                # 組は、手で組にする回(RUN_PAIRING)と同じ道で、その1組だけ比べ直す。終わったら(_done_multi)その組を選ぶ
+                key = (target.before_number, target.after_number)
+                self._pairing_carry = (outcome, self._send_pairs, key)
+                started = self._start(
+                    inp,
+                    request,
+                    None,
+                    None,
+                    RUN_PAIRING,
+                    runner=partial(restore_screen, outcome=outcome, k=k),
+                )
+                if not started:
+                    self._pairing_carry = None
+                result = self._ok()
+        if started:
+            self._session.gate_changed(self)
+        return result
+
+    # --- 比べない列(REQ-367 §3) ---
+
+    def _change_skip(self, columns: tuple[str, ...]) -> tuple[dict[str, Any] | None, bool]:
+        """ロックの中で呼ぶ。比べない列を columns にして、変わっていれば欄を変えたときと同じ扱いにする。返すのは (知らせ, 始めたか)。
+
+        自動の比較がオンなら比べ直す(_form_changed と同じ。オフなら「入力か設定を変えました」の状態の文のまま)。保存はしない。
+        """
+        previous = self._settings_key()
+        self._skip_columns = columns
+        self._drop_handed_if_changed(previous)
+        self._refresh_save()
+        if self._opened_saved is None and not self._input_unchanged():
+            self._clear_follow_up()
+            self._reset_shown()
+        if self._settings_key() != previous:
+            return self._auto_begin()
+        return None, False
+
+    def _skip_column(self, form: Any, name: Any) -> dict[str, Any]:
+        started = False
+        with self._lock:
+            self._take(form)
+            if not isinstance(name, str) or _SKIP_COLUMN_NAME.fullmatch(name) is None:
+                raise _BadRequest
+            upper = name.upper()
+            if upper in self._skip_columns:
+                return self._ok(skip_column="duplicate")
+            if len(self._skip_columns) >= SKIP_COLUMN_MAX:
+                return self._ok(skip_column="full")
+            notice, started = self._change_skip((*self._skip_columns, upper))
+            result = self._ok(skip_column="added", **({"notice": notice} if notice is not None else {}))
+        if started:
+            self._session.gate_changed(self)
+        return result
+
+    def _unskip_column(self, form: Any, name: Any) -> dict[str, Any]:
+        started = False
+        with self._lock:
+            self._take(form)
+            if not isinstance(name, str) or _SKIP_COLUMN_NAME.fullmatch(name) is None:
+                raise _BadRequest
+            upper = name.upper()
+            if upper not in self._skip_columns:
+                return self._ok()
+            notice, started = self._change_skip(tuple(c for c in self._skip_columns if c != upper))
+            result = self._reply(notice)
+        if started:
+            self._session.gate_changed(self)
+        return result
+
+    # --- 元の行(REQ-367 §2) ---
+
+    def _can_find_source(self) -> bool:
+        """ロックの中で呼ぶ。構造化比較の行から元の行を探せるか(表示中の結果に単純比較の結果があるとき。保存した結果を開いたときも同じ)。"""
+        return self._outcome is not None and self._outcome.find_source is not None
+
+    def _structured_source(self, form: Any, index: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise _BadRequest
+            row = None
+            if self._outcome is not None and self._outcome.find_source is not None:
+                # 表示中の組の結果と、result で渡したのと同じ単純比較の行(raw_rows)から探す
+                row = self._outcome.find_source(index)
+            return self._ok(source={"row": row})
 
     def _select_new_pair(self, outcome: MultiCompareOutcome, key: tuple[int, int]) -> None:
         """ロックの中で呼ぶ。手で作った組の行を選び、今の決まり(pair_tab)でタブを開く。"""
@@ -3735,6 +4451,7 @@ class CompareApi(Api):
         if position is None:
             return
         self._pair = position
+        self._shown_row = None
         self._show_pair()
         tab = pair_tab(mv.entries[position].outcome)
         if tab is not None:
@@ -3820,6 +4537,7 @@ class CompareApi(Api):
                 self._follow_up_preview = (
                     self._next_serial(), prompt, question, client, last, self._pair, self._follow_up_epoch, words
                 )
+                self._follow_up_basis = (self._follow_up_preview[0], send_basis(settings))  # REQ-371
                 return self._ok()
             if not self._send_follow_up(client, prompt, question, last, words):
                 return self._ok()  # 一括比較が走っている
@@ -3882,12 +4600,38 @@ class CompareApi(Api):
             extra_words=extra_words,
         )
 
+    def _where_user(self) -> dict[str, Any]:
+        """利用者ごとの設定ファイルの場所を決める引数(env・platform・home)。"""
+        return {key: self._where[key] for key in ("env", "platform", "home")}
+
+    def _write_layout(self, values: dict[str, object]) -> bool:
+        """ui-state.json の compare_split_left・compare_ai_hidden を書く(REQ-374)。書けたら真。失敗は捨てる(画面は止めず、知らせない)。"""
+        try:
+            save_compare_layout(ui_state_path(**self._where_user()), values)
+        except (OSError, ValueError):
+            return False
+        return True
+
     def _set_ai_hidden(self, form: Any, hidden: Any) -> dict[str, Any]:
         with self._lock:
             self._take(form)
             if not isinstance(hidden, bool):
                 raise _BadRequest
             self._ai_hidden = hidden  # 表示だけ。門は見ない(比較中・送信中でも変える)
+            if hidden != self._remembered_hidden and self._write_layout({COMPARE_AI_HIDDEN_KEY: hidden}):
+                self._remembered_hidden = hidden
+            return self._ok()
+
+    def _remember_split(self, form: Any, ratio: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not math.isfinite(ratio):
+                raise _BadRequest
+            if self._ai_window is not None:
+                return self._ok()  # AI を別の窓に出している間は、比較の窓の幅は意味が違うので書かない
+            rounded = round(float(ratio), 3)
+            if rounded != self._remembered_split and self._write_layout({COMPARE_SPLIT_LEFT_KEY: rounded}):
+                self._remembered_split = rounded
             return self._ok()
 
     def _set_full_text(self, form: Any, checked: Any) -> dict[str, Any]:
@@ -3971,7 +4715,7 @@ class CompareApi(Api):
 
         比較中・質問中・閉じている途中は断る(何も書かない)。Python が読み直した一覧で、位置と名前が合うときだけ書く
         (合わなければ一覧が変わったので、書かずに描き直させる)。失敗したら知らせる(選択は使用中の位置に戻る)。
-        結果・答え・やり取りには触らない。書いたら、設定の窓が開いていれば読み直させる(ロックの外)。
+        結果・答え・やり取りには触らない。書いたら、設定の窓が開いていれば読み直させ、一括比較の窓にも描き直しを知らせる(ロックの外。REQ-372)。
         """
         written = False
         with self._lock:
@@ -3996,6 +4740,9 @@ class CompareApi(Api):
             result = self._ok() if action.ok else self._ok(notice=self._notice(action.message, title))
         if written:
             self._session.settings_changed()
+            switched = getattr(self._session, "_profiles_switched", None)
+            if switched is not None:
+                switched(origin=self)  # 一括比較の窓へ描き直しを知らせる(AI の窓へは _notify_other が届く。REQ-372)
         return result
 
     def _ask_in_thread(
@@ -4097,6 +4844,8 @@ class CompareApi(Api):
                     "structured_detail": None,
                     "structured_rows": [],
                     "structured_op_keys": [],
+                    "structured_columns": [],
+                    "can_find_source": False,
                     "raw_note": None,
                     "open_tab": None,
                     "open_tab_revision": self._open_tab_revision,
@@ -4115,6 +4864,7 @@ class CompareApi(Api):
                     # 単純比較の設定で脇に置いた行(ADR-0166 決定11-2)。結果が無いときは無し
                     "raw_set_aside": None,
                     "raw_set_aside_rows": [],
+                    "raw_line_rules": [],
                     "raw_mark_labels": dict(RAW_MARK_LABEL),
                     "raw_move_labels": [],
                 }
@@ -4141,6 +4891,10 @@ class CompareApi(Api):
                     ],
                     # 操作の列の印の鍵(REQ-276)。structured_rows と同じ数・同じ順。行の形は変えず、別のキーで渡す
                     "structured_op_keys": [row.op_key for row in view.structured_rows],
+                    # 右クリックの項目(REQ-367)。structured_columns は構造化比較の行ごとの、show の表の変更の行の変わった列の名前
+                    # (ほかの行は空。structured_rows と同じ数・同じ順)、can_find_source は単純比較の結果があって元の行を探せるか
+                    "structured_columns": view.structured_columns,
+                    "can_find_source": self._can_find_source(),
                     "raw_note": view.raw_note,
                     # 1組を比べたとき、結果を開いて選ぶタブ(REQ-282。show の both は structured、raw は raw、ほかは null)。
                     # まとめて比べているとき(一覧がある)は null(タブは今の決まりのまま。既存のキーの形は変えない)
@@ -4181,6 +4935,9 @@ class CompareApi(Api):
                     "raw_mark_labels": dict(RAW_MARK_LABEL),
                     # 移動元・移動先の行の印の文(「移動元 1」「移動先 1」。REQ-228 §8.2)。[{index, text}](index は raw_rows の番号)
                     "raw_move_labels": raw_move_labels(view.raw_rows),
+                    # 行ごとに効いているルール(REQ-366 §5)。当たったルールのある行だけ。index は raw_rows の番号。
+                    # 保存した結果で line_hits を持たない古い保存・ルールの無い結果は空
+                    "raw_line_rules": raw_line_rules(view.raw_rows, outcome_raw_options(self._raw_rules_outcome())),
                 }
             # キャラクターの絵の場面(ADR-0174 決定2)。差分なしの絵は、比べ終わって差分が 0 件のとき。
             # 空の窓の絵は、この窓でまだ一度も比べていないとき。既存のキーの形は変えず、別のキーで渡す
@@ -4481,6 +5238,11 @@ class CompareApi(Api):
         with self._lock:
             return self._ok()
 
+    def _open_log_view(self) -> dict[str, Any]:
+        self._session.open_log_view()  # 窓を作る間はロックを持たない
+        with self._lock:
+            return self._ok()
+
     def _split_ready(self) -> ScreenInput | None:
         """ロックの中で呼ぶ。機器ごとに分けて書き出せるなら、比べたときの入力。押せないときは None。"""
         notice = self._devices_notice()
@@ -4613,6 +5375,7 @@ class CompareApi(Api):
             if self._busy() or self._closing:
                 return False  # 待っている答えも変えない
             self._handed = None  # 前に持ってきた答えは、読めない知らせの道でも捨てる
+            self._back = None  # 前の組に結果を返す覚えも捨てる(読めない知らせの道でも。REQ-362)
         try:
             sources = {"before": read_file(handoff.before), "after": read_file(handoff.after)}  # 読む間はロックを持たない
         except InputReadError as exc:
@@ -4640,15 +5403,21 @@ class CompareApi(Api):
                 values["command"] = handoff.show_command
             values["mode"] = handoff.mode
             self._form = values
-            # 単純比較の設定は組の設定にする(既定のファイルは読まない。REQ-228 §7.2)。前後の行数は今のまま
-            self._raw = RawForm(handoff.raw_options, [], self._raw_context)
-            self._raw_values = raw_form_values(handoff.raw_options, self._raw_context)
-            self._raw_fill += 1
+            # 単純比較の設定は、この窓が今持っている設定のまま(組の設定で置き換えない。REQ-361 §2)。
+            # 組の設定と違えば、比べ始めた後に帯で知らせる(下)
+            self._handoff_raw_band = None
             self._leave_opened()  # 開いた保存の結果の表示は消す(REQ-120)
             # 一括比較から受け取った(空の窓の絵は隠す。ADR-0174 決定2)。比較を始めないときも画面へ伝える
             self._mark_compared(tell=True)
             for side in SIDES:
                 self._set_source(side, sources[side])  # 区間は自動に戻し、欄を入れ直させ、保存を見直す
+            if handoff.origin is not None:
+                # 元の組の目印と、受け取った入力(単純比較の設定は既定に替える。窓の設定に誤りがあっても作れる)を覚える。
+                # _set_source が捨てるので、その後で入れる。比べ終わったときに同じ入力なら結果を返す(REQ-362)
+                remembered = self._input_with(DEFAULT_RAW_OPTIONS)
+                if remembered is not None:
+                    # 比べない列(REQ-367)も、単純比較の設定と同じく既定(空)で覚える
+                    self._back = (dataclasses.replace(remembered, skip_columns=()), handoff.origin)
             inp = self._current_input()
             if inp is not None:
                 if answer is not None:
@@ -4656,9 +5425,20 @@ class CompareApi(Api):
                     self._handed = (inp, answer)
                 # 答えの有無によらず、いつも比べる(ADR-0216 決定3)
                 started = self._begin_handoff()
-                if not started:
+                if started:
+                    # 比べ始めた。組の単純比較の設定と、この窓の設定(比べる設定)が違えば帯で知らせる(同じなら出さない。REQ-361 §2)。
+                    # 帯は次に比べるまで残す(_start が前の帯を消した後に入れる)
+                    if handoff.raw_options != self._raw.options:
+                        self._handoff_raw_band = RAW_HANDOFF_DIFFERS
+                else:
                     # 始められなかった(一括比較が門を持っている)。入力欄だけ埋めて、まだ比べていないと窓の下で伝える
                     self._status[0] = HANDOFF_NOT_STARTED
+            elif self._raw.options is None:
+                # この窓の単純比較の設定に誤りがあるので、比べない(「比較実行」と同じ誤りの知らせ。REQ-361 §2)
+                self._late_notice = {
+                    "id": self._next_serial(),
+                    **self._notice("\n".join(self._raw.problems), RAW_OPTIONS_INVALID_TITLE),
+                }
         if started:
             self._session.gate_changed(self)
         self._changed()
@@ -4889,6 +5669,7 @@ class CompareApi(Api):
             self._opened = None
             self._opened_saved = None
             self._handed = None  # 窓を閉じたら一括比較の答えは捨てる(ADR-0170 決定4)
+            self._back = None  # 結果を返す元の組も捨てる(REQ-362)
             self._clear_follow_up()
 
     def _close(self) -> dict[str, Any]:
@@ -4910,5 +5691,6 @@ _READ_ONLY = frozenset(
         CompareApi._jump,
         CompareApi._all,
         CompareApi._partner_choices,
+        CompareApi._remember_split,
     }
 )

@@ -74,6 +74,7 @@ GUI_WEB_FILES = (
     "static/compare.html",
     "static/batch.html",
     "static/ai_pane.html",
+    "static/log_view.html",  # 「ログを見る」の窓(ADR-0248 決定2 / REQ-377)
     "static/pilot.css",
     "static/js/bridge.js",
     "static/js/dom.js",
@@ -83,6 +84,7 @@ GUI_WEB_FILES = (
     "static/js/compare.js",
     "static/js/ai_view.js",
     "static/js/ai_pane.js",
+    "static/js/log_view.js",  # 「ログを見る」の窓の動き(ADR-0248 決定2 / REQ-377)
     "static/js/answer_view.js",
     "static/js/answer_copy.js",
     "static/js/batch.js",
@@ -90,8 +92,11 @@ GUI_WEB_FILES = (
     "static/js/path_tail.js",
     "static/js/column_width.js",
     "static/js/pair_drag.js",
+    "static/js/row_menu.js",  # 一括比較の窓の組の行の右クリックのメニューの開け閉め(REQ-368)
+    "static/js/table_sort.js",  # 構造化比較の表の見出しの並べ替えの比べ方(REQ-369)
     "static/js/marks.js",
     "static/js/raw_options.js",
+    "static/js/raw_rule_text.js",
     "static/js/character.js",
     "static/js/theme.js",
     "static/js/voice.js",  # 入力欄の横のマイクのボタン(ADR-0233 / REQ-341)
@@ -108,6 +113,11 @@ GUI_WEB_FILES = (
     "static/character/welcome.png",
     # 答えの吹き出しの顔(ADR-0181 決定4)
     "static/character/avatar.png",
+    # 動いている間のアイコン(ADR-0246 / REQ-373)
+    "static/character/app-icon-character.png",
+    "static/character/app-icon-character.ico",
+    "static/character/app-icon-business.png",
+    "static/character/app-icon-business.ico",
 )
 # 依存の1行(例: 'openai<4,>=3.31; extra == "llm"')の、先頭の名前と extra の印
 _REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")

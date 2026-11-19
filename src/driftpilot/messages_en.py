@@ -62,7 +62,7 @@ STATUS_ORDER_ONLY = f"{STATUS_LABEL['difference']} (the order is the only differ
 
 def unreadable_utf8(path: object, hints: tuple[InputHint, ...] = ()) -> str:
     """Text for input that could not be read as UTF-8. Hints (guidance guessed from the unreadable bytes, REQ-189) are appended if present."""
-    text = f"{path}: cannot be read as UTF-8"
+    text = f"{path}: cannot be read as UTF-8. Check the character encoding of the file"
     if not hints:
         return text
     return text + ". " + "".join(input_hint_text(h) for h in hints)
@@ -196,7 +196,7 @@ GUI_WEB_TEXTS: dict[str, str] = {
     "sample.compare.status": "Differences found",
     "sample.compare.counts": "Structured 1  Simple 1",
     "sample.compare.paste.title": "Paste Before",
-    "sample.compare.paste.prompt": "Paste a config or terminal log",
+    "sample.compare.paste.prompt": "Paste a device config or a terminal log",
     "sample.compare.paste.ok": "OK",
     "sample.compare.paste.cancel": "Cancel",
 }
@@ -204,7 +204,7 @@ GUI_WEB_TEXTS: dict[str, str] = {
 
 def save_caution() -> str:
     """Caution about handling saved results (ADR-0017 decision 4). The saved file contains the input's setting values in plain text."""
-    return "This contains the input's setting values as they are. Treat it the same as the original config (confidential)."
+    return "This contains the input's setting values as they are, without masking. Treat it the same as the original config (confidential)."
 
 
 # Display names for detail["item"] of duplicate_line (AOS-Switch port conflicts. REQ-334)
@@ -215,7 +215,7 @@ def warning_message(w: SafetyWarning) -> str:
     if w.kind == "empty_category":
         return (
             f"In {_SIDE_LABEL[w.side or 'before']}, the tree has {w.detail['tree_count']} {w.detail['subject']}, "
-            f"but no {w.category} could be read. The format may have changed."
+            f"but no {w.category} could be read. The format may have changed. Check with the Simple comparison."
         )
     if w.kind == "duplicate_line":
         # Values are not included (detail has only the scope and line numbers)
@@ -226,19 +226,19 @@ def warning_message(w: SafetyWarning) -> str:
             return (
                 f"In {_SIDE_LABEL[w.side or 'before']}, {scope} has different values for the same item ({item}) in "
                 f"{w.detail.get('count', 2)} places (line numbers are not available with this reading method). "
-                "The IR uses the value from the later line."
+                "The Structured comparison uses the value from the later line."
             )
         if not w.detail["lines"]:
             # A-type trees do not keep the original line numbers (ADR-0030 decision 5)
             return (
                 f"In {_SIDE_LABEL[w.side or 'before']}, the same line appears {w.detail.get('count', 2)} times under {scope} "
-                "(line numbers are not available with this reading method). None of them were dropped."
+                "(line numbers are not available with this reading method). All of them are kept."
             )
         lines = ", ".join(str(n) for n in w.detail["lines"])
         return (
             f"In {_SIDE_LABEL[w.side or 'before']}, under {scope}, {_plural(len(w.detail['lines']), 'line', 'lines')} {lines} "
             f"{_plural(len(w.detail['lines']), 'is a duplicate', 'are duplicates')} "
-            "(the same line, or the same item with different values). Neither was dropped, but the IR uses the value from the later line."
+            "(the same line, or the same item with different values). All lines are kept, but the Structured comparison uses the value from the later line."
         )
     if w.kind == "top_level_merged":
         # Line contents and values are not included (detail has only line numbers and the count). Up to 10 line numbers (ADR-0211 decision 4)
@@ -273,8 +273,8 @@ def warning_message(w: SafetyWarning) -> str:
             "Check the patterns for the lines to ignore."
         )
     return (
-        f"The tree has {w.detail['tree_diff_lines']} different {_plural(w.detail['tree_diff_lines'], 'line', 'lines')}, but there are 0 structured differences. "
-        "Changes to settings that could not be read may have been missed."
+        f"The tree has {w.detail['tree_diff_lines']} different {_plural(w.detail['tree_diff_lines'], 'line', 'lines')}, but the Structured comparison found 0 differences. "
+        "There may be setting changes that the Structured comparison could not read. Check with the Simple comparison."
     )
 
 
@@ -428,16 +428,19 @@ def notice_message(n: ExposureNotice) -> str:
     after: dict[str, Any] = n.detail["after"]
     if n.kind == "mixed_exposure":
         return (
-            f"Comparing a normal version with a version with defaults (Before: {before['command']!r} is {_STATE_LABEL[before['state']]}, "
-            f"After: {after['command']!r} is {_STATE_LABEL[after['state']]}). Most differences come from how the config was obtained"
+            f"Before and After were obtained in different ways (Before: {before['command']!r} is {_STATE_LABEL[before['state']]}, "
+            f"After: {after['command']!r} is {_STATE_LABEL[after['state']]}). "
+            "Many of the differences may come from this. Compare configs obtained with the same command."
         )
     if n.kind == "unknown_both":
-        return "Unknown retrieval command: cannot tell whether Before and After are a normal version or a version with defaults"
+        return "Unknown retrieval command: it is not known whether Before and After are a normal version or a version with defaults"
     known, known_label, other_label = (
         (before, "Before", "After") if before["state"] != "unknown" else (after, "After", "Before")
     )
     head = "[Version with defaults] " if n.emphasized else ""
-    return f"{head}{known_label} was obtained with {known['command']!r} ({_STATE_LABEL[known['state']]}). How {other_label} was obtained is unknown"
+    # With defaults, the leading mark already says the kind; only for a normal version keep the kind after the command (no information lost. REQ-356)
+    kind = " (Normal version)" if known["state"] == "normal" else ""
+    return f"{head}{known_label} is a config obtained with {known['command']!r}{kind}. How {other_label} was obtained is unknown."
 
 
 def notice_line(n: ExposureNotice) -> str:
@@ -446,7 +449,7 @@ def notice_line(n: ExposureNotice) -> str:
 
 # Reasons for excluding values from comparison (ADR-0025 decision 6). Text for each value of core's ComparisonExclusion.reason
 _EXCLUSION_REASON = {
-    "reencrypted_value": "FortiGate values that are re-encrypted (values with ENC) are excluded from comparison",
+    "reencrypted_value": "FortiGate values that are encrypted again each time they are obtained (values with ENC) are not compared",
 }
 
 
@@ -455,7 +458,7 @@ def exclusion_line(e: ComparisonExclusion) -> str:
     reason = _EXCLUSION_REASON.get(e.reason, f"Some values are excluded from comparison (reason: {e.reason})")
     return (
         f"Excluded from comparison: {reason} (Before: {e.counts['before']}, After: {e.counts['after']}; rule {e.rule_id}). "
-        "Even if these values really change, no difference will be shown"
+        "Even if these values change, no difference is shown"
     )
 
 
@@ -483,7 +486,7 @@ def batch_summary_lines(summary: BatchSummary, exit_code: int) -> list[str]:
 
 
 def batch_cancel_accepted() -> str:
-    return "Stop request accepted. It will stop when the running job finishes (press Ctrl+C again to stop immediately)"
+    return "Stop request accepted. It will stop when the pair being compared now finishes (press Ctrl+C again to stop immediately)"
 
 
 # --- Pair generation and the batch compare window (ADR-0020 / REQ-27 part A). Keep the way counts are worded the same in CLI and GUI ---
@@ -513,7 +516,7 @@ def paired_count_line(count: int) -> str:
 
 
 def unpaired_count_line(count: int) -> str:
-    return f"Unpaired files: {count}"
+    return f"Files on one side only: {count}"
 
 
 def unpaired_side_line(side: str, count: int) -> str:
@@ -692,12 +695,12 @@ _LLM_REASON = {
     "dry_run": "Preview of the content to send only (--llm-dry-run). Nothing was sent",
     "no_diff": "There are no differences, so the AI was not called",
     "no_structured_diff": "The structured comparison has no differences, so nothing was sent (for example, only the order differs)",
-    "nothing_to_send": "There are no differences that can be sent (all lines were ones whose credentials could not be judged)",
+    "nothing_to_send": "There are no differences that can be sent (all differences were lines that are not sent because it could not be judged whether they are secret)",
     "no_api_key": (
         "No API key (use 'Save to key store' in the settings window, or put it in the per-profile environment variable DRIFTPILOT_LLM_API_KEY_<suffix>. "
         "When not using a profile, use DRIFTPILOT_LLM_API_KEY or llm.api_key in the per-user settings file)"
     ),
-    "client_unavailable": "The AI connection component is not installed (pip install 'driftpilot[llm]')",
+    "client_unavailable": "The component needed to connect to the AI is not installed (pip install 'driftpilot[llm]')",
     "not_configured": "No model is set (llm.model in the settings file)",
     "placeholder_base_url": "Replace <resource name> in the connection URL. Nothing was sent",
     "cli_not_found": "CLI not found (check the CLI location field or PATH)",
@@ -805,13 +808,13 @@ def llm_truncated_lines(llm: LlmAnalysis) -> list[str]:
     else:
         head = (
             f"There are {llm.diff_total:,} {_plural(llm.diff_total, 'difference', 'differences')}; "
-            f"cut off at {llm.max_diffs:,}."
+            f"only the first {llm.max_diffs:,} are sent to the AI."
         )
     return [
         head,
-        "A difference count this large can mean the compared targets are different",
-        "(Normal version vs Version with defaults, a different device, or mismatched pairs).",
-        "Check the safety-net warning and the section selection.",
+        "If there are more differences than expected, check the warnings about possible missed changes, "
+        "how the configs were obtained (Normal version vs Version with defaults), "
+        "and the section selection (a different device or mismatched pairs).",
     ]
 
 
@@ -820,12 +823,12 @@ def llm_unsent_line(llm: LlmAnalysis) -> str | None:
     unsent = llm.unsent
     if unsent is None or not (unsent.lines or unsent.context_lines):
         return None
-    head = f"{unsent.lines} {_plural(unsent.lines, 'line', 'lines')} not sent because they could not be judged"
+    head = f"{unsent.lines} {_plural(unsent.lines, 'line', 'lines')} not sent to the AI because it could not be judged whether they are secret"
     if unsent.blocks:
         head += f" (including {unsent.blocks} PEM {_plural(unsent.blocks, 'block', 'blocks')})"
     if unsent.context_lines:
         head += f". {unsent.context_lines} surrounding context {_plural(unsent.context_lines, 'line', 'lines')} not sent either"
-    return head + ". They still appear above as differences (only the AI's opinion is missing)"
+    return head + ". The differences are shown above (only the AI's opinion on those lines is missing)"
 
 
 def llm_unsent_shape_lines(llm: LlmAnalysis) -> list[str]:
@@ -841,7 +844,7 @@ def unsent_shape_lines(shapes: "list[UnsentShape] | tuple[UnsentShape, ...]") ->
 
     if not shapes:
         return []
-    lines = ["Shapes of lines not sent (no values; candidates to add to the masking table):"]
+    lines = ["Shapes of lines not sent (values are not included; candidates to add to the masking table):"]
     for s in shapes:
         if s.shape == SECRET_SHOW_REASON:
             lines.append(f"  [{s.scope}] The body of this pair was not sent because the command lists secrets ({s.count})")
@@ -909,7 +912,7 @@ def llm_screen_lines(llm: LlmAnalysis, *, retry_after: int | None = None) -> lis
 def workdir_api_key_ignored(path: Path) -> str:
     """One line for when the working-folder settings file has an api_key (the value is not shown)."""
     return (
-        f"Note: llm.api_key in {path} is not read (by design, keys are not read from files in the working folder). "
+        f"Note: llm.api_key in {path} is not used (keys are not read from files in the working folder). "
         "Put the key in 'Save to key store' in the settings window, or in the per-profile environment variable DRIFTPILOT_LLM_API_KEY_<suffix>. "
         "When not using a profile, use DRIFTPILOT_LLM_API_KEY or llm.api_key in the per-user settings file"
     )
@@ -1021,11 +1024,11 @@ SETTINGS_TAB_AUTO = "Compare and automation"
 SETTINGS_TAB_FILE = "Settings file"
 SETTINGS_NOTE_AUTO_SEND = "When on, the differences are sent to the AI profile in use every time a comparison finishes, without asking."
 SETTINGS_NOTE_SAVE_BOTH = "'Save' writes the fields on both the 'Compare and automation' and 'Settings file' tabs."
-# Checkbox and note for "Show the character (Mirarin)" (ADR-0174 decision 1. [gui] character)
+# Checkbox and note for "Show the character (Mirarin)" (ADR-0174 decision 1 / ADR-0245 decision 2. [gui] character. Saving applies to open windows too)
 SETTINGS_CHARACTER = "Show the character (Mirarin)"
 SETTINGS_NOTE_CHARACTER = (
     "Mirarin's picture appears at startup, while the AI is thinking, while a batch compare is running, when there are no differences, and so on. "
-    "The change takes effect the next time you open the window."
+    "The change also applies to open windows when you save."
 )
 AUTO_SEND_CONFIRM_TITLE = "Send to the AI automatically after comparing"
 
@@ -2143,7 +2146,7 @@ COMPARE_AUTO_SENDING = "Sending to AI"
 COMPARE_AI_PREPARING = "Preparing what to send to AI"
 COMPARE_LLM_PANE = "AI analysis"
 # Titles of notices (wx MessageBox)
-COMPARE_READ_FAILED_TITLE = "Cannot read"
+COMPARE_READ_FAILED_TITLE = "Cannot read the file"
 COMPARE_LLM_SETTINGS_TITLE = "Cannot read AI settings"
 COMPARE_FAILED_TITLE = "Compare failed"
 COMPARE_SAVE_FAILED_TITLE = "Cannot save"
@@ -2153,7 +2156,7 @@ COMPARE_DROP_TOO_MANY = "You can drop one or two files. The inputs were not chan
 COMPARE_DROP_FOLDER = "A folder cannot be used as an input. Drop a file instead. The inputs were not changed."
 COMPARE_DROP_NO_PATH = 'The location of the dropped file is unknown. Choose it with "Browse…". The inputs were not changed.'
 # Paste dialog and pre-send preview dialog (wx PasteDialog and LlmPreviewDialog)
-PASTE_PROMPT = "Paste a config or a terminal log"
+PASTE_PROMPT = "Paste a device config or a terminal log"
 LLM_PREVIEW_TITLE = "Confirm what will be sent to AI"
 LLM_PREVIEW_PAYLOAD = "Content to send (after masking; only the fixed answer-format rules are added after this):"
 LLM_PREVIEW_SEND = "Send"
@@ -2257,6 +2260,19 @@ MULTI_PAIRED_BY_HAND = "Paired by hand"
 # Marks beside the status of a pair row (and in the Batch compare table) for how show was compared (ADR-0200 decision 5; REQ-282)
 MULTI_SHOW_RAW_MARK = "Simple compare"
 MULTI_SHOW_BOTH_MARK = "Table + simple compare"
+# Mark on a Batch compare row that received a result compared again in the Compare window (ADR-0242 decision 2; REQ-362).
+# Only when the simple comparison settings differ from the pair's
+BATCH_ROW_RECHECKED_MARK = "Rechecked in Compare"
+BATCH_RECHECKED_NOTE = "Compared again in the Compare window (settings for this window only: {summary})"
+# Right-click menu items on a Batch compare pair row, the device type dialog, and the mark on a row whose device type was set by hand (REQ-368 / ADR-0244 decisions 1 and 4)
+BATCH_MENU_HANDOFF = "Open in Compare"
+BATCH_MENU_RECHECK = "Compare this pair again"
+BATCH_MENU_PLATFORM = "Choose the device type and compare again…"
+BATCH_PLATFORM_DIALOG_TITLE = "Choose the device type and compare again"
+BATCH_PLATFORM_DIALOG_APPLY = "Compare again"
+BATCH_PLATFORM_DIALOG_CANCEL = "Cancel"
+BATCH_ROW_HAND_PLATFORM_MARK = "Set by hand"
+BATCH_HAND_PLATFORM_NOTE = "Device type set by hand: {name}"
 COMPARE_PARTNER_TITLE = "Choose partner"
 
 
@@ -2441,6 +2457,7 @@ COMPARE_AI_EMPTY = (
 )
 COMPARE_AI_INPUT = "Question for the AI (asks about the differences shown now)"
 COMPARE_AI_INPUT_HINT = "Shift+Enter to send, Enter for a new line"
+COMPARE_AI_SEND = "Send the question (Shift+Enter)"
 COMPARE_AI_PROFILE = "AI profile"
 COMPARE_AI_PROMPT = "Prompt"
 COMPARE_AI_ANALYZE = "Analyze with preset question"
@@ -2458,8 +2475,20 @@ COMPARE_AI_TARGET_RAW = "Simple compare"
 COMPARE_AI_TARGET_WHOLE = "All command results (selected pairs)"
 
 
-def compare_ai_target(kind: str, category: str | None = None, command: str | None = None) -> str:
-    """Shown in the AI pane as "Question target: ..." (screen only; not included in the sent text). kind is structured, raw or whole."""
+# The fixed question put in the input field when asking about one row of the simple comparison table (REQ-366 section 6). Sent only when the user sends it
+COMPARE_AI_ROW_QUESTION = "Please explain what this difference means and how it affects things"
+
+
+def compare_ai_target(
+    kind: str,
+    category: str | None = None,
+    command: str | None = None,
+    row: tuple[int | None, int | None] | None = None,
+) -> str:
+    """Shown in the AI pane as "Question target: ..." (screen only; not included in the sent text). kind is structured, raw or whole.
+
+    row is (before line number, after line number) when asking about only one row of the simple comparison. No line text (REQ-366 section 6).
+    """
     if kind == "whole":
         name = COMPARE_AI_TARGET_WHOLE
     else:
@@ -2468,6 +2497,9 @@ def compare_ai_target(kind: str, category: str | None = None, command: str | Non
             name = f"{name}, category {category}"
         if command:
             name = f"{name} ({command})"
+        if row is not None:
+            parts = [f"{label} line {no}" for label, no in zip(("before", "after"), row) if no is not None]
+            name = f"{name}, this line only ({', '.join(parts)})"
     return f"Question target: {name}"
 
 # Choose which command pairs to send to AI in a multi-command compare (REQ-265, ADR-0193 decision 3)
@@ -2616,6 +2648,7 @@ GUI_WEB_TEXTS.update(
         "character.avatar.title": CHARACTER_AVATAR_TITLE,
         "compare.ai.input": COMPARE_AI_INPUT,
         "compare.ai.input.hint": COMPARE_AI_INPUT_HINT,
+        "compare.ai.send": COMPARE_AI_SEND,
         "compare.ai.profile": COMPARE_AI_PROFILE,
         "compare.ai.prompt": COMPARE_AI_PROMPT,
         "compare.button.copy": COMPARE_COPY,
@@ -2724,6 +2757,13 @@ BATCH_ANSWER = "AI answer for the selected pair"
 BATCH_SETUP_FAILED_TITLE = "Cannot build pairs"
 BATCH_LLM_SETTINGS_TITLE = "Cannot read AI analysis settings"
 BATCH_NOT_SENT_TITLE = "Not sent to AI"
+# Notice when an approved send was not made because the settings changed after the confirmation (REQ-371 / ADR-0245 decision 1).
+# No value, word or prompt text goes in
+REREAD_NOT_SENT = {
+    "secret_words": "Nothing was sent, because the secret words changed after the confirmation. Please confirm again.",
+    "profile": "Nothing was sent, because the AI profile changed after the confirmation. Please confirm again.",
+    "limits": "Nothing was sent, because the limits on what is sent to the AI changed after the confirmation. Please confirm again.",
+}
 BATCH_FAILED_TITLE = "Batch compare failed"
 BATCH_SELECT_TITLE = "Select a pair"
 BATCH_SELECT_PROMPT = "Select a pair in the list to open in the compare window."
@@ -3105,6 +3145,15 @@ GUI_WEB_TEXTS.update(
         "batch.col.side_before": BATCH_COL_SIDE_BEFORE,
         "batch.col.side_after": BATCH_COL_SIDE_AFTER,
         "batch.col.row_platform": BATCH_ROW_PLATFORM,
+        "batch.row.rechecked": BATCH_ROW_RECHECKED_MARK,
+        # Right-click menu on a pair row, the device type dialog, and the mark (REQ-368)
+        "batch.menu.handoff": BATCH_MENU_HANDOFF,
+        "batch.menu.recheck": BATCH_MENU_RECHECK,
+        "batch.menu.platform": BATCH_MENU_PLATFORM,
+        "batch.platform_dialog.title": BATCH_PLATFORM_DIALOG_TITLE,
+        "batch.platform_dialog.apply": BATCH_PLATFORM_DIALOG_APPLY,
+        "batch.platform_dialog.cancel": BATCH_PLATFORM_DIALOG_CANCEL,
+        "batch.row.hand_platform": BATCH_ROW_HAND_PLATFORM_MARK,
         # Multi-row selection, the "all" checkbox in the header, and "Settings…" (ADR-0176 / REQ-238)
         "batch.select.title": BATCH_SELECT_TITLE,
         "batch.select.one": BATCH_SELECT_ONE,
@@ -3276,6 +3325,16 @@ EXPORT_COL_BEFORE_LINE = "Before line"
 EXPORT_COL_AFTER_LINE = "After line"
 EXPORT_KIND_STRUCTURED = COMPARE_TAB_STRUCTURED
 EXPORT_KIND_RAW = COMPARE_TAB_RAW
+# The "Simple comparison settings" table in reports and the CSV column (REQ-363 / ADR-0243). Patterns and replacement text are shown after the secret check
+EXPORT_RAW_RULES = "Simple comparison settings"
+EXPORT_RAW_COL_KIND = "Type"
+EXPORT_RAW_COL_PATTERN = "Pattern"
+EXPORT_RAW_COL_REPLACEMENT = "Replace with"
+EXPORT_RAW_COL_HITS = "Matched lines"
+EXPORT_RAW_COL_HITS_TOTAL = "Matched lines (total of all pairs)"
+EXPORT_RAW_RULES_OTHERS = "Other settings: {parts}"
+EXPORT_RAW_WITHHELD = "(Not shown because it contains a secret word)"
+EXPORT_COL_RAW_SETTINGS = "Simple comparison settings"  # Last column of the pair-list CSV
 # Notices (title is COMPARE_SAVE_FAILED_TITLE)
 EXPORT_REDACT_FAILED = "Nothing was exported because secret lines cannot be masked."
 
@@ -3334,7 +3393,7 @@ GUI_WEB_TEXTS.update(
 # --- Simple comparison settings (ADR-0166 / REQ-227). The CLI, compare window, settings window, and HTML export use the same words ---
 # Sentences never include the user's patterns or replacement text (only counts and kinds; only the re.error message is added in parentheses)
 
-RAW_OPTIONS_TITLE = "Simple comparison settings"
+RAW_OPTIONS_TITLE = "Simple comparison settings for this window only (not saved)"  # Heading of the compare window field (REQ-361; the settings window uses RAW_SETTINGS_TITLE)
 RAW_SETTINGS_PREFIX = "Simple comparison settings: "
 RAW_FIELD_IGNORE = "Ignore lines"
 RAW_FIELD_REPLACE = "Replacements"
@@ -3382,6 +3441,46 @@ SETTINGS_NOTE_RAW_DEFAULTS = (
     "The command line (CLI) does not read these defaults."
 )
 SETTINGS_NOTE_SAVE_RAW = 'Save on this tab writes only raw-compare.json (fields on other tabs are not written).'
+
+# Delivering saved rules to open windows (REQ-361 / ADR-0241). Sentences never include patterns or replacement text (counts only)
+RAW_SETTINGS_TITLE = "Always-applied simple comparison settings"  # Heading of the Simple comparison tab (the tab name SETTINGS_TAB_RAW is unchanged)
+SETTINGS_NOTE_RAW_FOLLOW = "Saving applies the settings right away to open compare windows as well."
+RAW_WINDOW_NOTE = (
+    "The always-applied settings from the settings window are loaded. "
+    "Anything you add or change here is used only in this window and is discarded when it closes."
+)
+RAW_RESET_LABEL = "Reset to the always-applied settings"
+RAW_ADD_DEFAULTS_LABEL = "Add to the always-applied settings"
+RAW_FOLLOW_LOAD_LABEL = "Load the always-applied settings"
+RAW_HANDOFF_DIFFERS = "This differs from the simple comparison settings of the Batch compare set. Compared with this window's settings."
+RAW_FOLLOW_LOADED = "Loaded the always-applied settings."
+RAW_FOLLOW_KEPT = "The always-applied settings were saved. This window is still comparing with its own settings for this window only."
+BATCH_RAW_FOLLOW_LOADED = 'Loaded the always-applied settings. Press "Run" again to compare with the new settings.'
+BATCH_RAW_FOLLOW_FILE = "The always-applied settings were saved. The settings in the open set file are unchanged."
+RAW_ADD_TITLE = "Add to the always-applied settings"  # Title of notices (same as the button)
+RAW_ADD_CONFIRM_TITLE = "Add to the always-applied settings"
+RAW_ADD_CONFIRM_YES = "Add"
+RAW_ADD_CONFIRM_NO = "Cancel"
+RAW_ADD_NONE = "There are no rules to add."
+
+
+def raw_added_band(count: int) -> str:
+    """Banner in the compare window after adding to the always-applied settings."""
+    return f"Added {count} {'rule' if count == 1 else 'rules'} to the always-applied settings."
+
+
+def raw_add_over_limit(ignore: int, replace: int, limit: int) -> str:
+    """Reason when adding would exceed the limit (nothing is added). ignore and replace are the counts after adding."""
+    return (
+        f"Nothing was added: adding would make {ignore} ignore lines and {replace} replacements, "
+        f"which exceeds the limit ({limit} ignore lines, {limit} replacements)."
+    )
+
+
+def raw_add_confirm_line(kind: str, pattern: str, replacement: str | None) -> str:
+    """One line of the confirmation body. kind is ignore or replace (a name in RAW_RULE_KIND_TEXT). A replacement reads "pattern → replacement text"."""
+    head = f"{RAW_RULE_KIND_TEXT[kind]}: {pattern}"
+    return head if replacement is None else f"{head} → {replacement}"
 
 # Examples (description and pattern pairs). All pass check_raw_options (checked by tests)
 RAW_IGNORE_EXAMPLES: tuple[tuple[str, str], ...] = (
@@ -3516,6 +3615,11 @@ def raw_option_problem_line(problem: Any) -> str:
         unit = "patterns" if problem.field == "ignore_lines" else "pairs"
         name = RAW_FIELD_IGNORE if problem.field == "ignore_lines" else RAW_FIELD_REPLACE
         return f"{name} allows up to {MAX_PATTERNS} {unit}."
+    if kind == "duplicate":
+        # detail is the position of the first line or pair in the fields (no pattern text)
+        if problem.field == "ignore_lines":
+            return f"The pattern on line {problem.index} of {RAW_FIELD_IGNORE} is the same as line {problem.detail}."
+        return f"Pair {problem.index} of {RAW_FIELD_REPLACE} is the same as pair {problem.detail}."
     where = _raw_position(problem)
     if kind == "too_long":
         return f"{where} can be up to {MAX_PATTERN_CHARS} characters."
@@ -3573,6 +3677,58 @@ def raw_options_summary_text(plain: "dict[str, Any]", algorithm_used: str | None
     return RAW_SETTINGS_PREFIX + ", ".join(parts) if parts else None
 
 
+# --- Per-rule enable/disable for the simple comparison and the "Active rules" list (REQ-359 / ADR-0240 decisions 1 and 2) ---
+# Sentences never include patterns or replacement text (only counts and kinds)
+
+RAW_SETTINGS_NONE = "none"  # Summary when the enabled rules and the other settings are all default and only disabled rules exist
+RAW_DISABLED_SUFFIX = " ({count} disabled)"
+RAW_RULES_TITLE = "Active rules ({enabled} enabled, {disabled} disabled)"
+RAW_RULE_KIND_TEXT = {"ignore": "Ignore line", "replace": "Replacement"}
+RAW_RULE_HITS = "before {before}, after {after}"
+RAW_RULE_NO_HITS = "—"  # Disabled rules, not compared yet, or an old saved result without counts
+# The small window of "Show the rules that apply to this line" (REQ-366 section 5). The heading has only the line number (no line text)
+RAW_LINE_RULES_NONE = "No rules apply on this side"
+
+
+def raw_line_rules_side(side: str, line_no: int) -> str:
+    """Heading of a side in the small window. side is before or after."""
+    return f"{'Before' if side == 'before' else 'After'} (line {line_no})"
+
+
+def raw_summary_with_disabled(summary: str | None, disabled: int) -> str | None:
+    """Add the number of disabled rules to the simple comparison summary (" (1 disabled)"). Unchanged when none are disabled.
+    When the enabled rules and other settings are all default (summary is None), "Simple comparison settings: none (1 disabled)".
+    """
+    if disabled <= 0:
+        return summary
+    head = summary if summary is not None else RAW_SETTINGS_PREFIX + RAW_SETTINGS_NONE
+    return head + RAW_DISABLED_SUFFIX.format(count=disabled)
+
+
+def batch_rechecked_note(plain: "dict[str, Any]") -> str:
+    """Tooltip of the mark on a Batch compare row (REQ-362). plain has the shape from options_to_plain (the Compare window's simple comparison settings).
+
+    The summary is joined like raw_options_summary_text (without the leading "Simple comparison settings: "). "none" when everything is default.
+    """
+    parts = raw_options_parts(plain)
+    return BATCH_RECHECKED_NOTE.format(summary=", ".join(parts) if parts else RAW_SETTINGS_NONE)
+
+
+def batch_platform_hand(name: str) -> str:
+    """Full text of the mark on a row whose device type was set by hand (REQ-368). name is the text of the device type column."""
+    return BATCH_HAND_PLATFORM_NOTE.format(name=name)
+
+
+def raw_rules_title(enabled: int, disabled: int) -> str:
+    """Heading of the list ("Active rules (2 enabled, 1 disabled)")."""
+    return RAW_RULES_TITLE.format(enabled=enabled, disabled=disabled)
+
+
+def raw_rule_hits_text(before: int, after: int) -> str:
+    """The "Matched lines" text of the list ("before 2, after 3")."""
+    return RAW_RULE_HITS.format(before=before, after=after)
+
+
 def raw_moves_part(moves: int, skipped: bool) -> str | None:
     """Return the moves part ("2 moves" or the skipped notice), or None if there are no moves."""
     if skipped:
@@ -3626,6 +3782,10 @@ GUI_WEB_TEXTS.update(
         ),
         "raw_options.example": "Add from an example…",
         "raw_options.replace": "Replace before comparing (regular expressions)",
+        "raw_options.replace.note": (
+            "Replacements also apply to the values when show output is compared as a table "
+            "(patterns that look at the text before or after a value do not match)"
+        ),
         "raw_options.replace.pattern": "Pattern",
         "raw_options.replace.text": "Replacement text",
         "raw_options.replace.add": "Add replacement",
@@ -3640,8 +3800,12 @@ GUI_WEB_TEXTS.update(
         ),
         "raw_options.blank": RAW_BLANK_LABEL,
         "raw_options.case": RAW_CASE_LABEL,
-        "raw_options.reset": "Restore defaults",
-        "raw_options.defaults_title": RAW_DEFAULTS_TITLE,
+        "raw_options.reset": RAW_RESET_LABEL,
+        "raw_options.window_note": RAW_WINDOW_NOTE,
+        "raw_options.add_defaults": RAW_ADD_DEFAULTS_LABEL,
+        "raw_follow.load": RAW_FOLLOW_LOAD_LABEL,
+        "settings.raw.title": RAW_SETTINGS_TITLE,
+        "settings.note.raw_follow": SETTINGS_NOTE_RAW_FOLLOW,
         "settings.tab.raw": SETTINGS_TAB_RAW,
         "settings.note.raw_defaults": SETTINGS_NOTE_RAW_DEFAULTS,
         "settings.note.save_raw": SETTINGS_NOTE_SAVE_RAW,
@@ -3658,6 +3822,18 @@ GUI_WEB_TEXTS.update(
         "raw_options.algorithm.minimal": RAW_ALGORITHM_LABEL["minimal"],
         "raw_options.algorithm.patience": RAW_ALGORITHM_LABEL["patience"],
         "raw_options.algorithm.note": "Minimal falls back to standard when there are more than 1,000 changed lines",
+        # REQ-359: per-rule enable/disable. The "Enabled" column of the replacement table, the note under the ignore-lines field
+        # (a template; {count} is replaced by the number), and the column names and note of the "Active rules" list on the
+        # plain comparison tab (the heading is raw_rules_title in Python)
+        "raw_options.replace.enabled": "Enabled",
+        "raw_options.ignore_disabled": "Disabled: {count} (switch them in the list on the Simple compare tab)",
+        "raw_options.ignore_disabled.settings": "Disabled: {count}",
+        "raw_options.rules.col.enabled": "Enabled",
+        "raw_options.rules.col.kind": "Kind",
+        "raw_options.rules.col.pattern": "Pattern",
+        "raw_options.rules.col.replacement": "Replacement text",
+        "raw_options.rules.col.hits": "Matched lines",
+        "raw_options.rules.note": "A dash (—) means a disabled rule, nothing compared yet, or an old saved result without counts",
         "batch.note.raw_options": BATCH_NOTE_RAW_OPTIONS,
         # REQ-311: regular expression help (collapsed section #rawopt-help)
         "raw_options.help": RAW_HELP_TITLE,
@@ -3709,6 +3885,18 @@ RULE_AI_PROBLEM_TEXT = {
 }
 RULE_AI_NOT_COMPARED = "(not compared)"  # the "After" column of the table for "Ignore the whole line"
 RULE_AI_ASKING = "Asking the AI for a rule…"
+# Kinds of refusal of the text selected in the simple comparison tab (REQ-360; rule_ai.py). The first 5 are REFUSE_* in
+# llm_analyzer/follow_up.py, the other 3 are only for the selected text. No selected text or pasted lines
+RULE_AI_SELECTION_REFUSED = {
+    "blank": "No text is selected. Select the text again. Nothing was sent.",
+    "too_long": "The selected text is longer than 200 characters. Select 200 characters or fewer. Nothing was sent.",
+    "newline": "The selected text contains a line break. Select text within one line. Nothing was sent.",
+    "mask": "The selected text contains text that would be masked. Select different text. Nothing was sent.",
+    "unsent": "The selected text contains characters that cannot be sent. Select different text. Nothing was sent.",
+    "pem": "The selected text contains a certificate or key line. Select different text. Nothing was sent.",
+    "selection_masked": "The selected text is in a masked part or in a line that is not sent, so it cannot be sent to AI.",
+    "selection_not_found": "The selected text is not in the pasted lines. If you edited the lines, keep the line that contains the selected text. Nothing was sent.",
+}
 
 
 def rule_ai_destination(name: str, model: str | None, base_url: str | None) -> str:
@@ -3783,6 +3971,35 @@ GUI_WEB_TEXTS.update(
         "raw_options.ai.result.local": "This table shows the rule applied on this computer to the original pasted lines (the table itself is not sent)",
         "raw_options.ai.add": "Put in the fields",
         "raw_options.ai.skip": "Don't put in",
+        # Not adding the same pattern twice (ADR-0236 / REQ-353). No pattern text in these sentences
+        "raw_options.duplicate": "Not added because the same pattern is already there.",
+        "raw_options.ai.duplicate": "Not put in because the same pattern is already in the fields.",
+        # Passing the text selected in the simple comparison tab to "Ask AI for a rule…" from the right-click menu (REQ-360 / ADR-0240 decision 3)
+        "raw_options.ai.selection": "Part to remove:",
+        "compare.raw.menu.ai": "Remove the selected text with a regular expression…",
+        "compare.raw.menu.description": "Replace the selected part so that values of the same form become the same text",
+        # Items added to the right-click menu of the simple comparison tab (REQ-366 / ADR-0244 decisions 1 and 2). No patterns or line text
+        "compare.raw.menu.replace": "Make the selected text a replacement rule as is",
+        "compare.raw.menu.digits": "Make a replacement rule with the numbers in the selected text as \\d+",
+        "compare.raw.menu.ignore": "Make this line a rule for lines to ignore",
+        "compare.raw.menu.rules": "Show the rules that apply to this line",
+        "compare.raw.menu.ask": "Ask AI about this difference",
+        "compare.raw.line_rules.title": "Rules that apply to this line",
+        # Items added to the right-click menus of the Structured tab, the show table and the command pair list (REQ-367 / ADR-0244 decisions 1 and 3). {column} and {n} are filled in by the screen
+        "compare.structured.menu.source": "Show the original line in the Simple compare tab",
+        "compare.structured.menu.skip_column": "Do not compare this column in this window: {column}",
+        "compare.structured.menu.not_found": "The original line was not found",
+        "compare.structured.menu.skip_duplicate": "That column is already in the columns not compared",
+        "compare.structured.menu.skip_full": "You can set up to 20 columns not to compare",
+        "compare.skip_columns.title": "Columns not compared",
+        "compare.skip_columns.note": "Applies only to show table comparisons. This window only; not added to the settings that always apply",
+        "compare.skip_columns.none": "None",
+        "compare.skip_columns.remove": "Remove",
+        "compare.skip_columns.remove_label": "Remove: {column}",
+        "compare.multi.menu.exclude": "Exclude this section from the comparison",
+        "compare.multi.excluded.title": "Excluded sections {n}",
+        "compare.multi.excluded.restore": "Restore",
+        "compare.multi.excluded.restore_label": "Restore: {name}",
     }
 )
 
@@ -4067,11 +4284,11 @@ SM_PLATFORM_UNSPECIFIED = "Cisco family / Arista (not specified)"
 SM_PASTED_NAME = {"before": "Pasted (Before)", "after": "Pasted (After)"}
 # Progress step names (same order as STAGES in core)
 SM_STAGE_LABEL = {
-    "split": "Splitting into sections",
-    "select": "Selecting sections",
+    "split": "Splitting the log by command",
+    "select": "Selecting the sections to compare",
     "detect_kind": "Detecting the input type",
     "compare": "Comparing",
-    "safety_checks": "Running safety checks",
+    "safety_checks": "Checking for possible missed changes",
     "llm": "Running AI analysis",
     "done": "Showing the result",
 }
@@ -4080,7 +4297,7 @@ SM_UNKNOWN_COMMAND = "(unknown command)"
 SM_WHOLE_ROW = "(whole line)"
 SM_NO_INPUT = "None selected"
 SM_CANCELLED = "Stopped"
-SM_STALE_RESULT = "The input or settings have changed. The result shown is for the previous input. To save it, compare again"
+SM_STALE_RESULT = "The input or comparison settings have changed. The result shown is from the previous comparison. To save it, compare again"
 # Short name for the device type when config has none specified, and the summary separator
 SM_DEFAULT_PLATFORM_SHORT = "Cisco family"
 SM_SUMMARY_SEPARATOR = ", "
@@ -4154,6 +4371,16 @@ def sm_show_unexplained(count: int) -> str:
     return f"Lines outside the table also changed ({count} {_plural(count, 'line', 'lines')}). Check the Simple compare tab too"
 
 
+def sm_show_replaced_same(count: int) -> str:
+    """Number of values treated as the same by replacements when compared as a table; one more line in the Structured tab note (ADR-0239 decision 4)."""
+    return f"Values treated as the same by replacements: {count}"
+
+
+def sm_show_skipped_columns(names: list[str]) -> str:
+    """Columns not compared by this window's own setting when compared as a table; one more line in the Structured tab note (REQ-367)."""
+    return f"Columns not compared: {', '.join(names)}"
+
+
 def sm_select_segment_prompt(side_labels: list[str]) -> str:
     """Prompt to choose a section, naming the sides (Before / After) that have several."""
     return f"{' and '.join(side_labels)} has more than one section. Choose the section to compare, then compare again"
@@ -4197,17 +4424,18 @@ CLI_HELP = {
     "compare.mode": "Comparison mode (default: both)",
     "compare.kind": "Kind of input. auto decides from the content (default: config)",
     "compare.platform": (
-        "For a config, choose a parser family other than the default. fujitsu_sir uses the flat config parser, "
-        "fortinet uses the FortiGate parser, yamaha uses the Yamaha RTX parser, juniper_junos uses the Juniper Junos parser, paloalto_panos uses the Palo Alto PAN-OS parser, checkpoint_gaia uses the Check Point Gaia parser, and f5_bigip uses the F5 BIG-IP parser "
-        "(--show-command is not needed. Leaving it out, or any other name, means the Cisco family, which needs no option). "
-        "For a show output, give the device type as an ntc-templates platform name (e.g. cisco_ios), together with --show-command. "
-        "auto decides the device type from the content of the config (--show-command is not needed. A show output is compared as plain text without a device type)"
+        "For a config, choose the parser family (default: the Cisco family; a name not listed here also means the Cisco family). "
+        "Values: fujitsu_sir (flat config), fortinet (FortiGate), yamaha (Yamaha RTX), juniper_junos (Juniper Junos), "
+        "paloalto_panos (Palo Alto PAN-OS), checkpoint_gaia (Check Point Gaia), f5_bigip (F5 BIG-IP), "
+        "auto (decides the device type from the content of the config; a show output is compared with the Simple comparison without a device type). "
+        "For a config, --show-command is not needed. "
+        "To compare a show output as a table, give the ntc-templates device type name (e.g. cisco_ios) together with --show-command. It is not the device model number"
     ),
     "compare.show_command": "The show command (e.g. 'show ip interface brief')",
-    "compare.before_command": "Choose the segment of the before side by a partial match of the command text",
-    "compare.before_segment": "Choose the segment of the before side by its position (starting from 1)",
-    "compare.after_command": "Choose the segment of the after side by a partial match of the command text",
-    "compare.after_segment": "Choose the segment of the after side by its position (starting from 1)",
+    "compare.before_command": "Choose the Before segment by part of its command text",
+    "compare.before_segment": "Choose the Before segment by its number in the list (from 1)",
+    "compare.after_command": "Choose the After segment by part of its command text",
+    "compare.after_segment": "Choose the After segment by its number in the list (from 1)",
     "compare.all_segments": (
         "Pair the segments of both sides by command and compare all of them. Pairs of a configuration command (such as running-config) are compared as a config, "
         "and the others as show output. --kind only affects pairs whose command is unknown. "
@@ -4220,7 +4448,7 @@ CLI_HELP = {
         "With --all-segments, the upper limit of the total number of differences sent to the AI across all pairs. If it is exceeded, nothing is sent. 1 or more "
         "(default: llm.max_total_diffs in the per-user settings file config.toml, otherwise {default})"
     ),
-    "compare.prompt": "Prompt text (overrides the self-calibration. Applied to both sides)",
+    "compare.prompt": "Prompt text used to split a terminal log. It is used before the automatic detection and applied to both Before and After",
     "compare.rules": (
         "Normalization rule file. If omitted, the bundled rules for the device type are used (for a config with --platform fortinet, "
         "two rules, such as the one that excludes values marked ENC from the comparison, are on by default, and the number of excluded items is shown in the result). "
@@ -4229,7 +4457,7 @@ CLI_HELP = {
     "compare.enable_rule": "Rule ID to enable (can be repeated). If given, the rules enabled by default are not used and only the IDs given here are used",
     "compare.save": "Save the comparison result as JSON. If the path is an existing directory, a name is given automatically. Never overwrites (default: not saved)",
     "compare.llm": "Send the differences to the AI and add an explanation of their meaning as annotations (credentials are masked. The differences do not change)",
-    "compare.llm_dry_run": "Show what would be sent to the AI (after masking) and the shapes of the lines that are not sent. Nothing is sent",
+    "compare.llm_dry_run": "Show what would be sent to the AI (with values masked) and the shapes of lines that are not sent. Nothing is sent to the AI",
     "compare.llm_max_diffs": (
         "Upper limit of the number of differences sent to the AI. 1 or more "
         "(default: llm.max_diffs in the per-user settings file config.toml, otherwise {default}). There is no way to make it unlimited"
@@ -4380,13 +4608,13 @@ CLI_BATCH_HELP = {
     "output": "Where to write the JSON Lines (default: standard output). An existing file is not overwritten",
     "summary": "Write the summary as JSON (includes the exit code). An existing file is not overwritten",
     "quiet": "Do not print the summary to standard error",
-    "dry_run": "Only list the planned comparisons without running them (exit code 0)",
-    "save": "Save each job's result as one file per job in this directory (default: do not save)",
-    "pair_by_name": "Pair the files directly under the two folders whose names match exactly, and list them (does not compare). The device type of each pair is detected from its content (to use a fixed type, edit platform in the manifest written by --write-manifest).",
+    "dry_run": "Read the manifest file and only list the pairs to compare (does not compare; exit code 0)",
+    "save": "Save the result of each pair as one file per pair, in this folder (default: do not save)",
+    "pair_by_name": "In each folder, pair the files directly under it whose names (including the extension) are the same, and list them (does not compare). The device type of each pair is detected from its content (to use a fixed type, edit platform in the manifest file written by --write-manifest).",
     "confirm": "Run the comparison for the pairs of --pair-by-name. With --llm, send to the AI after you have checked the summary",
     "write_manifest": "Write the pairs of --pair-by-name as a manifest file and finish",
     "llm": "Send the differences of each pair to the AI and add notes. Without --confirm, only the summary of what would be sent is shown and nothing is sent",
-    "llm_dry_run": "Show what would be sent to the AI (after masking) and the summary before sending. Nothing is sent",
+    "llm_dry_run": "Show the summary of what would be sent to the AI (with values masked) and the shapes of lines that are not sent. Nothing is sent to the AI",
     "llm_max_diffs": "Maximum number of differences to send to the AI per pair. 1 or more (default: llm.max_diffs in the per-user settings file config.toml, otherwise {default})",
     "llm_max_total_diffs": "Maximum total number of differences to send to the AI across all pairs. If exceeded, nothing is sent. 1 or more (default: llm.max_total_diffs in the per-user settings file config.toml, otherwise {default})",
 }
@@ -4402,7 +4630,7 @@ CLI_BATCH_ERR_TOTAL_MIN = "--llm-max-total-diffs must be 1 or more (there is no 
 CLI_BATCH_ERR_LLM_ONLY_COMPARING = "--llm and --llm-dry-run can be used only when running the comparison (not together with --dry-run or --write-manifest)"
 CLI_BATCH_ERR_SAME_PATH = "Specify different paths for --output and --summary"
 CLI_BATCH_NO_PAIRS = "There are no paired files"
-CLI_BATCH_PAIR_NOT_RUN = "The comparison has not been run. Add --confirm to run it for these pairs, or --write-manifest PATH to save them as a manifest file"
+CLI_BATCH_PAIR_NOT_RUN = "The comparison has not been run. To run it for these pairs, add --confirm. To save them as a manifest file, add --write-manifest PATH"
 CLI_BATCH_SAVE_STOPPED = "Not saved because the run was stopped"
 CLI_BATCH_NONE = "(none)"
 
@@ -4419,7 +4647,7 @@ def cli_batch_err_path_needed(name: str) -> str:
 
 def cli_batch_err_save_dir(path: str) -> str:
     """Error when the --save directory does not exist."""
-    return f"--save {path}: specify an existing directory (it is not created automatically)"
+    return f"--save {path}: the destination folder does not exist. Specify an existing folder (it is not created automatically)"
 
 
 def cli_batch_err_exists(name: str, path: str) -> str:
@@ -4481,7 +4709,7 @@ CLI_RENDER_NO_DIFF = "No differences"
 # The structured value is absent (e.g. the "before" of an added row. REQ-276)
 STRUCTURED_VALUE_NOT_SET = "(not set)"
 CLI_RENDER_NONE = "none"
-CLI_RENDER_NO_PROMPT = "none (not split)"
+CLI_RENDER_NO_PROMPT = "none (no prompt was found, so the file was not split)"
 CLI_RENDER_UNKNOWN_COMMAND = "(unknown command)"
 CLI_RENDER_UNPAIRED_HEAD = "=== Unpaired ==="
 CLI_RENDER_ERROR_OUTPUT_HEAD = "=== Error output (not compared) ==="
@@ -4505,12 +4733,22 @@ def cli_render_applied(before: bool, rule_id: str, count: int) -> str:
 
 def cli_render_show_fallback(reason: str) -> str:
     """When the show comparison fell back to the raw comparison."""
-    return f"Fell back to the raw comparison: {reason}"
+    return f"Cannot compare as a table, so showing the Simple comparison: {reason}"
 
 
 def cli_render_show_unexplained(count: int) -> str:
     """When lines that only the raw comparison shows also changed (ADR-0200)."""
     return f"Lines outside the table also changed ({count} lines)"
+
+
+def cli_render_show_replaced_same(count: int) -> str:
+    """Number of values treated as the same by replacements when compared as a table (ADR-0239 decision 4)."""
+    return f"Values treated as the same by replacements: {count}"
+
+
+def cli_render_show_skipped_columns(names: list[str]) -> str:
+    """Columns not compared by this window's own setting when compared as a table (REQ-367)."""
+    return f"Columns not compared: {', '.join(names)}"
 
 
 def cli_render_split_head(label: str, name: str, prompt: str, source: str) -> str:
@@ -4525,12 +4763,12 @@ def cli_render_segment_line(mark: str, number: int, command: str, line_count: in
 
 def cli_render_preamble(text: str) -> str:
     """Line for the preamble of a segment."""
-    return f"      Preamble: {text}"
+    return f"      Preamble (lines before the first prompt): {text}"
 
 
 def cli_render_select(label: str, count: int) -> str:
     """Guidance for the side that has several segments. label is Before or After."""
-    return f"{label} has {count} segments. Please select one:"
+    return f"{label} has {count} segments. Choose the segment to compare with --before-segment, --after-segment, or similar:"
 
 
 def cli_render_pair_head(label: str, before_number: int, after_number: int) -> str:
@@ -4567,7 +4805,7 @@ LLMP_ENV_SUFFIX_RULE = " must be 1 to 40 characters of uppercase letters, digits
 LLMP_ERRORS = {
     # Reading and writing files (shared with the prompt profiles, the bundle file and the settings file)
     "unreadable": "{path}: cannot be read ({reason})",
-    "not_utf8": "{path}: cannot be read as UTF-8",
+    "not_utf8": "{path}: cannot be read as UTF-8. Check the character encoding of the file",
     "not_json": "{path}: cannot be read as JSON",
     "unwritable": "{path}: cannot be written ({reason})",
     "top_not_object": "{path}: the outermost value must be an object",
@@ -4714,10 +4952,10 @@ STORE_TEXTS = {
     "unread_sides_mismatch": "unread_sides must match error.detail.sides of a result whose input could not be read (error.stage is read_input) (unread_sides: {unread}; detail.sides: {declared})",
     "saved_at_timezone": "saved_at must be a datetime with a time zone",
     "exists": "{target}: already exists. Not overwriting",
-    "no_folder": "{target}: the destination folder does not exist (it is not created automatically)",
+    "no_folder": "{target}: the destination folder does not exist. Specify an existing folder (it is not created automatically)",
     "cannot_write": "{target}: cannot write ({reason})",
-    "not_utf8": "{path}: cannot be read as UTF-8",
-    "cannot_read": "{path}: cannot read ({reason})",
+    "not_utf8": "{path}: cannot be read as UTF-8. Check the character encoding of the file",
+    "cannot_read": "{path}: cannot be read ({reason})",
     "not_json": "{path}: cannot be read as JSON: {error}",
     "file_not_object": "The top level of the saved file is not an object",
     "file_missing_items": "The saved file is missing items: {names}",
@@ -4766,15 +5004,15 @@ UPDATE_TEXTS = {
 # --- Error texts of the premise file (premise.py) ---
 PREMISE_TEXTS = {
     "too_long": "{path}: the premise can be at most {limit} characters",
-    "cannot_read": "{path}: cannot read ({reason})",
-    "not_utf8": "{path}: cannot be read as UTF-8",
+    "cannot_read": "{path}: cannot be read ({reason})",
+    "not_utf8": "{path}: cannot be read as UTF-8. Check the character encoding of the file",
     "cannot_write": "{path}: cannot write ({reason})",
 }
 
 # --- Error texts of the default simple comparison settings file (raw_settings.py) ---
 RAWSET_TEXTS = {
-    "cannot_read": "{path}: cannot read ({reason})",
-    "not_utf8": "{path}: cannot be read as UTF-8",
+    "cannot_read": "{path}: cannot be read ({reason})",
+    "not_utf8": "{path}: cannot be read as UTF-8. Check the character encoding of the file",
     "not_json": "{path}: cannot be read as JSON",
     "not_object": "{path}: the outermost value must be a table (object)",
     "schema_version": "{path}: schema_version must be {version}",
@@ -4789,19 +5027,19 @@ RAWSET_TEXTS = {
 # --- Texts of the batch input and output (batch_io/) ---
 BATCHIO_SIDE_LABEL = {"before": "Before", "after": "After"}
 BATCHIO_TEXTS = {
-    "cannot_read_input": "{label}: {path}: cannot read ({reason})",
-    "not_utf8": "Cannot be read as UTF-8",
-    "cannot_read": "Cannot read ({reason})",
+    "cannot_read_input": "{label}: {path}: cannot be read ({reason})",
+    "not_utf8": "Cannot be read as UTF-8. Check the character encoding of the file",
+    "cannot_read": "Cannot be read ({reason})",
     "not_yaml": "Cannot be read as YAML: {error}",
-    "rules_not_utf8": "The normalization rules file cannot be read as UTF-8",
-    "rules_cannot_read": "Cannot read the normalization rules file ({reason})",
+    "rules_not_utf8": "The normalization rules file cannot be read as UTF-8. Check the character encoding of the file",
+    "rules_cannot_read": "The normalization rules file cannot be read ({reason})",
     "manifest_exists": "{target}: already exists. Not overwriting",
-    "manifest_no_folder": "{target}: the destination folder does not exist (it is not created automatically)",
+    "manifest_no_folder": "{target}: the destination folder does not exist. Specify an existing folder (it is not created automatically)",
     "manifest_cannot_write": "{target}: cannot write ({reason})",
     "no_directory": "{folder}: no such directory",
-    "folder_cannot_read": "{folder}: cannot read ({reason})",
+    "folder_cannot_read": "{folder}: cannot be read ({reason})",
     "results_exists": "{target}: already exists. Not overwriting",
-    "results_no_folder": "{target}: the destination folder does not exist (it is not created automatically)",
+    "results_no_folder": "{target}: the destination folder does not exist. Specify an existing folder (it is not created automatically)",
     "results_cannot_write": "{target}: cannot write ({reason})",
 }
 
@@ -4823,6 +5061,7 @@ SMODEL_TEXTS = {
     "raw_form_shape": "The simple comparison settings have the wrong shape",
     "raw_ignore_shape": "The ignored lines have the wrong shape",
     "raw_replace_shape": "The replacements have the wrong shape",
+    "raw_disabled_shape": "The disabled rules have the wrong shape",
     "raw_whitespace_shape": "The whitespace setting has the wrong shape",
     "raw_blank_case_shape": "The blank lines and letter case settings have the wrong shape",
     "raw_moves_shape": "The line moves setting has the wrong shape",
@@ -4889,6 +5128,66 @@ def device_split_not_opened(folder: Path) -> str:
 
 
 GUI_WEB_TEXTS.update({"compare.split_devices": DEVICE_SPLIT_BUTTON})
+
+
+# --- "View log" window: look at one log by device and by command (ADR-0248 decision 2 / REQ-377) ---
+COMPARE_BUTTON_LOG_VIEW = "View log…"
+LOG_VIEW_TITLE = "DriftPilot — View log"
+LOG_VIEW_NO_DEVICE = "(no device name)"  # Name of the single device that stands for the whole log when no device was found
+LOG_VIEW_NO_PROMPT = "Not split"  # When no prompt was found and the whole log is one section
+LOG_VIEW_PASTED_NAME = "Pasted"  # Display name of pasted text
+LOG_VIEW_READ_FAILED = "Could not read the file. The display was not changed."
+LOG_VIEW_DROP_ONE_TITLE = "Dropped files"
+LOG_VIEW_DROP_ONE_ONLY = "Only one file is read. The first file was read."
+LOG_VIEW_SPLIT_TITLE = "Write one file per device"
+
+
+def log_view_summary(n: int, m: int) -> str:
+    """Top line: "{n} devices · {m} lines" (the lines are those of the whole file)."""
+    return f"{n} {_plural(n, 'device', 'devices')} · {m} {_plural(m, 'line', 'lines')}"
+
+
+def log_view_loaded(name: str) -> str:
+    """Text under the window: when the file was read."""
+    return f"Read {name}"
+
+
+def log_view_split_done(folder: Path, n: int) -> str:
+    """Text under the window when writing finished. The confidentiality caution follows."""
+    return f"Split by device: {folder} ({n} {_plural(n, 'device', 'devices')}). The split files: {save_caution()}"
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "compare.button.log_view": COMPARE_BUTTON_LOG_VIEW,
+        "log_view.button.open": "Open…",
+        "log_view.button.paste": "Paste…",
+        "log_view.paste.title": "Paste",
+        "log_view.paste.prompt": "Paste the log.",
+        "log_view.file": "File",
+        "log_view.empty": 'Drop a file, or load one with "Open…" or "Paste…".',
+        "log_view.devices.title": "Devices",
+        "log_view.devices.col.host": "Host name",
+        "log_view.devices.col.commands": "Commands",
+        "log_view.commands.col.command": "Command",
+        "log_view.commands.col.lines": "Lines",
+        "log_view.commands.col.mark": "Mark",
+        "log_view.output.col.number": "Line",
+        "log_view.output.col.text": "Output",
+        "log_view.mark.error": "Error output",
+        "log_view.mark.preamble": "Preamble",
+        "log_view.find.label": "Find",
+        "log_view.find.prev": "Previous",
+        "log_view.find.next": "Next",
+        "log_view.find.count": "{current} of {total}",
+        "log_view.find.none": "No match",
+        "log_view.copy.output": "Copy output",
+        "log_view.copy.with_command": "Copy with the command line",
+        "log_view.split.label": "Divider between the lists and the output",
+        "log_view.button.export": "Write one file per device…",
+        "log_view.status.loading": "Loading…",
+    }
+)
 
 
 # --- Voice input in the AI pane (calls PartsPilot's voice-serve. ADR-0233 / REQ-341) ---

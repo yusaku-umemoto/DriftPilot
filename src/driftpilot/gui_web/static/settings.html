@@ -358,7 +358,7 @@
         </span>
       </div>
       <p class="pilot-note pilot-lines" data-text="settings.note.auto_send"></p>
-      <!-- キャラクター（Mirarin）の絵（ADR-0174 決定1。[gui] の character。効くのは次に窓を開いたとき） -->
+      <!-- キャラクター（Mirarin）の絵（ADR-0174 決定1。[gui] の character。保存したら開いている窓にも効く。ADR-0245 決定2） -->
       <div class="pilot-row">
         <span class="pilot-radio">
           <input id="character" class="pilot-check" type="checkbox">
@@ -389,13 +389,17 @@
          config.toml は書かない（form() にも入れない）。誤りの文と読めないときの帯の文は Python が返す -->
     <div class="pilot-tabpanel pilot-fill pilot-scroll" role="tabpanel" id="settings-panel-raw" aria-labelledby="settings-tab-raw" hidden>
       <section class="pilot-group pilot-rawopt">
-        <h2 class="pilot-group-title" data-text="raw_options.defaults_title"></h2>
+        <h2 class="pilot-group-title" data-text="settings.raw.title"></h2>
+        <p class="pilot-note pilot-lines" data-text="settings.note.raw_follow"></p>
         <p class="pilot-note pilot-lines" data-text="settings.note.raw_defaults"></p>
         <div class="pilot-band pilot-band--warning" id="raw-defaults-error" role="status" hidden><span class="pilot-lines" id="raw-defaults-error-text"></span></div>
         <div class="pilot-rawopt-body" id="rawopt-fields">
           <label for="rawopt-ignore" data-text="raw_options.ignore"></label>
           <textarea id="rawopt-ignore" class="pilot-input pilot-mono pilot-wide" rows="4" spellcheck="false"></textarea>
           <p class="pilot-note" data-text="raw_options.ignore.note"></p>
+          <!-- 無効にした無視する行の式があるときだけ出す注記（REQ-359 §5）。比較の窓と同じ id。設定の窓には一覧が無いので、雛形の文は「無効: {count} 個」だけ -->
+          <p class="pilot-note" id="rawopt-ignore-disabled" hidden></p>
+          <span id="rawopt-ignore-disabled-template" data-text="raw_options.ignore_disabled.settings" hidden></span>
           <div class="pilot-row">
             <select id="rawopt-ignore-example" class="pilot-input"><option value="" data-text="raw_options.example"></option></select>
           </div>
@@ -403,6 +407,7 @@
           <table class="pilot-table pilot-rawopt-replace" id="rawopt-replace">
             <thead>
               <tr>
+                <th scope="col" id="rawopt-replace-enabled-head" data-text="raw_options.replace.enabled"></th>
                 <th scope="col" id="rawopt-replace-pattern-head" data-text="raw_options.replace.pattern"></th>
                 <th scope="col" id="rawopt-replace-text-head" data-text="raw_options.replace.text"></th>
                 <th scope="col"><span id="rawopt-remove-label" data-text="raw_options.replace.remove" hidden></span></th>
@@ -410,10 +415,14 @@
             </thead>
             <tbody></tbody>
           </table>
+          <!-- 置き換えは show の表の比較の値にも当たる注記（ADR-0239 / REQ-358）。比較の窓と設定の窓で同じ id・同じ文のキー -->
+          <p class="pilot-note" id="rawopt-replace-note" data-text="raw_options.replace.note"></p>
           <div class="pilot-row">
             <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-replace-add" data-text="raw_options.replace.add"></button>
             <select id="rawopt-replace-example" class="pilot-input"><option value="" data-text="raw_options.example"></option></select>
           </div>
+          <!-- 例から足そうとした式が既にあるとき、足さずに知らせる注記（ADR-0236 / REQ-353）。比較の窓と設定の窓で同じ id -->
+          <p class="pilot-note" id="rawopt-duplicate" data-text="raw_options.duplicate" hidden></p>
           <!-- 「AI に式を頼む…」（ADR-0218 決定 8 / REQ-314）。押すと小さな窓（下の #rawopt-ai-dialog）。比較の窓と設定の窓で同じ id・同じ中身 -->
           <div class="pilot-row">
             <button type="button" class="pilot-button pilot-button--secondary" id="rawopt-ai" data-text="raw_options.ai.button"></button>
@@ -682,6 +691,8 @@
         <label for="rawopt-ai-description" data-text="raw_options.ai.description"></label>
         <input id="rawopt-ai-description" class="pilot-input pilot-wide" type="text" autocomplete="off" spellcheck="false" aria-describedby="rawopt-ai-description-hint">
         <p class="pilot-note" id="rawopt-ai-description-hint" data-text="raw_options.ai.description.hint"></p>
+        <!-- 右クリックから開いたときだけ出す、選んだ文字（REQ-360）。ボタンから開いたときと窓を閉じたときは隠す。中身は textContent -->
+        <p class="pilot-note pilot-lines" id="rawopt-ai-selection" hidden><span data-text="raw_options.ai.selection"></span> <code class="pilot-mono" id="rawopt-ai-selection-text"></code></p>
         <fieldset class="pilot-radio-group">
           <legend data-text="raw_options.ai.kind"></legend>
           <label class="pilot-radio"><input class="pilot-check" type="radio" name="rawopt-ai-kind" id="rawopt-ai-kind-replace" value="replace" checked><span data-text="raw_options.ai.kind.replace"></span></label>
@@ -719,6 +730,7 @@
     <div class="pilot-rawopt-ai-stage" id="rawopt-ai-result" hidden>
       <div class="pilot-dialog-body">
         <p class="pilot-band pilot-band--error pilot-lines" id="rawopt-ai-failure" role="alert" hidden></p>
+        <span id="rawopt-ai-duplicate" data-text="raw_options.ai.duplicate" hidden></span>
         <div class="pilot-rawopt-ai-found" id="rawopt-ai-found" hidden>
           <span class="pilot-rawopt-label" data-text="raw_options.ai.result.pattern"></span>
           <code class="pilot-mono pilot-lines" id="rawopt-ai-pattern"></code>

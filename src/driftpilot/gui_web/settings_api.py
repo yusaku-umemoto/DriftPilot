@@ -439,6 +439,10 @@ class SettingsApi(Api):
         # 保存の後に呼ぶ口(ADR-0176 決定4。WebSession.open_settings が渡す)と、この呼び出しで保存できたかの印
         self._on_saved: Callable[[], None] | None = None
         self._saved = False
+        # 「単純比較」のタブの保存を、開いている比較の窓・一括比較の窓へ届ける口(REQ-361。WebSession.open_settings が渡す)と、
+        # この呼び出しで単純比較の既定を保存できたかの印(ほかのタブの保存では立てない)
+        self._on_raw_saved: Callable[[], None] | None = None
+        self._raw_saved = False
         # 「表示」のタブ(ADR-0189): 開いている窓すべてに色を当てる口(WebSession.apply_theme)・この呼び出しで当てる色・欄を入れ直す番号
         self._on_theme: Callable[[str], None] | None = None
         self._theme_pending: str | None = None
@@ -475,6 +479,13 @@ class SettingsApi(Api):
         ロックの外で 1 回だけ呼ぶ。失敗は握りつぶす。
         """
         self._on_saved = callback
+
+    def _set_on_raw_saved(self, callback: Callable[[], None] | None) -> None:
+        """「単純比較」のタブで既定を保存できた後に呼ぶ関数(開いている比較の窓・一括比較の窓へ新しい既定を届ける。REQ-361)。
+
+        _on_saved(「状態が変わった」の知らせ)より先に、ロックの外で 1 回だけ呼ぶ。ほかのタブの保存では呼ばない。失敗は握りつぶす。
+        """
+        self._on_raw_saved = callback
 
     def _set_on_theme(self, callback: Callable[[str], None] | None) -> None:
         """「表示」の「保存」で色が書けた後に呼ぶ関数(開いている窓すべてに当てる。WebSession.apply_theme。ADR-0189)。
@@ -543,12 +554,13 @@ class SettingsApi(Api):
         """
         return self._call(self._save_raw_defaults, values)
 
-    def ask_rule_ai(self, lines: Any, description: Any, kind: Any) -> dict[str, Any]:
+    def ask_rule_ai(self, lines: Any, description: Any, kind: Any, selection: Any = None) -> dict[str, Any]:
         """「単純比較」のタブの「AI に式を頼む…」(REQ-314)。送らずに、送る全文の確認(rule_ai.confirm)か送れない理由(rule_ai.refused)を返す。
 
         設定の窓の状態は読まない・変えない(保存もしない)。比較の窓の同じ名前の口と同じ動き。
+        selection は単純比較のタブで選んだ文字(REQ-360)。設定の窓にはその口が無いので、いつも None。
         """
-        return _guarded(self._rule_ai.ask, lines, description, kind)
+        return _guarded(self._rule_ai.ask, lines, description, kind, selection)
 
     def answer_rule_ai(self, number: Any, yes: Any) -> dict[str, Any]:
         """式を頼む確認の答え。number は rule_ai.confirm.id。「送信する」(yes が True)のときだけ 1 回送る。答えは rule_ai.done の知らせで届く。"""
@@ -740,7 +752,15 @@ class SettingsApi(Api):
         """保存できた印が立っていれば消して、保存の後の口を呼ぶ(ロックの外で。失敗は握りつぶす。ADR-0176 決定4)。"""
         with self._lock:
             saved, self._saved = self._saved, False
+            raw_saved, self._raw_saved = self._raw_saved, False
             callback = self._on_saved
+            raw_callback = self._on_raw_saved
+        if raw_saved and raw_callback is not None:
+            # 単純比較の既定を保存できたときだけ、先に新しい既定を比較の窓・一括比較の窓へ届ける(REQ-361)。その後の「状態が変わった」で描き直す
+            try:
+                raw_callback()
+            except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
+                pass
         if not saved or callback is None:
             return
         try:
@@ -902,6 +922,21 @@ class SettingsApi(Api):
                 return
             self._refresh(keep_edits=True)
             self._refresh_prompt(keep_edits=True)
+            view = self._render()
+        window = self._window
+        if window is not None:
+            notify(window, {"type": VIEW_EVENT, "view": view})
+
+    def _raw_defaults_saved(self) -> None:
+        """比較の窓の「いつも効く設定に足す」で既定が書かれた後に、WebSession がロックの外で呼ぶ(REQ-361 §5b。画面からは呼べない)。
+
+        すでに描いていれば、「単純比較」のタブの欄を足した後のファイルの中身で入れ直し(保存前に打っていた変更は消える)、
+        画面には settings.view の知らせで描き直させる(_profiles_changed と同じ形)。まだ一度も描いていなければ何もしない。
+        """
+        with self._lock:
+            if self._raw_pane is None:
+                return
+            self._refresh_raw()
             view = self._render()
         window = self._window
         if window is not None:
@@ -1429,6 +1464,7 @@ class SettingsApi(Api):
                 self._raw_problems = []
                 return self._ok(notice=self._notice(saved.error, RAW_DEFAULTS_TITLE))
             self._mark_saved()
+            self._raw_saved = True  # 比較の窓・一括比較の窓へ新しい既定を届ける印(REQ-361。_notify_saved が見る)
             self._refresh_raw()
             return self._ok(notice=self._notice(saved.notice or "", RAW_DEFAULTS_TITLE))
 

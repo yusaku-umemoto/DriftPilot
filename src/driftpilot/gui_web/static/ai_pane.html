@@ -27,6 +27,7 @@
       <span id="ai-thinking-note" data-text="compare.ai.thinking.note" hidden></span>
       <!-- キャラクターがオンのときの空の面の案内（ADR-0181 決定2）。js/ai_view.js が読んで #ai-empty に入れる -->
       <span id="ai-empty-character" data-text="compare.ai.empty.character" hidden></span>
+      <span id="ai-empty-plain" data-text="compare.ai.empty" hidden></span>
       <div class="pilot-chat" id="ai-chat" tabindex="0">
         <!-- 答えが無いときの短い案内 -->
         <p class="pilot-note" id="ai-empty" data-text="compare.ai.empty"></p>
@@ -64,11 +65,17 @@
       <div class="pilot-ai-controls">
         <!-- 入力欄の横のマイクのボタン（ADR-0233 / REQ-341）。音声入力が使えないときは出さない（hidden）。状態・押せるか・文は Python が決める。
              録音中は音量の棒と経過の秒を出す。文字は入力欄のカーソルの位置に入れるだけで、送らない -->
-        <div class="pilot-voice-row">
+        <!-- 入力欄の枠（REQ-364）。右下にマイクのボタンと送信のボタン（#follow-up-send）を並べる。送信のボタンは Shift+Enter と同じ送り方を呼ぶだけ -->
+        <div class="pilot-chat-input">
           <textarea id="follow-up-question" class="pilot-input pilot-wide" rows="2" spellcheck="false" data-label="compare.ai.input" data-placeholder="compare.ai.input.hint"></textarea>
-          <button type="button" class="pilot-icon-button pilot-voice-button" id="voice-button" data-label="voice.button" aria-pressed="false" hidden disabled>
-            <svg class="pilot-voice-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
-          </button>
+          <div class="pilot-chat-input-buttons">
+            <button type="button" class="pilot-icon-button pilot-voice-button" id="voice-button" data-label="voice.button" aria-pressed="false" hidden disabled>
+              <svg class="pilot-voice-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+            </button>
+            <button type="button" class="pilot-icon-button pilot-chat-send" id="follow-up-send" data-label="compare.ai.send" disabled>
+              <svg class="pilot-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 4l7 8h-4.5v8h-5v-8H5z"/></svg>
+            </button>
+          </div>
         </div>
         <div class="pilot-voice-status" id="voice-status" hidden>
           <span class="pilot-voice-level" aria-hidden="true"><span class="pilot-voice-level-bar" id="voice-level-bar"></span></span>

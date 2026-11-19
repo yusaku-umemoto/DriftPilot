@@ -49,4 +49,4 @@ version = {attr = "driftpilot.__version__"}
 # 機種の正規化ルール(REQ-22)。--rules を省いても効くように同梱する
 "driftpilot.diff_engine" = ["platform_rules.yaml"]
 # pywebview の画面の HTML・CSS・JavaScript(ADR-0074 決定2 / REQ-103)。exe にも collect_data_files("driftpilot") で入る
-"driftpilot.gui_web" = ["static/*.html", "static/*.css", "static/js/*.js", "static/character/*.png", "static/character/README.md"]
+"driftpilot.gui_web" = ["static/*.html", "static/*.css", "static/js/*.js", "static/character/*.png", "static/character/*.ico", "static/character/README.md"]

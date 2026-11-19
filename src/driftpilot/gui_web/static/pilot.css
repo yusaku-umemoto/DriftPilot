@@ -69,9 +69,9 @@
   --pilot-side-width: 200px;
   /* 比較の画面のコマンドの組の一覧の幅（REQ-122） */
   --pilot-split-width: 300px;
-  /* 境目で幅を変える左右の面（.pilot-split--resizable。REQ-206）。左の面の初めの幅（58:42）と、両側の最小の幅。
-     左の幅は画面のスクリプトが要素の上で書き換える（保存しない） */
-  --pilot-split-left: 58%;
+  /* 境目で幅を変える左右の面（.pilot-split--resizable。REQ-206）。左の面の初めの幅（72:28）と、両側の最小の幅。
+     左の幅は画面のスクリプトが要素の上で書き換える（動かし終えたら利用者ごとの設定に覚える。REQ-370） */
+  --pilot-split-left: 72%;
   --pilot-pane-min-width: 220px;
 }
 
@@ -315,8 +315,14 @@ body {
   min-height: calc(var(--pilot-control-height) * 6);
 }
 
+/*
+ * 組の表の面の最低の高さ（REQ-354 / ADR-0163 決定5 の追記）。
+ * 道具の行 1 つ分（--pilot-control-height）と、表の枠の最低の高さ（見出しと 5 行分 = * 6）の合計。
+ * auto にしない: 縦の flex の子が中身の高さより縮まなくなり、組が多いと面と表の枠が表の全部の高さまで伸びる。
+ * .pilot-body の overflow: hidden で下が切られ、表の枠が中でスクロールしなくなる
+ */
 .pilot-body > .pilot-fill:has(> .pilot-table-wrap--rows5) {
-  min-height: auto;
+  min-height: calc(var(--pilot-control-height) * 7);
 }
 
 /*
@@ -445,7 +451,7 @@ body {
 /*
  * 境目で幅を変える左右の面（REQ-206 / ADR-0148 決定2。比較の画面の結果の面と AI の面）。
  * .pilot-fill.pilot-split に .pilot-split--resizable を足し、子に .pilot-split-pane（左右の面）と .pilot-split-handle（境目）を置く。
- * 左の面の幅は --pilot-split-left（初めは 58%）、両側とも --pilot-pane-min-width より狭くしない。
+ * 左の面の幅は --pilot-split-left（初めは 72%）、両側とも --pilot-pane-min-width より狭くしない。
  * 面は min-width・min-height を 0 にして中身で広がらないようにし、はみ出しは面の中で切る（タブと表の見出しが隣の面に重ならない。W4）。
  * スクロールは面の中の1か所だけ（左は表の枠、右は答えの欄 .pilot-chat）。760px 未満の窓では縦に積み、境目を隠す
  */
@@ -716,19 +722,51 @@ body {
 }
 
 /*
- * 音声入力のマイクのボタン（ADR-0233 決定3 / REQ-341）。AI の面の入力欄（.pilot-voice-row）の右に置く。
- * 使えないとき（hidden）は形を持たない。録音中は赤い印（警告の色 --pilot-color-danger）と音量の棒・経過の秒を出す。
- * 色はどれも変数（ダークモードでも切り替わる）。音量の棒の幅は JS が CSSOM で入れる
+ * AI の面の入力欄の枠（.pilot-chat-input。REQ-364）。入力欄の中の右下に、マイクのボタン（ADR-0233 決定3 / REQ-341）と
+ * 送信のボタン（.pilot-chat-send）を並べる。入力欄の右の余白は、ボタンの下に文字が隠れないよう、ボタンの幅の分を取る。
+ * マイクが使えないとき（hidden）は形を持たず、余白は送信のボタン 1 つ分。録音中は赤い印（警告の色 --pilot-color-danger）と
+ * 音量の棒・経過の秒を出す。色はどれも変数（ダークモードでも切り替わる）。音量の棒の幅は JS が CSSOM で入れる
  */
-.pilot-voice-row {
+.pilot-chat-input {
+  position: relative;
   display: flex;
-  align-items: flex-end;
+}
+
+.pilot-chat-input > textarea.pilot-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: calc(2 * (var(--pilot-control-height) - var(--pilot-space-1)) + 3 * var(--pilot-space-1));
+}
+
+.pilot-chat-input:has(.pilot-voice-button[hidden]) > textarea.pilot-input {
+  padding-right: calc(var(--pilot-control-height) - var(--pilot-space-1) + 2 * var(--pilot-space-1));
+}
+
+.pilot-chat-input-buttons {
+  position: absolute;
+  right: var(--pilot-space-1);
+  bottom: var(--pilot-space-1);
+  display: flex;
   gap: var(--pilot-space-1);
 }
 
-.pilot-voice-row > textarea.pilot-input {
-  flex: 1 1 auto;
-  min-width: 0;
+.pilot-chat-send {
+  flex: none;
+  border-color: var(--pilot-color-border);
+  background: var(--pilot-color-button);
+  color: var(--pilot-color-text);
+}
+
+.pilot-chat-send:disabled {
+  background: var(--pilot-color-disabled);
+  color: var(--pilot-color-disabled-text);
+  cursor: default;
+}
+
+.pilot-chat-send-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 
 .pilot-voice-button {
@@ -1449,6 +1487,45 @@ body[data-pair-dragging="true"] [data-drop-blocked="true"] * {
 }
 
 /*
+ * 窓の中の小さなメニュー（右クリックで出す。REQ-360 / ADR-0240 決定3。js/compare.js が position の left・top を書く）。
+ * 窓のダイアログ（dialog の最上層）より下。[hidden] のときは出さない。
+ */
+.pilot-menu {
+  position: fixed;
+  z-index: 3;
+  min-width: 16ch;
+  padding: var(--pilot-space-1);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-surface);
+  color: var(--pilot-color-text);
+  box-shadow: 0 2px 6px var(--pilot-color-border);
+}
+
+.pilot-menu[hidden] {
+  display: none;
+}
+
+.pilot-menu-item {
+  display: block;
+  width: 100%;
+  padding: var(--pilot-space-1) var(--pilot-space-2);
+  border: 0;
+  border-radius: var(--pilot-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pilot-menu-item:hover,
+.pilot-menu-item:focus-visible {
+  background: var(--pilot-color-selection);
+  color: var(--pilot-color-selection-text);
+}
+
+/*
  * 一括比較の窓で組を直す部品（REQ-212 / ADR-0153 決定4〜8）。
  * チェックの列（表の先頭の「実行する」、片方だけのファイルと候補の「組にする」）は幅を決め、中のチェックを真ん中に置く。
  * 表のセルの中の選択（機種の列）はセルの幅いっぱいで、行の高さを変えない。
@@ -1674,8 +1751,30 @@ body[data-pair-dragging="true"] [data-drop-blocked="true"] * {
   white-space: nowrap;
 }
 
-/* 折り返すセル（一括比較の窓の状態の列で、印がある行）の中では、印の中の文字も折り返して切れないようにする（REQ-282） */
-.pilot-table--fixed td.pilot-cell-wrap > .pilot-show-method-mark {
+/* 単一比較の窓で比べ直した結果を受けた行の印（REQ-362）: 状態の文の後ろの小さな印。show の比べ方の印と同じ形 */
+.pilot-rechecked-mark {
+  padding: 0 var(--pilot-space-1);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: 8px;
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+  white-space: nowrap;
+}
+
+/* 機種を手で指定した組の行の印（REQ-368）: 機種の列のセルの中、選択の下の小さな印。show の比べ方の印と同じ形。全文は選択の title */
+.pilot-hand-platform-mark {
+  display: inline-block;
+  padding: 0 var(--pilot-space-1);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: 8px;
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+  white-space: nowrap;
+}
+
+/* 折り返すセル（一括比較の窓の状態の列で、印がある行）の中では、印の中の文字も折り返して切れないようにする（REQ-282・REQ-362） */
+.pilot-table--fixed td.pilot-cell-wrap > .pilot-show-method-mark,
+.pilot-table--fixed td.pilot-cell-wrap > .pilot-rechecked-mark {
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -2326,9 +2425,20 @@ mark.pilot-mark {
 }
 
 .pilot-rawopt-replace th:last-child,
-.pilot-rawopt-replace td:last-child {
+.pilot-rawopt-replace td:last-child,
+.pilot-rawopt-replace th:first-child,
+.pilot-rawopt-replace td:first-child {
   width: 1%;
   white-space: nowrap;
+}
+
+/* 単純比較のタブの「効いているルール」の一覧（REQ-359）。今の表の部品（.pilot-table。見出しの固定・縞）のまま、枠は窓の高さの 3 割まで */
+#raw-rules .pilot-table-wrap {
+  max-height: 30vh;
+}
+
+#raw-rules-table td:first-child {
+  text-align: center;
 }
 
 /*
@@ -2374,6 +2484,117 @@ mark.pilot-mark {
 /* 一括比較の「組の設定」の、単純比較の設定の読むだけの 1 行（REQ-228 §7.2） */
 .pilot-settings-raw {
   margin: 0;
+}
+
+/*
+ * 「ログを見る」の窓（ADR-0248 決定2 / REQ-377）。左右の面は比較の窓と同じ部品（.pilot-split--resizable・.pilot-split-pane・.pilot-split-handle）。
+ * 左の面の初めの幅は 32%（比較の窓は 72%）。左の面に機器の一覧とコマンドの一覧を縦に並べ、残りの高さを分け合う。
+ * 右の面は上に探すとコピーの行、残りに出力の表。出力の表は折り返さず、横にもスクロールする。色は今の変数だけを使う
+ */
+.pilot-split--log {
+  --pilot-split-left: 32%;
+}
+
+.pilot-log-lists {
+  gap: var(--pilot-space-2);
+}
+
+.pilot-log-list {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pilot-log-list > .pilot-group-title {
+  flex: none;
+}
+
+.pilot-log-list > .pilot-table-wrap {
+  flex: 1 1 auto;
+  min-height: calc(var(--pilot-control-height) * 3);
+  max-height: none;
+}
+
+/* 機器の一覧は見出しの分だけ低く、コマンドの一覧に多く渡す（残りの高さを 2:3 で分ける） */
+.pilot-log-list:first-child {
+  flex-grow: 2;
+}
+
+.pilot-log-list:last-child {
+  flex-grow: 3;
+}
+
+.pilot-col-log-count {
+  width: 72px;
+}
+
+.pilot-col-log-mark {
+  width: 168px;
+}
+
+.pilot-log-output-pane {
+  gap: var(--pilot-space-2);
+}
+
+.pilot-log-output-pane > * {
+  flex: none;
+}
+
+.pilot-log-tools {
+  flex-wrap: nowrap;
+}
+
+.pilot-log-tools > .pilot-input {
+  flex: 0 1 240px;
+  min-width: 0;
+}
+
+.pilot-log-count {
+  min-width: 6em;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.pilot-log-output-pane > .pilot-log-output-wrap {
+  flex: 1 1 auto;
+  min-height: calc(var(--pilot-control-height) * 3);
+  max-height: none;
+}
+
+/* 出力の表: 等幅・折り返さない。列の幅は ch（js/log_view.js が行の長さから決める）なので、表の書体を等幅にする */
+.pilot-log-output {
+  min-width: 100%;
+  font-family: var(--pilot-font-family-mono);
+}
+
+.pilot-log-output thead th {
+  font-family: var(--pilot-font-family);
+}
+
+.pilot-log-output td {
+  white-space: pre;
+  text-overflow: clip;
+}
+
+.pilot-log-output tbody tr:nth-child(even) {
+  background: transparent;
+}
+
+.pilot-log-number {
+  color: var(--pilot-color-text-muted);
+  user-select: none;
+}
+
+/* 空の行も 1 行の高さにする（幅のない文字を足す。コピーする文字には入らない） */
+.pilot-log-line::after {
+  content: "\200b";
+}
+
+/* 探している文字の今の当たり（印は mark.pilot-mark。今の当たりだけ枠を足す） */
+mark.pilot-log-hit-current {
+  outline: 2px solid var(--pilot-color-accent);
+  outline-offset: 0;
 }
 
 /*

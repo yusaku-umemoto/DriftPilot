@@ -127,6 +127,9 @@ class MultiCompareOutcome:
     # 組にする前に外したエラーの出力の区間(ADR-0195 決定1)。変更前の出てきた順、続けて変更後の順。
     # 1つのログの中で組にしたときは、同じ本文の1回分だけ変更前の側として入れる。全体の状態には数えない
     error_outputs: tuple[Unpaired, ...] = ()
+    # 比べる対象から外した組と区間(外した順。REQ-367)。画面だけの値で、CLI の JSON・保存・報告書には入れない。
+    # 新しく比べた結果では空(外したものは消えて、全部の区間が対象に戻る)
+    excluded: tuple[PairResult | Unpaired, ...] = ()
 
 
 def is_config_command(key: str) -> bool:
@@ -254,6 +257,7 @@ def _regroup(
         llm_pairs=(),
         llm_chosen=None,
         error_outputs=error_outputs,
+        excluded=outcome.excluded,
     )
 
 
@@ -368,6 +372,111 @@ def unpair(request: CompareRequest, outcome: MultiCompareOutcome, position: int)
         *_loose_segments(outcome),
     ]
     return _regroup(outcome, kept, loose)
+
+
+def _assemble(
+    outcome: MultiCompareOutcome,
+    pairs: list[PairResult],
+    unpaired: list[Unpaired],
+    error_outputs: tuple[Unpaired, ...],
+    excluded: tuple[PairResult | Unpaired, ...],
+) -> MultiCompareOutcome:
+    """外す・戻すの後の結果。組の番号は並びのまま振り直し、全体の状態は求め直す。AI の答えの値は消す(_regroup と同じ)。
+
+    1つのログの中で組にした結果は、今と同じく相手なしを全体の状態に数えない。
+    """
+    numbered = [dataclasses.replace(p, index=k) for k, p in enumerate(pairs, start=1)]
+    status = overall_status(numbered, [] if outcome.single_log else unpaired)
+    return MultiCompareOutcome(
+        status,
+        numbered,
+        unpaired,
+        single_log=outcome.single_log,
+        llm=None,
+        llm_pairs=(),
+        llm_chosen=None,
+        error_outputs=error_outputs,
+        excluded=excluded,
+    )
+
+
+def _check_not_last(outcome: MultiCompareOutcome, pairs: Sequence[PairResult], unpaired: Sequence[Unpaired]) -> None:
+    """外した後に、一覧に組(1つのログの中で組にしたときを除いて相手なしも)が残らないなら ValueError(最後の1行は外せない)。"""
+    if not pairs and not (unpaired and not outcome.single_log):
+        raise ValueError("last row")
+
+
+def exclude_pair(outcome: MultiCompareOutcome, position: int) -> MultiCompareOutcome:
+    """outcome.pairs の position の組を、比べる対象と一覧から外す(REQ-367 §4)。比べない。
+
+    外した組は excluded に足す(全部のタブ・AI に送る組・保存・報告書は pairs から作るので、入らない)。
+    最後の1行は外せない(ValueError)。position が組の位置でなければ ValueError。
+    """
+    if not 0 <= position < len(outcome.pairs):
+        raise ValueError("no such pair")
+    kept = [p for k, p in enumerate(outcome.pairs) if k != position]
+    _check_not_last(outcome, kept, outcome.unpaired)
+    return _assemble(
+        outcome, kept, list(outcome.unpaired), outcome.error_outputs, (*outcome.excluded, outcome.pairs[position])
+    )
+
+
+def exclude_segment(outcome: MultiCompareOutcome, side: SideName, number: int) -> MultiCompareOutcome:
+    """相手なし・エラーの出力・1回だけの区間(side の側の区間の番号 number)を、比べる対象と一覧から外す(REQ-367 §4)。
+
+    そのような区間が無いとき、最後の1行になるときは ValueError。
+    """
+
+    def hit(u: Unpaired) -> bool:
+        return u.side == side and u.segment.number == number
+
+    target = next((u for u in _loose_segments(outcome) if hit(u)), None)
+    if target is None:
+        raise ValueError("no such segment")
+    unpaired = [u for u in outcome.unpaired if not hit(u)]
+    error_outputs = tuple(u for u in outcome.error_outputs if not hit(u))
+    _check_not_last(outcome, outcome.pairs, unpaired)
+    return _assemble(outcome, list(outcome.pairs), unpaired, error_outputs, (*outcome.excluded, target))
+
+
+def restore_excluded(
+    request: CompareRequest,
+    outcome: MultiCompareOutcome,
+    k: int,
+    *,
+    on_progress: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> MultiCompareOutcome:
+    """outcome.excluded の k 番目を一覧に戻す(REQ-367 §4)。
+
+    区間は比べずに元の欄に戻す(エラーの出力は error_outputs、ほかは unpaired)。組は pair_by_hand と同じく、その組の要求
+    (pair_request)でその1組だけを比べ直し、変更前の区間の番号の位置に入れる(手で組にした印は残す)。ほかの組は比べ直さない。
+    request は outcome を作ったときの要求。k が範囲外のときは ValueError。中止の印は比べる前に見る。
+    """
+    if not 0 <= k < len(outcome.excluded):
+        raise ValueError("no such excluded")
+    target = outcome.excluded[k]
+    excluded = tuple(e for n, e in enumerate(outcome.excluded) if n != k)
+    pairs = list(outcome.pairs)
+    unpaired = list(outcome.unpaired)
+    error_outputs = outcome.error_outputs
+    if isinstance(target, Unpaired):
+        if is_error_output(target.segment):
+            error_outputs = tuple(sorted((*error_outputs, target), key=lambda u: (u.side != "before", u.segment.number)))
+        else:
+            unpaired = sorted([*unpaired, target], key=lambda u: (u.side != "before", u.segment.number))
+        return _assemble(outcome, pairs, unpaired, error_outputs, excluded)
+    befores, afters = _numbered(request)
+    before, after = befores[target.before_number], afters[target.after_number]
+    if should_cancel is not None and should_cancel():
+        raise CompareCancelled("pair")
+    key = None if before.command is None else command_key(before.command)
+    pair_req = pair_request(request, SegmentPair(key, before, after))
+    result = _run_one(pair_req, None, on_progress)
+    restored = PairResult(before.command, target.before_number, target.after_number, pair_req, result, 0, manual=target.manual)
+    at = next((n for n, p in enumerate(pairs) if p.before_number > restored.before_number), len(pairs))
+    pairs.insert(at, restored)
+    return _assemble(outcome, pairs, unpaired, error_outputs, excluded)
 
 
 def sendable_pair(pair: PairResult) -> bool:

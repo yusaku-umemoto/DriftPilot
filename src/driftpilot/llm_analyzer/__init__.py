@@ -44,6 +44,7 @@ from driftpilot.llm_analyzer.custom_http import (
     custom_problem,
 )
 from driftpilot.llm_analyzer.custom_http_client import CustomHttpJsonClient
+from driftpilot.llm_analyzer.follow_up import same_sent_body
 from driftpilot.llm_analyzer.mask_patterns import MASK_PATTERNS, SECRET_WORDS, MaskPattern, masking_fingerprint
 from driftpilot.llm_analyzer.masking import Masker
 from driftpilot.llm_analyzer.openai_http_client import OpenAIApiKeyClient
@@ -175,6 +176,7 @@ __all__ = [
     "parse_json_text",
     "prompt_version_of",
     "read_pair_answer",
+    "same_sent_body",
     "send_connection_check",
     "template_for",
     "wire_problem",

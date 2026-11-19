@@ -14,3 +14,7 @@
 | `welcome.png` | 空の比較の窓 | `Software_UI_Assets/welcome.png` | 640×480 |
 | `warning.png` | AI のエラー | `Software_UI_Assets/warning.png` | 640×480 |
 | `avatar.png` | 答えの吹き出しの顔 | `Character/DriftPilot_Mac_Icon.png` を丸く切ったもの | 64×64 |
+| `app-icon-character.png` | 動いている間のアイコン（キャラクターがオン。Mac の Dock）（ADR-0246） | 設計側が用意（`packaging/icons/DriftPilot-mac-1024.png` と同じ絵。角の丸めと余白付き） | 1024×1024 |
+| `app-icon-character.ico` | 同じ（Windows の窓の左上・タスクバー） | 同上 | 16〜256 の 7 つ |
+| `app-icon-business.png` | 動いている間のアイコン（キャラクターがオフ。Mac の Dock） | `Pilot-DesignSheet/DesignSheet/DriftPilot/App_Icons/` の `DriftPilot_Business.*` | 1024×1024 |
+| `app-icon-business.ico` | 同じ（Windows） | 同上 | 16〜256 の 7 つ |

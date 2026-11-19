@@ -33,6 +33,7 @@ import { copyIcon, copyText } from "./answer_copy.js";
 import { bindTail, fitPaths, namePathCell, showTail } from "./path_tail.js";
 import { bindColumnWidths } from "./column_width.js";
 import { bindPairDrag } from "./pair_drag.js"; // 片方だけのファイルの行のドラッグで組にする（REQ-233 / ADR-0171）
+import { bindRowMenu } from "./row_menu.js"; // 組の行の右クリックのメニューの開け閉め（REQ-368。矢印・Esc などの動きもここ）
 import "./drop.js"; // フォルダとマニフェストのドロップを印の要素へ送る（REQ-205 / ADR-0147）
 import { playSplash, revealCharacters } from "./character.js"; // キャラクターの絵（ADR-0174 / REQ-236）
 
@@ -58,9 +59,18 @@ const EXTRA_TEXTS = [
   "batch.col.suggest_all",
   // キャラクターがオンのときの「AI で解析」の文（ADR-0181 決定2）
   "batch.button.ai_send.character",
+  // オフに戻すときの元の文（設定の窓で保存したら開いている窓も変わる。ADR-0245 決定2）
+  "batch.button.ai_send",
   // 状態の横に出す、show の比べ方の印（REQ-282。比較の窓と同じ鍵）
   "compare.multi.show_raw",
   "compare.multi.show_both",
+  // 単一比較の窓で比べ直した結果を受けた行の印（REQ-362）
+  "batch.row.rechecked",
+  // 機種を手で指定した行の印と、「機種を指定し直して比べ直す…」の小さな窓（REQ-368。機種の欄の名前は batch.col.row_platform）
+  "batch.row.hand_platform",
+  "batch.platform_dialog.title",
+  "batch.platform_dialog.apply",
+  "batch.platform_dialog.cancel",
 ];
 // 行の show_methods（Python が決める。raw・both の順）から、印の文のキーを引く
 const SHOW_METHOD_MARKS = { raw: "compare.multi.show_raw", both: "compare.multi.show_both" };
@@ -343,10 +353,13 @@ function render(next) {
     playSplash($("splash"));
   }
   // 答えの吹き出しの上の顔と名前（ADR-0181 決定1）。行は #ai-answer の中なので、答えの吹き出しが出ている間だけ見える。
-  // 「AI で解析」の文はオンのときだけ「AI（Mirarin）で解析」に替える（決定2）。オフのときは隠したまま・文に触らない
+  // 「AI で解析」の文はオンのときだけ「AI（Mirarin）で解析」に替える（決定2）。
+  // オフなら元の文に戻す（設定の窓で保存したら開いている窓も変わる。ADR-0245 決定2。比べている途中でも描き直しは止めない）
   $("ai-answer-avatar").hidden = next.character !== true;
   if (next.character === true) {
     text($("ai-send"), texts["batch.button.ai_send.character"]);
+  } else {
+    text($("ai-send"), texts["batch.button.ai_send"]);
   }
   text($("counts"), next.counts);
   // 単純比較の設定の要約と組ごとの設定の数（REQ-228 §7.2）。全部既定なら隠す。全文は title
@@ -465,11 +478,22 @@ function includedCell(row, editable) {
   return td;
 }
 
+// 機種を手で指定した行の印（REQ-368）。Python が全文（機種を手で指定: FortiGate）を入れた行だけ、短い印を足す。
+// 戻り値は title の文（今の機種の文＋改行＋全文。印が無ければ今の機種の文のまま）。文字は make と textContent だけで描く
+function handMark(td, row) {
+  const hand = typeof row.hand_platform === "string" ? row.hand_platform : "";
+  if (hand === "") {
+    return row.platform;
+  }
+  td.append(" ", make("span", "pilot-hand-platform-mark", texts["batch.row.hand_platform"]));
+  return `${row.platform}\n${hand}`;
+}
+
 // 機種の列。種類が config の組は選択（先頭が自動。自動の組は先頭の文を行の文「自動: FortiGate」などにする）、ほかは文字。
 function platformCell(row, editable, labels) {
   if (row.platform_index === null) {
     const td = make("td", "", row.platform);
-    td.title = td.textContent;
+    td.title = handMark(td, row);
     return td;
   }
   const td = make("td", "pilot-select-cell", null);
@@ -477,16 +501,17 @@ function platformCell(row, editable, labels) {
   options(select, labels.map((label, index) => (index === 0 && row.platform_index === 0 ? row.platform : label)));
   select.selectedIndex = row.platform_index;
   select.disabled = !editable;
-  select.title = row.platform;
   select.setAttribute("aria-label", `${texts["batch.col.row_platform"]}: ${rowName(row)}`);
   select.addEventListener("change", async () => handle(await call("set_platform", row.job_id, select.selectedIndex)));
   select.addEventListener("dblclick", (event) => event.stopPropagation());
   td.append(select);
+  select.title = handMark(td, row);
   return td;
 }
 
 // 表の行をまとめて描く。パスのセルは後ろを見せる場所、ほかは文字と title（全文）。
 function drawTable(rows, state) {
+  rowMenu.close(false); // 描き直す前の行の番号で開いたメニューは閉じる（REQ-368）
   tableRows = rows;
   if (selected >= rows.length || Array.from(selection).some((index) => index >= rows.length)) {
     clearSelection();
@@ -513,9 +538,18 @@ function drawTable(rows, state) {
           for (const method of marks) {
             td.append(" ", make("span", "pilot-show-method-mark", texts[SHOW_METHOD_MARKS[method]]));
           }
-          td.classList.toggle("pilot-cell-wrap", marks.length > 0);
+          // 単一比較の窓で比べ直した結果を受けた行の印（REQ-362）。設定が組の設定と違うときだけ Python が説明の文を入れる。
+          // 印は状態の文の後ろ（show の比べ方の印のあと）。説明の文はセルの title の 2 行目に出す。印のあるセルは折り返す
+          const rechecked = typeof row.rechecked === "string" ? row.rechecked : "";
+          const statusText = td.textContent; // 状態の文（と show の比べ方の印）。title の 1 行目
+          if (rechecked) {
+            td.append(" ", make("span", "pilot-rechecked-mark", texts["batch.row.rechecked"]));
+          }
+          td.classList.toggle("pilot-cell-wrap", marks.length > 0 || rechecked !== "");
+          td.title = rechecked ? `${statusText}\n${rechecked}` : statusText;
+        } else {
+          td.title = td.textContent; // 切れて見えないセルの全文は、指を置くと出る（文字のまま）
         }
-        td.title = td.textContent; // 切れて見えないセルの全文は、指を置くと出る（文字のまま）
       }
       tr.append(td);
     }
@@ -781,6 +815,7 @@ function applyTab() {
 }
 
 function selectTab(name) {
+  rowMenu.close(false);
   tab = name;
   for (const item of TABS) {
     $(`tab-${item}`).setAttribute("aria-selected", String(item === name));
@@ -1318,6 +1353,121 @@ table.tBodies[0].addEventListener("dblclick", async (event) => {
     act("handoff", selected);
   }
 });
+
+// --- 組の行の右クリックのメニュー（REQ-368 / ADR-0244 決定1・4） ---
+// 開くのは組の行（data-row を持つ行）だけ。まとめて比べた組の下のコマンドの行・片方だけのファイルの一覧では、今の右クリックのまま。
+// キーボードのメニューのキー・Shift+F10 も contextmenu（座標が無い）で、選んでいる行で開く。
+// 出す項目は行と今の状態で決める（Python の view.can_handoff・view.can_recheck。外した組・機種を選べない行は出さない）。
+// 出す項目が 1 つも無ければ何もしない（preventDefault しない）。開け閉め・矢印キー・Esc は row_menu.js。
+const rowMenu = bindRowMenu($("row-menu"));
+let rowMenuRow = -1; // メニューを開いた行の番号（tableRows の位置）
+
+// 右クリックした組の行の番号（組の行でなければ null）。キーボード（座標が無く、行の上でない）は選んでいる行
+function menuRowAt(event) {
+  const element = event.target instanceof Element ? event.target : null;
+  if (element === null) {
+    return null;
+  }
+  const tr = element.closest("#result-table tbody tr");
+  if (tr !== null) {
+    return tr.dataset.row === undefined || tableRows[Number(tr.dataset.row)] === undefined ? null : Number(tr.dataset.row);
+  }
+  if (event.clientX === 0 && event.clientY === 0 && selected >= 0 && selected < tableRows.length) {
+    return selected;
+  }
+  return null;
+}
+
+// 行 index で出す項目（id → 出すか）
+function rowMenuShown(index) {
+  const row = tableRows[index];
+  const canRecheck = view.can_recheck === true && row.included === true;
+  return {
+    "row-menu-handoff": view.can_handoff === true,
+    "row-menu-recheck": canRecheck,
+    "row-menu-platform": canRecheck && row.platform_index !== null,
+  };
+}
+
+function onRowContextMenu(event) {
+  if (view === null) {
+    return;
+  }
+  const index = menuRowAt(event);
+  if (index === null) {
+    return;
+  }
+  const shownItems = rowMenuShown(index);
+  if (!Object.values(shownItems).some(Boolean)) {
+    return;
+  }
+  event.preventDefault();
+  for (const [id, on] of Object.entries(shownItems)) {
+    $(id).hidden = !on;
+  }
+  let x = event.clientX;
+  let y = event.clientY;
+  if (x === 0 && y === 0) {
+    // キーボードから（座標が無い）。行の左下に出す
+    const tr = groupRows().find((item) => rowNumber(item) === index);
+    const rect = (tr ?? $("table-wrap")).getBoundingClientRect();
+    x = rect.left;
+    y = rect.bottom;
+  }
+  rowMenuRow = index;
+  rowMenu.open(x, y);
+}
+
+// 押したときの動き。メニューを閉じてから行う（フォーカスは、小さな窓を開くときは窓へ、ほかは Python の描き直しに任せる）
+function chooseRowHandoff() {
+  const index = rowMenuRow;
+  rowMenu.close(false);
+  if (index >= 0 && index < tableRows.length) {
+    act("handoff", index); // ダブルクリックと同じ口。右クリックした行を渡す
+  }
+}
+
+async function chooseRowRecheck() {
+  const row = tableRows[rowMenuRow];
+  rowMenu.close(false);
+  if (row !== undefined) {
+    await handle(await call("recheck", row.job_id));
+  }
+}
+
+// 「機種を指定し直して比べ直す…」: 小さな窓に、機種の選択肢（先頭が自動）を今の機種を選んだ状態で出し、「比べ直す」で Python に渡す
+async function chooseRowPlatform() {
+  const row = tableRows[rowMenuRow];
+  rowMenu.close(false);
+  if (row === undefined || row.platform_index === null || view === null) {
+    return;
+  }
+  const jobId = row.job_id; // 窓を開いている間に表が描き直されても、開いた行の組で渡す
+  const select = make("select", "pilot-input", null);
+  select.id = "row-platform-select";
+  options(select, view.labels.row_platforms);
+  select.selectedIndex = row.platform_index;
+  const label = make("label", "", texts["batch.col.row_platform"]);
+  label.htmlFor = select.id;
+  const grid = make("div", "pilot-settings-grid", null);
+  grid.append(label, select);
+  const yes = await panel(
+    texts["batch.platform_dialog.title"],
+    [grid],
+    texts["batch.platform_dialog.apply"],
+    texts["batch.platform_dialog.cancel"],
+    select,
+  );
+  if (yes) {
+    await handle(await call("recheck_platform", jobId, select.selectedIndex));
+  }
+}
+
+$("table-wrap").addEventListener("contextmenu", onRowContextMenu);
+bind("row-menu-handoff", chooseRowHandoff);
+bind("row-menu-recheck", chooseRowRecheck);
+bind("row-menu-platform", chooseRowPlatform);
+
 bind("run", () => act("run"));
 bind("cancel", async () => handle(await call("cancel")));
 bind("save-manifest", () => act("save_manifest"));

@@ -60,7 +60,7 @@ STATUS_ORDER_ONLY = f"{STATUS_LABEL['difference']}（順番だけの違いです
 
 def unreadable_utf8(path: object, hints: tuple[InputHint, ...] = ()) -> str:
     """入力を UTF-8 として読めなかったときの文。hints(読めないバイト列から当てた案内。REQ-189)があれば後ろに足す。"""
-    text = f"{path}: UTF-8 として読めません"
+    text = f"{path}: UTF-8 で読めません。ファイルの文字コードを確かめてください"
     if not hints:
         return text
     return text + "。" + "".join(input_hint_text(h) for h in hints)
@@ -68,7 +68,7 @@ def unreadable_utf8(path: object, hints: tuple[InputHint, ...] = ()) -> str:
 
 def unreadable(path: object, exc: OSError) -> str:
     """入力を読めなかったときの文(存在しない・権限がないなど)。"""
-    return f"{path}: 読めません ({exc.strerror or exc})"
+    return f"{path}: 読めません（{exc.strerror or exc}）"
 
 
 # --- pywebview の画面(ADR-0074 / REQ-103・REQ-107。`driftpilot gui`)。例外の文面・値はどの文にも入れない ---
@@ -194,7 +194,7 @@ GUI_WEB_TEXTS: dict[str, str] = {
     "sample.compare.status": "差分あり",
     "sample.compare.counts": "構造化 1  単純 1",
     "sample.compare.paste.title": "変更前を貼り付け",
-    "sample.compare.paste.prompt": "config か端末ログを貼り付けてください",
+    "sample.compare.paste.prompt": "機器の config か端末ログを貼り付けてください",
     "sample.compare.paste.ok": "OK",
     "sample.compare.paste.cancel": "キャンセル",
 }
@@ -202,7 +202,7 @@ GUI_WEB_TEXTS: dict[str, str] = {
 
 def save_caution() -> str:
     """保存した結果の扱いの注意(ADR-0017 決定4)。保存ファイルは入力の設定値を平文で含む。"""
-    return "入力の設定値をそのまま含みます。元の config と同じ扱い(社外秘)にしてください"
+    return "入力の設定値を伏せずにそのまま含みます。元の config と同じ扱い（社外秘）にしてください"
 
 
 # duplicate_line の detail["item"] の表示名(AOS-Switch のポートの食い違い。REQ-334)
@@ -212,8 +212,8 @@ _CONFLICT_ITEM = {"untagged_vlan": "untagged の VLAN", "channel_group": "束ね
 def warning_message(w: SafetyWarning) -> str:
     if w.kind == "empty_category":
         return (
-            f"{_SIDE_LABEL[w.side or 'before']}の {w.detail['subject']} がツリーに {w.detail['tree_count']} 件あるのに、"
-            f"{w.category} を1件も読めていません。書式が変わった可能性があります。"
+            f"{_SIDE_LABEL[w.side or 'before']}の {w.detail['subject']} がツリーに {w.detail['tree_count']} 件ありますが、"
+            f"{w.category} を 1 件も読めませんでした。書式が変わったかもしれません。単純比較で確かめてください。"
         )
     if w.kind == "duplicate_line":
         # 値は含めない(detail にはスコープと行番号しか無い)
@@ -223,19 +223,19 @@ def warning_message(w: SafetyWarning) -> str:
             item = _CONFLICT_ITEM.get(w.detail["item"], w.detail["item"])
             return (
                 f"{_SIDE_LABEL[w.side or 'before']}の {scope} で、同じ項目（{item}）に違う値が "
-                f"{w.detail.get('count', 2)} か所に書かれています(この読み方では行番号は取れません)。"
-                "IR は後の行の値を使います。"
+                f"{w.detail.get('count', 2)} か所に書かれています（この読み方では行番号は取れません）。"
+                "構造化比較では後の行の値を使います。"
             )
         if not w.detail["lines"]:
             # A型の木は元の行番号を持たない(ADR-0030 決定5)
             return (
-                f"{_SIDE_LABEL[w.side or 'before']}の {scope} の下に、同じ行が {w.detail.get('count', 2)} 回あります"
-                "(この読み方では行番号は取れません)。どれも捨てていません。"
+                f"{_SIDE_LABEL[w.side or 'before']}の {scope} で、同じ行が {w.detail.get('count', 2)} 回あります"
+                "（この読み方では行番号は取れません）。どの行も残しています。"
             )
         lines = "・".join(str(n) for n in w.detail["lines"])
         return (
-            f"{_SIDE_LABEL[w.side or 'before']}の {scope} の下で、{lines} 行目が重複しています"
-            "(同じ行、または同じ項目に違う値)。どちらも捨てていませんが、IR は後の行の値を使います。"
+            f"{_SIDE_LABEL[w.side or 'before']}の {scope} で、{lines}行目が重複しています"
+            "（同じ行か、同じ項目に違う値）。どちらの行も残していますが、構造化比較では後の行の値を使います。"
         )
     if w.kind == "top_level_merged":
         # 行の中身・値は含めない(detail には行番号と数しか無い)。行番号は先頭の 10 個まで(ADR-0211 決定4)
@@ -266,8 +266,8 @@ def warning_message(w: SafetyWarning) -> str:
             f"（{d['lines']} 行のうち）。無視する行の式を確かめてください。"
         )
     return (
-        f"ツリー差分は {w.detail['tree_diff_lines']} 行あるのに、structured 差分が0件です。"
-        "読み取れていない設定の変更を見落としている可能性があります。"
+        f"ツリーの差分は {w.detail['tree_diff_lines']} 行ありますが、構造化比較の差分は 0 件です。"
+        "構造化比較で読めていない設定の変更があるかもしれません。単純比較で確かめてください。"
     )
 
 
@@ -420,16 +420,19 @@ def notice_message(n: ExposureNotice) -> str:
     after: dict[str, Any] = n.detail["after"]
     if n.kind == "mixed_exposure":
         return (
-            f"通常版と既定値込み版を比較しています(変更前: {before['command']!r} は{_STATE_LABEL[before['state']]}、"
-            f"変更後: {after['command']!r} は{_STATE_LABEL[after['state']]})。差分の多くは取得方法の違いによるものです"
+            f"変更前と変更後で、config の取り方が違います（変更前: {before['command']!r} は{_STATE_LABEL[before['state']]}、"
+            f"変更後: {after['command']!r} は{_STATE_LABEL[after['state']]}）。"
+            "差分の多くは、取り方の違いによるものかもしれません。同じコマンドで取った config を比べてください。"
         )
     if n.kind == "unknown_both":
-        return "取得コマンド不明: 変更前・変更後とも、通常版か既定値込み版か判定できません"
+        return "取得コマンド不明: 変更前・変更後とも、通常版か既定値込み版か分かりません"
     known, known_label, other_label = (
         (before, "変更前", "変更後") if before["state"] != "unknown" else (after, "変更後", "変更前")
     )
     head = "【既定値込み版】" if n.emphasized else ""
-    return f"{head}{known_label}は {known['command']!r} で取得({_STATE_LABEL[known['state']]})。{other_label}の取得方法は不明です"
+    # 既定値込み版のときは先頭の印が種類を言うので、通常版のときだけコマンドの後ろに種類を残す(情報を減らさない。REQ-356)
+    kind = "（通常版）" if known["state"] == "normal" else " "
+    return f"{head}{known_label}は {known['command']!r} で取った config{kind}です。{other_label}の取り方は分かりません。"
 
 
 def notice_line(n: ExposureNotice) -> str:
@@ -438,7 +441,7 @@ def notice_line(n: ExposureNotice) -> str:
 
 # 比較から外した理由(ADR-0025 決定6)。core の ComparisonExclusion.reason の値ごとの文面
 _EXCLUSION_REASON = {
-    "reencrypted_value": "FortiGate の再暗号化される値(ENC の付く値)は比較対象外です",
+    "reencrypted_value": "FortiGate で取るたびに暗号化し直される値（ENC の付く値）は比べていません",
 }
 
 
@@ -446,8 +449,8 @@ def exclusion_line(e: ComparisonExclusion) -> str:
     """比較から外した値の1行。本当に値を変えても差分に出ないことも言う(黙って無視しない)。"""
     reason = _EXCLUSION_REASON.get(e.reason, f"比較対象外の値があります(理由: {e.reason})")
     return (
-        f"比較対象外: {reason}(変更前 {e.counts['before']} 件・変更後 {e.counts['after']} 件。ルール {e.rule_id})。"
-        "この値を本当に変えても差分には出ません"
+        f"比較対象外: {reason}（変更前 {e.counts['before']} 件・変更後 {e.counts['after']} 件。ルール {e.rule_id}）。"
+        "この値を変えても差分には出ません"
     )
 
 
@@ -475,7 +478,7 @@ def batch_summary_lines(summary: BatchSummary, exit_code: int) -> list[str]:
 
 
 def batch_cancel_accepted() -> str:
-    return "中断を受け付けました。実行中の job が終わったら止めます(すぐに止めるには、もう一度 Ctrl+C)"
+    return "中断を受け付けました。今比べている組が終わったら止めます（すぐに止めるには、もう一度 Ctrl+C）"
 
 
 # --- 対の生成と一括比較画面(ADR-0020 / REQ-27 パート A)。件数の言い方を CLI と GUI で食い違わせない ---
@@ -505,7 +508,7 @@ def paired_count_line(count: int) -> str:
 
 
 def unpaired_count_line(count: int) -> str:
-    return f"対にならなかったファイル: {count} 件"
+    return f"片方だけのファイル: {count} 件"
 
 
 def unpaired_side_line(side: str, count: int) -> str:
@@ -679,12 +682,12 @@ _LLM_REASON = {
     "dry_run": "送信内容の確認だけです(--llm-dry-run)。送信していません",
     "no_diff": "差分が無いため、AI を呼んでいません",
     "no_structured_diff": "構造化比較に差分が無いので送りませんでした（順番の違いなど）",
-    "nothing_to_send": "送れる差分がありません(すべて認証情報の判定ができない行でした)",
+    "nothing_to_send": "送れる差分がありません（差分はすべて、秘密かどうか判定できず送らない行でした）",
     "no_api_key": (
         "API キーがありません(設定画面の「保管庫に保存」か、プロファイルごとの環境変数 DRIFTPILOT_LLM_API_KEY_<続き> に入れてください。"
         "プロファイルを使わないときは DRIFTPILOT_LLM_API_KEY か、利用者ごとの設定ファイルの llm.api_key)"
     ),
-    "client_unavailable": "AI の接続部品が入っていません(pip install 'driftpilot[llm]')",
+    "client_unavailable": "AI の接続に要る部品が入っていません（pip install 'driftpilot[llm]'）",
     "not_configured": "モデルが設定されていません(設定ファイルの llm.model)",
     "placeholder_base_url": "接続先の <リソース名> を書き換えてください。送っていません",
     "cli_not_found": "CLI が見つかりません(CLI の場所の欄か PATH を確かめてください)",
@@ -789,12 +792,10 @@ def llm_truncated_lines(llm: LlmAnalysis) -> list[str]:
     if llm.source == "whole":
         head = f"1組の上限 {llm.max_diffs:,} 件で打ち切った組があります。"
     else:
-        head = f"差分が {llm.diff_total:,} 件あり、{llm.max_diffs:,} 件で打ち切りました。"
+        head = f"差分が {llm.diff_total:,} 件あり、AI に送るのは最初の {llm.max_diffs:,} 件までにしました。"
     return [
         head,
-        "差分がこの件数になるのは、比較の対象が違う場合があります",
-        "(通常版と既定値込み版、別の機器、対の取り違え)。",
-        "安全網の警告と区間の選択を確認してください。",
+        "差分が思ったより多いときは、見落としの警告・取り方（通常版と既定値込み版）・区間の選択（別の機器や組の取り違え）を確かめてください。",
     ]
 
 
@@ -803,12 +804,12 @@ def llm_unsent_line(llm: LlmAnalysis) -> str | None:
     unsent = llm.unsent
     if unsent is None or not (unsent.lines or unsent.context_lines):
         return None
-    head = f"{unsent.lines} 行は判定不能のため送っていない"
+    head = f"{unsent.lines} 行は、秘密かどうか判定できないため AI に送っていません"
     if unsent.blocks:
-        head += f"(うち PEM ブロック {unsent.blocks} 件)"
+        head += f"（うち PEM ブロック {unsent.blocks} 件）"
     if unsent.context_lines:
-        head += f"。前後の文脈の {unsent.context_lines} 行も送っていない"
-    return head + "。差分としては上に出ています(AI の意見が付かないだけです)"
+        head += f"。前後の文脈の {unsent.context_lines} 行も送っていません"
+    return head + "。差分は上に出ています（その行に AI の意見が付かないだけです）"
 
 
 def llm_unsent_shape_lines(llm: LlmAnalysis) -> list[str]:
@@ -822,7 +823,7 @@ def unsent_shape_lines(shapes: "list[UnsentShape] | tuple[UnsentShape, ...]") ->
     """送らなかった行の形の一覧の行。1件の比較と一括比較(全組の合算)で同じ書き方にする。"""
     if not shapes:
         return []
-    lines = ["送らなかった行の形(値は含まない。伏せる表に足す候補):"]
+    lines = ["送らなかった行の形（値は含みません。伏せる表に足す候補）:"]
     for s in shapes:
         if s.shape == "秘密の一覧のコマンド":
             lines.append(f"  [{s.scope}] 秘密の一覧のコマンドのため、この組の本文を送っていません ({s.count})")
@@ -889,7 +890,7 @@ def llm_screen_lines(llm: LlmAnalysis, *, retry_after: int | None = None) -> lis
 def workdir_api_key_ignored(path: Path) -> str:
     """作業フォルダの設定ファイルに api_key があったときの1行(値は出さない)。"""
     return (
-        f"注意: {path} の llm.api_key は読みません（作業フォルダのファイルからキーを読まない設計です）。"
+        f"注意: {path} の llm.api_key は使いません（作業フォルダのファイルからはキーを読みません）。"
         "キーは設定画面の「保管庫に保存」か、プロファイルごとの環境変数 DRIFTPILOT_LLM_API_KEY_<続き> に入れてください。"
         "プロファイルを使わないときは DRIFTPILOT_LLM_API_KEY か、利用者ごとの設定ファイルの llm.api_key"
     )
@@ -1001,11 +1002,11 @@ SETTINGS_TAB_AUTO = "比較と自動の動き"
 SETTINGS_TAB_FILE = "設定ファイル"
 SETTINGS_NOTE_AUTO_SEND = "オンにすると、比較が終わるたびに確認なしで、使用中の AI プロファイルへ差分を送ります"
 SETTINGS_NOTE_SAVE_BOTH = "「保存」は「比較と自動の動き」と「設定ファイル」の両方のタブの欄を書きます"
-# 「キャラクター（Mirarin）を表示する」のチェックと注記(ADR-0174 決定1。[gui] の character)
+# 「キャラクター（Mirarin）を表示する」のチェックと注記(ADR-0174 決定1・ADR-0245 決定2。[gui] の character。保存したら開いている窓にも効く)
 SETTINGS_CHARACTER = "キャラクター（Mirarin）を表示する"
 SETTINGS_NOTE_CHARACTER = (
     "起動したとき、AI の考え中、一括比較の実行中、差分が無いときなどに、Mirarin の絵を添えます。"
-    "次に窓を開いたときから変わります。"
+    "保存すると、開いている窓にも効きます。"
 )
 AUTO_SEND_CONFIRM_TITLE = "比較の後に自動で AI に送る"
 
@@ -2123,7 +2124,7 @@ COMPARE_AUTO_SENDING = "AI に送っています"
 COMPARE_AI_PREPARING = "AI に送る内容を作っています"
 COMPARE_LLM_PANE = "AI 解析"
 # 知らせ(wx の MessageBox)の題
-COMPARE_READ_FAILED_TITLE = "読み込めません"
+COMPARE_READ_FAILED_TITLE = "ファイルを読めません"
 COMPARE_LLM_SETTINGS_TITLE = "AI の設定を読めません"
 COMPARE_FAILED_TITLE = "比較に失敗しました"
 COMPARE_SAVE_FAILED_TITLE = "保存できません"
@@ -2133,7 +2134,7 @@ COMPARE_DROP_TOO_MANY = "ドロップできるファイルは1つか2つです�
 COMPARE_DROP_FOLDER = "フォルダは入力にできません。ファイルをドロップしてください。入力は変えていません"
 COMPARE_DROP_NO_PATH = "ドロップしたファイルの場所が分かりません。「参照…」で選んでください。入力は変えていません"
 # 貼り付けと送信前のプレビューのダイアログ(wx の PasteDialog・LlmPreviewDialog)
-PASTE_PROMPT = "config か端末ログを貼り付けてください"
+PASTE_PROMPT = "機器の config か端末ログを貼り付けてください"
 LLM_PREVIEW_TITLE = "AI に送る内容の確認"
 LLM_PREVIEW_PAYLOAD = "送信内容(マスク後。このあとに答えの書き方の決まり(固定の文)だけを足して送ります):"
 LLM_PREVIEW_SEND = "送信する"
@@ -2237,6 +2238,18 @@ MULTI_PAIRED_BY_HAND = "手で組にした"
 # 一覧の組の行・一括比較の窓の表の状態の横に出す、show の比べ方の印(ADR-0200 決定 5。REQ-282)
 MULTI_SHOW_RAW_MARK = "単純比較"
 MULTI_SHOW_BOTH_MARK = "表＋単純比較"
+# 単一比較の窓で比べ直した結果を受けた一括比較の窓の行の印(ADR-0242 決定2。REQ-362)。単純比較の設定が組の設定と違うときだけ付ける
+BATCH_ROW_RECHECKED_MARK = "単一比較で比べ直し"
+BATCH_RECHECKED_NOTE = "単一比較の窓で比べ直しました（この窓だけの設定: {summary}）"
+# 一括比較の窓の組の行の右クリックの項目・機種の窓・機種を手で指定した行の印(REQ-368 / ADR-0244 決定1・4)。一括比較の窓の文に半角の括弧は使わない
+BATCH_MENU_HANDOFF = "単一比較で開く"
+BATCH_MENU_RECHECK = "この組だけ比べ直す"
+BATCH_MENU_PLATFORM = "機種を指定し直して比べ直す…"
+BATCH_PLATFORM_DIALOG_TITLE = "機種を指定し直して比べ直す"
+BATCH_PLATFORM_DIALOG_APPLY = "比べ直す"
+BATCH_PLATFORM_DIALOG_CANCEL = "やめる"
+BATCH_ROW_HAND_PLATFORM_MARK = "手で指定"
+BATCH_HAND_PLATFORM_NOTE = "機種を手で指定: {name}"
 COMPARE_PARTNER_TITLE = "相手を選ぶ"
 
 
@@ -2415,6 +2428,7 @@ COMPARE_AI_EMPTY = (
 )
 COMPARE_AI_INPUT = "AI への質問（今表示している差分について聞きます）"
 COMPARE_AI_INPUT_HINT = "Shift+Enter で送信、Enter で改行"
+COMPARE_AI_SEND = "質問を送る（Shift+Enter）"
 COMPARE_AI_PROFILE = "AI プロファイル"
 COMPARE_AI_PROMPT = "プロンプト"
 COMPARE_AI_ANALYZE = "定型の質問で解析"
@@ -2432,8 +2446,20 @@ COMPARE_AI_TARGET_RAW = "単純比較"
 COMPARE_AI_TARGET_WHOLE = "全コマンド比較結果（選んだ組）"
 
 
-def compare_ai_target(kind: str, category: str | None = None, command: str | None = None) -> str:
-    """AI の面の「質問の対象: …」(画面に出すだけで、送る文には入れない)。kind は structured・raw・whole。"""
+# 単純比較の表の 1 行だけを聞くときの入力欄の決まった質問(REQ-366 §6)。利用者が送ったときだけ送る
+COMPARE_AI_ROW_QUESTION = "この差分の意味と影響を教えてください"
+
+
+def compare_ai_target(
+    kind: str,
+    category: str | None = None,
+    command: str | None = None,
+    row: tuple[int | None, int | None] | None = None,
+) -> str:
+    """AI の面の「質問の対象: …」(画面に出すだけで、送る文には入れない)。kind は structured・raw・whole。
+
+    row は単純比較の 1 行だけを聞くときの (変更前の行番号, 変更後の行番号)。行の文字は入れない(REQ-366 §6)。
+    """
     if kind == "whole":
         name = COMPARE_AI_TARGET_WHOLE
     else:
@@ -2442,6 +2468,9 @@ def compare_ai_target(kind: str, category: str | None = None, command: str | Non
             name = f"{name}・カテゴリ {category}"
         if command:
             name = f"{name}（{command}）"
+        if row is not None:
+            parts = [f"{label} {no} 行目" for label, no in zip(("変更前", "変更後"), row) if no is not None]
+            name = f"{name}・この行だけ（{'・'.join(parts)}）"
     return f"質問の対象: {name}"
 
 # まとめて比べたとき、AI に送る組を選ぶ(REQ-265。ADR-0193 決定3)
@@ -2591,6 +2620,7 @@ GUI_WEB_TEXTS.update(
         "character.avatar.title": CHARACTER_AVATAR_TITLE,
         "compare.ai.input": COMPARE_AI_INPUT,
         "compare.ai.input.hint": COMPARE_AI_INPUT_HINT,
+        "compare.ai.send": COMPARE_AI_SEND,
         "compare.ai.profile": COMPARE_AI_PROFILE,
         "compare.ai.prompt": COMPARE_AI_PROMPT,
         "compare.button.copy": COMPARE_COPY,
@@ -2699,6 +2729,13 @@ BATCH_ANSWER = "選んだ組の AI の回答"
 BATCH_SETUP_FAILED_TITLE = "組を作れません"
 BATCH_LLM_SETTINGS_TITLE = "AI 解析の設定を読めません"
 BATCH_NOT_SENT_TITLE = "AI には送っていません"
+# 送る前の確認の後に設定が変わったため、承認した送信を送らなかったときの知らせ(REQ-371 / ADR-0245 決定1)。
+# 題は窓ごとに今の題(BATCH_NOT_SENT_TITLE・COMPARE_FOLLOW_UP_NOTICE_TITLE・BATCH_PAIR_AI_TITLE)。値・語・送る文は入れない
+REREAD_NOT_SENT = {
+    "secret_words": "確認の後に秘密の語が変わったため、送っていません。もう一度確認してください",
+    "profile": "確認の後に AI プロファイルが変わったため、送っていません。もう一度確認してください",
+    "limits": "確認の後に AI に送る上限が変わったため、送っていません。もう一度確認してください",
+}
 BATCH_FAILED_TITLE = "一括比較に失敗しました"
 BATCH_SELECT_TITLE = "組を選んでください"
 BATCH_SELECT_PROMPT = "比較画面で開く組を、一覧で選んでください"
@@ -3081,6 +3118,15 @@ GUI_WEB_TEXTS.update(
         "batch.col.side_before": BATCH_COL_SIDE_BEFORE,
         "batch.col.side_after": BATCH_COL_SIDE_AFTER,
         "batch.col.row_platform": BATCH_ROW_PLATFORM,
+        "batch.row.rechecked": BATCH_ROW_RECHECKED_MARK,
+        # 組の行の右クリックのメニューと機種の窓・印(REQ-368)
+        "batch.menu.handoff": BATCH_MENU_HANDOFF,
+        "batch.menu.recheck": BATCH_MENU_RECHECK,
+        "batch.menu.platform": BATCH_MENU_PLATFORM,
+        "batch.platform_dialog.title": BATCH_PLATFORM_DIALOG_TITLE,
+        "batch.platform_dialog.apply": BATCH_PLATFORM_DIALOG_APPLY,
+        "batch.platform_dialog.cancel": BATCH_PLATFORM_DIALOG_CANCEL,
+        "batch.row.hand_platform": BATCH_ROW_HAND_PLATFORM_MARK,
         # 行の複数選択・見出しの「全部」のチェック・「設定…」(ADR-0176 / REQ-238)
         "batch.select.title": BATCH_SELECT_TITLE,
         "batch.select.one": BATCH_SELECT_ONE,
@@ -3252,6 +3298,16 @@ EXPORT_COL_BEFORE_LINE = "変更前の行"
 EXPORT_COL_AFTER_LINE = "変更後の行"
 EXPORT_KIND_STRUCTURED = COMPARE_TAB_STRUCTURED
 EXPORT_KIND_RAW = COMPARE_TAB_RAW
+# 報告書の「単純比較の設定」の表と CSV の列(REQ-363 / ADR-0243)。式・置き換える文字は文にせず、秘密の判定に通した文字を出す
+EXPORT_RAW_RULES = "単純比較の設定"
+EXPORT_RAW_COL_KIND = "種類"
+EXPORT_RAW_COL_PATTERN = "式"
+EXPORT_RAW_COL_REPLACEMENT = "置き換える文字"
+EXPORT_RAW_COL_HITS = "当たった行"
+EXPORT_RAW_COL_HITS_TOTAL = "当たった行（全部の組の合計）"
+EXPORT_RAW_RULES_OTHERS = "ほかの設定: {parts}"
+EXPORT_RAW_WITHHELD = "（秘密の語を含むため出しません）"
+EXPORT_COL_RAW_SETTINGS = "単純比較の設定"  # 組の一覧の CSV の最後の列
 # 知らせ(題は COMPARE_SAVE_FAILED_TITLE)
 EXPORT_REDACT_FAILED = "秘密の行を伏せる判定ができないため、出力していません"
 
@@ -3310,7 +3366,7 @@ GUI_WEB_TEXTS.update(
 # --- 単純比較の設定(ADR-0166 / REQ-227)。CLI・比較の窓・設定の窓・HTML の出力で同じ言葉を使う ---
 # 文に利用者の式と置き換える文字は入れない(件数と種類だけ。re.error の文だけは括弧で添える)
 
-RAW_OPTIONS_TITLE = "単純比較の設定"
+RAW_OPTIONS_TITLE = "この窓だけの単純比較の設定（保存しません）"  # 比較の窓の欄の見出し(REQ-361。設定の窓は RAW_SETTINGS_TITLE)
 RAW_SETTINGS_PREFIX = "単純比較の設定: "
 RAW_FIELD_IGNORE = "無視する行"
 RAW_FIELD_REPLACE = "置き換え"
@@ -3358,6 +3414,43 @@ SETTINGS_NOTE_RAW_DEFAULTS = (
     "コマンド（CLI）はこの既定を読みません"
 )
 SETTINGS_NOTE_SAVE_RAW = "このタブの「保存」は raw-compare.json だけを書きます（ほかのタブの欄は書きません）"
+
+# 保存したルールを開いている窓へ届ける(REQ-361 / ADR-0241)。文に式と置き換える文字は入れない(個数だけ)
+RAW_SETTINGS_TITLE = "いつも効く単純比較の設定"  # 設定の窓の「単純比較」タブの見出し(タブの名前 SETTINGS_TAB_RAW は変えない)
+SETTINGS_NOTE_RAW_FOLLOW = "保存すると、開いている比較の窓にもすぐ効きます"
+RAW_WINDOW_NOTE = "設定の窓の、いつも効く設定を読み込んでいます。ここで足した・変えたものはこの窓だけで使い、閉じると消えます"
+RAW_RESET_LABEL = "いつも効く設定に戻す"
+RAW_ADD_DEFAULTS_LABEL = "いつも効く設定に足す"
+RAW_FOLLOW_LOAD_LABEL = "いつも効く設定を読み込む"
+RAW_HANDOFF_DIFFERS = "一括比較の組の単純比較の設定と違います。この窓の設定で比べました"
+RAW_FOLLOW_LOADED = "いつも効く設定を読み込みました"
+RAW_FOLLOW_KEPT = "いつも効く設定が保存されました。この窓では、この窓だけの設定で比べています"
+BATCH_RAW_FOLLOW_LOADED = "いつも効く設定を読み込みました。もう一度「実行」すると新しい設定で比べます"
+BATCH_RAW_FOLLOW_FILE = "いつも効く設定が保存されました。開いている組のファイルの設定はそのままです"
+RAW_ADD_TITLE = "いつも効く設定に足す"  # 知らせの題(ボタンと同じ)
+RAW_ADD_CONFIRM_TITLE = "いつも効く設定に足します"
+RAW_ADD_CONFIRM_YES = "足す"
+RAW_ADD_CONFIRM_NO = "やめる"
+RAW_ADD_NONE = "足すルールはありません"
+
+
+def raw_added_band(count: int) -> str:
+    """比較の窓の帯(いつも効く設定に足したとき)。"""
+    return f"いつも効く設定に {count} 個足しました"
+
+
+def raw_add_over_limit(ignore: int, replace: int, limit: int) -> str:
+    """足すと上限を超えるときの理由(1 つも足さない)。ignore・replace は足した後の無視する行の個数・置き換えの組数。"""
+    return (
+        f"足すと無視する行が {ignore} 個・置き換えが {replace} 組になり、"
+        f"上限（{limit} 個・{limit} 組）を超えるため、1 つも足していません"
+    )
+
+
+def raw_add_confirm_line(kind: str, pattern: str, replacement: str | None) -> str:
+    """確認の本文の 1 行。kind は ignore か replace(RAW_RULE_KIND_TEXT の名前)。置き換えは「式 → 置き換える文字」。"""
+    head = f"{RAW_RULE_KIND_TEXT[kind]}: {pattern}"
+    return head if replacement is None else f"{head} → {replacement}"
 
 # 例(文と式の組)。どれも check_raw_options を通る(テストで確かめる)
 RAW_IGNORE_EXAMPLES: tuple[tuple[str, str], ...] = (
@@ -3483,6 +3576,11 @@ def raw_option_problem_line(problem: Any) -> str:
         unit = "個" if problem.field == "ignore_lines" else "組"
         name = RAW_FIELD_IGNORE if problem.field == "ignore_lines" else RAW_FIELD_REPLACE
         return f"{name}は {MAX_PATTERNS} {unit}までです"
+    if kind == "duplicate":
+        # detail は最初の行・組の、画面の欄での位置(式の文字は入れない)
+        if problem.field == "ignore_lines":
+            return f"{RAW_FIELD_IGNORE}の {problem.index} 行目の式は、{problem.detail} 行目と同じです"
+        return f"{RAW_FIELD_REPLACE}の {problem.index} 組目は、{problem.detail} 組目と同じです"
     where = _raw_position(problem)
     if kind == "too_long":
         return f"{where}は {MAX_PATTERN_CHARS} 文字までです"
@@ -3539,6 +3637,58 @@ def raw_options_summary_text(plain: "dict[str, Any]", algorithm_used: str | None
     return RAW_SETTINGS_PREFIX + "・".join(parts) if parts else None
 
 
+# --- 単純比較のルールごとの有効・無効と「効いているルール」の一覧(REQ-359 / ADR-0240 決定1・2) ---
+# 文に式と置き換える文字は入れない(件数と種類だけ)
+
+RAW_SETTINGS_NONE = "なし"  # 有効なルールもほかの設定も既定で、無効だけあるときの要約(「単純比較の設定: なし（無効 1）」)
+RAW_DISABLED_SUFFIX = "（無効 {count}）"
+RAW_RULES_TITLE = "効いているルール（有効 {enabled}・無効 {disabled}）"
+RAW_RULE_KIND_TEXT = {"ignore": "無視する行", "replace": "置き換え"}
+RAW_RULE_HITS = "変更前 {before}・変更後 {after}"
+RAW_RULE_NO_HITS = "—"  # 無効のルール・まだ比べていないとき・数を持たない古い保存の結果
+# 「この行に効いているルールを見る」の小さな窓(REQ-366 §5)。見出しは行の番号だけ(行の文字は入れない)
+RAW_LINE_RULES_NONE = "この側に当たったルールはありません"
+
+
+def raw_line_rules_side(side: str, line_no: int) -> str:
+    """小さな窓の側の見出し。side は before か after。"""
+    return f"{'変更前' if side == 'before' else '変更後'}（{line_no} 行目）"
+
+
+def raw_summary_with_disabled(summary: str | None, disabled: int) -> str | None:
+    """単純比較の設定の要約に、無効のルールの数を足す(「…（無効 1）」)。無効が無ければそのまま。
+    有効なルールもほかの設定も既定で要約が None のときは「単純比較の設定: なし（無効 1）」。
+    """
+    if disabled <= 0:
+        return summary
+    head = summary if summary is not None else RAW_SETTINGS_PREFIX + RAW_SETTINGS_NONE
+    return head + RAW_DISABLED_SUFFIX.format(count=disabled)
+
+
+def batch_rechecked_note(plain: "dict[str, Any]") -> str:
+    """一括比較の窓の行の印の説明(REQ-362)。plain は options_to_plain の形(単一比較の窓の単純比較の設定)。
+
+    要約は raw_options_summary_text と同じつなぎ方(頭の「単純比較の設定: 」は付けない)。すべて既定なら「なし」。
+    """
+    parts = raw_options_parts(plain)
+    return BATCH_RECHECKED_NOTE.format(summary="・".join(parts) if parts else RAW_SETTINGS_NONE)
+
+
+def batch_platform_hand(name: str) -> str:
+    """機種を手で指定した組の行の印の全文(REQ-368)。name は機種の列の文(「FortiGate」「指定なし」など)。"""
+    return BATCH_HAND_PLATFORM_NOTE.format(name=name)
+
+
+def raw_rules_title(enabled: int, disabled: int) -> str:
+    """一覧の見出し(「効いているルール（有効 2・無効 1）」)。"""
+    return RAW_RULES_TITLE.format(enabled=enabled, disabled=disabled)
+
+
+def raw_rule_hits_text(before: int, after: int) -> str:
+    """一覧の「当たった行」の文(「変更前 2・変更後 3」)。"""
+    return RAW_RULE_HITS.format(before=before, after=after)
+
+
 def raw_moves_part(moves: int, skipped: bool) -> str | None:
     """「移動 2 か所」か「移動は差分が多いため探していません」。移動が無ければ None(REQ-228 §8.3)。"""
     if skipped:
@@ -3585,6 +3735,9 @@ GUI_WEB_TEXTS.update(
         ),
         "raw_options.example": "例から足す…",
         "raw_options.replace": "置き換えてから比べる（正規表現）",
+        "raw_options.replace.note": (
+            "置き換えは、show を表で比べるときの値にも当てます（行の前後の文字を見る式は当たりません）"
+        ),
         "raw_options.replace.pattern": "式",
         "raw_options.replace.text": "置き換える文字",
         "raw_options.replace.add": "置き換えを足す",
@@ -3597,8 +3750,12 @@ GUI_WEB_TEXTS.update(
         "raw_options.space.indent_note": "字下げの違いも無視します。config の親子の違いが見えなくなることがあります",
         "raw_options.blank": RAW_BLANK_LABEL,
         "raw_options.case": RAW_CASE_LABEL,
-        "raw_options.reset": "既定に戻す",
-        "raw_options.defaults_title": RAW_DEFAULTS_TITLE,
+        "raw_options.reset": RAW_RESET_LABEL,
+        "raw_options.window_note": RAW_WINDOW_NOTE,
+        "raw_options.add_defaults": RAW_ADD_DEFAULTS_LABEL,
+        "raw_follow.load": RAW_FOLLOW_LOAD_LABEL,
+        "settings.raw.title": RAW_SETTINGS_TITLE,
+        "settings.note.raw_follow": SETTINGS_NOTE_RAW_FOLLOW,
         "settings.tab.raw": SETTINGS_TAB_RAW,
         "settings.note.raw_defaults": SETTINGS_NOTE_RAW_DEFAULTS,
         "settings.note.save_raw": SETTINGS_NOTE_SAVE_RAW,
@@ -3614,6 +3771,17 @@ GUI_WEB_TEXTS.update(
         "raw_options.algorithm.minimal": RAW_ALGORITHM_LABEL["minimal"],
         "raw_options.algorithm.patience": RAW_ALGORITHM_LABEL["patience"],
         "raw_options.algorithm.note": "最小は、変更が 1,000 行を超えると標準で比べます",
+        # REQ-359: ルールごとの有効・無効。置き換えの表の「有効」の列・無視する行の欄の下の注記(雛形。{count} を数に直して出す)・
+        # 単純比較のタブの「効いているルール」の一覧の列の名前と注記(見出しは Python の raw_rules_title)
+        "raw_options.replace.enabled": "有効",
+        "raw_options.ignore_disabled": "無効: {count} 個（単純比較のタブの一覧で切り替えます）",
+        "raw_options.ignore_disabled.settings": "無効: {count} 個",
+        "raw_options.rules.col.enabled": "有効",
+        "raw_options.rules.col.kind": "種類",
+        "raw_options.rules.col.pattern": "式",
+        "raw_options.rules.col.replacement": "置き換える文字",
+        "raw_options.rules.col.hits": "当たった行",
+        "raw_options.rules.note": "「—」は、無効のルール・まだ比べていないとき・数を持たない古い保存の結果です",
         "batch.note.raw_options": BATCH_NOTE_RAW_OPTIONS,
         # REQ-311: 正規表現の書き方の解説(閉じた折りたたみ #rawopt-help)
         "raw_options.help": RAW_HELP_TITLE,
@@ -3665,6 +3833,18 @@ RULE_AI_PROBLEM_TEXT = {
 }
 RULE_AI_NOT_COMPARED = "（比べません）"  # 「行ごと比べない」の表の「後」の欄
 RULE_AI_ASKING = "AI に式を頼んでいます…"
+# 単純比較のタブで選んだ文字を断った理由の種類(REQ-360。rule_ai.py)。先頭の 5 つは llm_analyzer/follow_up.py の REFUSE_*、
+# 残りの 2 つは選んだ文字だけの理由。選んだ文字・貼った行は入れない
+RULE_AI_SELECTION_REFUSED = {
+    "blank": "選んだ文字がありません。文字を選び直してください。送っていません",
+    "too_long": "選んだ文字が 200 字を超えています。200 字までで選び直してください。送っていません",
+    "newline": "選んだ文字に改行が入っています。1 つの行の中で選び直してください。送っていません",
+    "mask": "選んだ文字に、伏せる対象になる文字があります。選び直してください。送っていません",
+    "unsent": "選んだ文字に、送れない文字があります。選び直してください。送っていません",
+    "pem": "選んだ文字に、証明書や鍵の行があります。選び直してください。送っていません",
+    "selection_masked": "選んだ文字は、伏せる部分か送らない行にあるため、AI に送れません",
+    "selection_not_found": "選んだ文字が、貼った行の中にありません。行の欄を直したときは、選んだ文字を含む行を残してください。送っていません",
+}
 
 
 def rule_ai_destination(name: str, model: str | None, base_url: str | None) -> str:
@@ -3739,6 +3919,35 @@ GUI_WEB_TEXTS.update(
         "raw_options.ai.result.local": "この表は、貼った元の行に手元で式を当てた結果です（この表は送っていません）",
         "raw_options.ai.add": "欄に入れる",
         "raw_options.ai.skip": "入れない",
+        # 同じ式を 2 つ入れない(ADR-0236 / REQ-353)。式の文字は入れない
+        "raw_options.duplicate": "同じ式が既にあるため、足していません",
+        "raw_options.ai.duplicate": "同じ式が既に欄にあるため、入れていません",
+        # 単純比較のタブで選んだ文字を、右クリックから「AI に式を頼む…」に渡す(REQ-360 / ADR-0240 決定3)
+        "raw_options.ai.selection": "消したい部分:",
+        "compare.raw.menu.ai": "選んだ文字を正規表現で消す…",
+        "compare.raw.menu.description": "選んだ部分を、同じ形の値なら同じ文字になるように置き換えたい",
+        # 単純比較のタブの右クリックに足した項目(REQ-366 / ADR-0244 決定1・2)。式・行の文字は入れない
+        "compare.raw.menu.replace": "選んだ文字をそのまま置き換えのルールにする",
+        "compare.raw.menu.digits": "選んだ文字の数字を \\d+ にして置き換えのルールにする",
+        "compare.raw.menu.ignore": "この行を無視する行のルールにする",
+        "compare.raw.menu.rules": "この行に効いているルールを見る",
+        "compare.raw.menu.ask": "この差分について AI に質問する",
+        "compare.raw.line_rules.title": "この行に効いているルール",
+        # 構造化比較のタブ・show の表・コマンドの組の一覧の右クリックに足した項目(REQ-367 / ADR-0244 決定1・3)。{column}・{n} は画面が直す
+        "compare.structured.menu.source": "元の行を単純比較のタブで見る",
+        "compare.structured.menu.skip_column": "この列をこの窓だけ比べない: {column}",
+        "compare.structured.menu.not_found": "元の行が見つかりません",
+        "compare.structured.menu.skip_duplicate": "その列はもう比べない列に入っています",
+        "compare.structured.menu.skip_full": "比べない列は 20 個までです",
+        "compare.skip_columns.title": "比べない列",
+        "compare.skip_columns.note": "show の表の比較だけに効きます。この窓だけの設定で、いつも効く設定には足しません",
+        "compare.skip_columns.none": "なし",
+        "compare.skip_columns.remove": "外す",
+        "compare.skip_columns.remove_label": "外す: {column}",
+        "compare.multi.menu.exclude": "この区間を比べる対象から外す",
+        "compare.multi.excluded.title": "外した区間 {n}",
+        "compare.multi.excluded.restore": "戻す",
+        "compare.multi.excluded.restore_label": "戻す: {name}",
     }
 )
 
@@ -4019,11 +4228,11 @@ SM_PLATFORM_UNSPECIFIED = "Cisco 系・Arista(指定なし)"
 SM_PASTED_NAME = {"before": "貼り付け(変更前)", "after": "貼り付け(変更後)"}
 # 進捗の工程名の表示(core の STAGES と同じ並び)
 SM_STAGE_LABEL = {
-    "split": "区間を切り分けています",
-    "select": "区間を選んでいます",
+    "split": "ログをコマンドごとに分けています",
+    "select": "比べる区間を選んでいます",
     "detect_kind": "入力の種類を判定しています",
     "compare": "比較しています",
-    "safety_checks": "安全網を確認しています",
+    "safety_checks": "見落としのおそれを確かめています",
     "llm": "AI 解析をしています",
     "done": "表示しています",
 }
@@ -4032,7 +4241,7 @@ SM_UNKNOWN_COMMAND = "(コマンド不明)"
 SM_WHOLE_ROW = "(行全体)"
 SM_NO_INPUT = "未選択"
 SM_CANCELLED = "中止しました"
-SM_STALE_RESULT = "入力か設定を変えました。表示中の結果は前の入力のものです。保存するには、もう一度比較してください"
+SM_STALE_RESULT = "入力か比較の設定を変えました。表示中の結果は前の比較のものです。保存するには、もう一度比較してください"
 # 比較の設定の要約で、config の機種が「指定なし」のときの短い名前と、つなぎの印
 SM_DEFAULT_PLATFORM_SHORT = "Cisco 系"
 SM_SUMMARY_SEPARATOR = "・"
@@ -4100,6 +4309,16 @@ def sm_show_unexplained(count: int) -> str:
     return f"表に出ない行も変わっています（{count} 行）。単純比較のタブも見てください"
 
 
+def sm_show_replaced_same(count: int) -> str:
+    """表で比べたとき、置き換えで同じとみなした値の数。構造化のタブの注記に 1 行足す(ADR-0239 決定 4)。"""
+    return f"置き換えで同じとみなした値: {count} 個"
+
+
+def sm_show_skipped_columns(names: list[str]) -> str:
+    """表で比べたとき、この窓だけの設定で比べなかった列。構造化のタブの注記に 1 行足す(REQ-367)。"""
+    return f"比べなかった列: {', '.join(names)}"
+
+
 def sm_select_segment_prompt(side_labels: list[str]) -> str:
     """区間が複数ある側の名前(変更前・変更後)を並べた、区間を選ぶ案内。"""
     return f"{'・'.join(side_labels)}に区間が複数あります。比較する区間を選んで、もう一度比較してください"
@@ -4143,17 +4362,18 @@ CLI_HELP = {
     "compare.mode": "比較方式(既定: both)",
     "compare.kind": "入力の種類。auto は内容から判定する(既定: config)",
     "compare.platform": (
-        "config では、既定でないパーサーの系統を選ぶ。fujitsu_sir を指定すると平坦 config のパーサー、"
-        "fortinet を指定すると FortiGate のパーサー、yamaha を指定するとヤマハ RTX のパーサー、juniper_junos を指定すると Juniper Junos のパーサー、paloalto_panos を指定すると Palo Alto PAN-OS のパーサー、checkpoint_gaia を指定すると Check Point Gaia のパーサー、f5_bigip を指定すると F5 BIG-IP のパーサーを使う"
-        "(--show-command は不要。省略や他の名前は Cisco 系で、指定は要らない)。"
-        "show では、機種を ntc-templates の platform 名で指定する(例: cisco_ios)。--show-command と一緒に指定する。"
-        "auto は config の中身から機種を決める(--show-command は不要。show では機種なしの単純比較になる)"
+        "config では、読み方（パーサー）の系統を選ぶ（既定は Cisco 系。下にない名前も Cisco 系）。"
+        "使える値: fujitsu_sir（平坦 config）、fortinet（FortiGate）、yamaha（ヤマハ RTX）、juniper_junos（Juniper Junos）、"
+        "paloalto_panos（Palo Alto PAN-OS）、checkpoint_gaia（Check Point Gaia）、f5_bigip（F5 BIG-IP）、"
+        "auto（config の中身から機種を決める。show では機種なしの単純比較になる）。"
+        "config では --show-command は要らない。"
+        "show を表で比べるときは、ntc-templates の機種の名前（例 cisco_ios）を --show-command と一緒に指定する。機器の型番ではない"
     ),
     "compare.show_command": "show のコマンド(例: 'show ip interface brief')",
-    "compare.before_command": "変更前の区間を、コマンドの原文の部分一致で選ぶ",
-    "compare.before_segment": "変更前の区間を、順番(1始まり)で選ぶ",
-    "compare.after_command": "変更後の区間を、コマンドの原文の部分一致で選ぶ",
-    "compare.after_segment": "変更後の区間を、順番(1始まり)で選ぶ",
+    "compare.before_command": "変更前の区間を、コマンドの文字の一部で選ぶ",
+    "compare.before_segment": "変更前の区間を、一覧の番号（1 から）で選ぶ",
+    "compare.after_command": "変更後の区間を、コマンドの文字の一部で選ぶ",
+    "compare.after_segment": "変更後の区間を、一覧の番号（1 から）で選ぶ",
     "compare.all_segments": (
         "両側の区間をコマンドで組にして全部比べる。設定のコマンド(running-config など)の組は config、"
         "ほかは show として比べ、--kind はコマンドが分からない組にだけ効く。"
@@ -4166,7 +4386,7 @@ CLI_HELP = {
         "--all-segments で、全部の組で AI に送る差分の合計の上限。超えたら1件も送らない。1 以上"
         "(既定: 利用者ごとの設定ファイル config.toml の llm.max_total_diffs、無ければ {default})"
     ),
-    "compare.prompt": "プロンプト文字列(自己校正を上書きする。両側に適用)",
+    "compare.prompt": "端末ログを分けるのに使うプロンプトの文字。自動の見分けより先に使い、変更前と変更後の両方に当てる",
     "compare.rules": (
         "正規化ルールのファイル。省略すると同梱の機種のルールを使う(--platform fortinet の config では、"
         "ENC の付く値を比較対象外にするルールなど2つが既定で効き、外した件数を結果に出す)。"
@@ -4175,7 +4395,7 @@ CLI_HELP = {
     "compare.enable_rule": "有効にするルール ID(繰り返し可)。指定すると既定で有効なルールは使わず、ここに書いた ID だけを使う",
     "compare.save": "比較結果を JSON で保存する。既存のディレクトリなら名前を自動で付ける。上書きはしない(既定: 保存しない)",
     "compare.llm": "差分を AI に送り、意味の説明を注釈として付ける(認証情報は伏せる。差分は変わらない)",
-    "compare.llm_dry_run": "AI に送る内容(マスク後)と、送らない行の形を出す。送信はしない",
+    "compare.llm_dry_run": "AI に送る内容（伏せた後）と、送らない行の形を出す。AI には送らない",
     "compare.llm_max_diffs": (
         "AI に送る差分の件数の上限。1 以上"
         "(既定: 利用者ごとの設定ファイル config.toml の llm.max_diffs、無ければ {default})。無制限の指定は無い"
@@ -4323,13 +4543,13 @@ CLI_BATCH_HELP = {
     "output": "JSON Lines の出力先(既定: 標準出力)。既にあるファイルは上書きしない",
     "summary": "サマリを JSON で書く(終了コードを含む)。既にあるファイルは上書きしない",
     "quiet": "標準エラーへのサマリの表示を抑える",
-    "dry_run": "解釈して比較の予定を一覧に出すだけ。比較しない(終了コード 0)",
-    "save": "各 job の結果を、このディレクトリに1件1ファイルで保存する(既定: 保存しない)",
-    "pair_by_name": "直下のファイル名が完全一致するものを対にし、一覧を出す(比較しない)。機種は組ごとに中身から自動で見分けます（--write-manifest で書いたマニフェストの platform を直せば、決めた機種で比べられます）",
+    "dry_run": "組のファイルを読んで、比べる組の一覧を出すだけ（比べない。終了コード 0）",
+    "save": "組ごとの結果を、組ごとに 1 つのファイルに保存する（保存先はこのフォルダ。既定: 保存しない）",
+    "pair_by_name": "各フォルダの直下で、ファイル名（拡張子を含む）が同じものを組にして一覧に出す（比較しない）。機種は組ごとに中身から自動で見分けます（--write-manifest で書いた組のファイルの platform を直せば、決めた機種で比べられます）",
     "confirm": "--pair-by-name の対で比較を実行する。--llm では、要約を確かめた後に AI への送信を実行する",
     "write_manifest": "--pair-by-name の対を組のファイルとして書いて終わる",
     "llm": "各組の差分を AI に送り、注釈を付ける。--confirm が無ければ、送る内容の要約を出すだけで送らない",
-    "llm_dry_run": "AI に送る内容(マスク後)と、送る前の要約を出す。送信はしない",
+    "llm_dry_run": "AI に送る内容（伏せた後）の要約と、送らない行の形を出す。AI には送らない",
     "llm_max_diffs": "1組あたり AI に送る差分の件数の上限。1 以上(既定: 利用者ごとの設定ファイル config.toml の llm.max_diffs、無ければ {default})",
     "llm_max_total_diffs": "全組で AI に送る差分の合計の上限。超えたら1件も送らない。1 以上(既定: 利用者ごとの設定ファイル config.toml の llm.max_total_diffs、無ければ {default})",
 }
@@ -4345,7 +4565,7 @@ CLI_BATCH_ERR_TOTAL_MIN = "--llm-max-total-diffs は 1 以上にしてくださ�
 CLI_BATCH_ERR_LLM_ONLY_COMPARING = "--llm と --llm-dry-run は比較を実行するときだけ使えます(--dry-run・--write-manifest とは一緒に使えません)"
 CLI_BATCH_ERR_SAME_PATH = "--output と --summary には別のパスを指定してください"
 CLI_BATCH_NO_PAIRS = "対になったファイルがありません"
-CLI_BATCH_PAIR_NOT_RUN = "比較は実行していません。この対で実行するには --confirm、組のファイルとして保存するには --write-manifest PATH を付けてください"
+CLI_BATCH_PAIR_NOT_RUN = "比較は実行していません。この組で実行するには --confirm、組のファイルとして保存するには --write-manifest PATH を付けてください"
 CLI_BATCH_SAVE_STOPPED = "中断したため保存していません"
 CLI_BATCH_NONE = "(なし)"
 
@@ -4362,7 +4582,7 @@ def cli_batch_err_path_needed(name: str) -> str:
 
 def cli_batch_err_save_dir(path: str) -> str:
     """--save のディレクトリが無いときの誤り。"""
-    return f"--save {path}: 既存のディレクトリを指定してください(自動では作りません)"
+    return f"--save {path}: 保存先のフォルダがありません。今あるフォルダを指定してください（自動では作りません）"
 
 
 def cli_batch_err_exists(name: str, path: str) -> str:
@@ -4424,7 +4644,7 @@ CLI_RENDER_NO_DIFF = "差分なし"
 # 構造化比較の値が無い(足した行の変更前など。REQ-276)
 STRUCTURED_VALUE_NOT_SET = "（未設定）"
 CLI_RENDER_NONE = "なし"
-CLI_RENDER_NO_PROMPT = "なし(切り分けなし)"
+CLI_RENDER_NO_PROMPT = "なし（プロンプトが見つからず、分けていません）"
 CLI_RENDER_UNKNOWN_COMMAND = "(コマンド不明)"
 CLI_RENDER_UNPAIRED_HEAD = "=== 相手なし ==="
 CLI_RENDER_ERROR_OUTPUT_HEAD = "=== エラーの出力（比べていません） ==="
@@ -4448,12 +4668,22 @@ def cli_render_applied(before: bool, rule_id: str, count: int) -> str:
 
 def cli_render_show_fallback(reason: str) -> str:
     """show の比較を raw 比較に切り替えたとき。"""
-    return f"raw 比較にフォールバックしました: {reason}"
+    return f"表で比べられないため、単純比較で出しています: {reason}"
 
 
 def cli_render_show_unexplained(count: int) -> str:
     """show を表で比べたあと、単純比較にだけ出る行も変わったとき(ADR-0200)。"""
     return f"表に出ない行も変わった（{count} 行）"
+
+
+def cli_render_show_replaced_same(count: int) -> str:
+    """表で比べたとき、置き換えで同じとみなした値の数(ADR-0239 決定 4)。"""
+    return f"置き換えで同じとみなした値: {count} 個"
+
+
+def cli_render_show_skipped_columns(names: list[str]) -> str:
+    """表で比べたとき、この窓だけの設定で比べなかった列(REQ-367)。"""
+    return f"比べなかった列: {', '.join(names)}"
 
 
 def cli_render_split_head(label: str, name: str, prompt: str, source: str) -> str:
@@ -4468,12 +4698,12 @@ def cli_render_segment_line(mark: str, number: int, command: str, line_count: in
 
 def cli_render_preamble(text: str) -> str:
     """区間の前置きの行。"""
-    return f"      前置き: {text}"
+    return f"      前置き（最初のプロンプトより前の行）: {text}"
 
 
 def cli_render_select(label: str, count: int) -> str:
     """区間が複数ある側の案内。label は変更前・変更後。"""
-    return f"{label}は {count} 区間あります。選択してください:"
+    return f"{label}は {count} 区間あります。比べる区間を --before-segment・--after-segment などで選んでください:"
 
 
 def cli_render_pair_head(label: str, before_number: int, after_number: int) -> str:
@@ -4509,8 +4739,8 @@ LLMP_ENV_SUFFIX_RULE = "は英大文字・数字・_ の 1〜40 文字にして�
 
 LLMP_ERRORS = {
     # ファイルを読む・書く(プロンプトのプロファイル・まとめたファイル・設定のファイルとも共通)
-    "unreadable": "{path}: 読めません ({reason})",
-    "not_utf8": "{path}: UTF-8 として読めません",
+    "unreadable": "{path}: 読めません（{reason}）",
+    "not_utf8": "{path}: UTF-8 で読めません。ファイルの文字コードを確かめてください",
     "not_json": "{path}: JSON として読めません",
     "unwritable": "{path}: 書けません ({reason})",
     "top_not_object": "{path}: 一番外は表(オブジェクト)にしてください",
@@ -4657,10 +4887,10 @@ STORE_TEXTS = {
     "unread_sides_mismatch": "unread_sides は、入力を読めなかった結果(error.stage が read_input)の error.detail.sides と一致させてください(unread_sides: {unread}、detail.sides: {declared})",
     "saved_at_timezone": "saved_at はタイムゾーン付きの日時にしてください",
     "exists": "{target}: 既にあります。上書きしません",
-    "no_folder": "{target}: 保存先のフォルダがありません(自動では作りません)",
+    "no_folder": "{target}: 保存先のフォルダがありません。今あるフォルダを指定してください（自動では作りません）",
     "cannot_write": "{target}: 書けません ({reason})",
-    "not_utf8": "{path}: UTF-8 として読めません",
-    "cannot_read": "{path}: 読めません ({reason})",
+    "not_utf8": "{path}: UTF-8 で読めません。ファイルの文字コードを確かめてください",
+    "cannot_read": "{path}: 読めません（{reason}）",
     "not_json": "{path}: JSON として読めません: {error}",
     "file_not_object": "保存ファイルの最上位がオブジェクトではありません",
     "file_missing_items": "保存ファイルに項目がありません: {names}",
@@ -4709,15 +4939,15 @@ UPDATE_TEXTS = {
 # --- 前提のファイル(premise.py)の誤りの文 ---
 PREMISE_TEXTS = {
     "too_long": "{path}: 前提は {limit} 文字までです",
-    "cannot_read": "{path}: 読めません ({reason})",
-    "not_utf8": "{path}: UTF-8 として読めません",
+    "cannot_read": "{path}: 読めません（{reason}）",
+    "not_utf8": "{path}: UTF-8 で読めません。ファイルの文字コードを確かめてください",
     "cannot_write": "{path}: 書けません ({reason})",
 }
 
 # --- 単純比較の既定の設定のファイル(raw_settings.py)の誤りの文 ---
 RAWSET_TEXTS = {
-    "cannot_read": "{path}: 読めません ({reason})",
-    "not_utf8": "{path}: UTF-8 として読めません",
+    "cannot_read": "{path}: 読めません（{reason}）",
+    "not_utf8": "{path}: UTF-8 で読めません。ファイルの文字コードを確かめてください",
     "not_json": "{path}: JSON として読めません",
     "not_object": "{path}: 一番外は表(オブジェクト)にしてください",
     "schema_version": "{path}: schema_version は {version} にしてください",
@@ -4732,19 +4962,19 @@ RAWSET_TEXTS = {
 # --- 一括比較の入出力(batch_io/)の文 ---
 BATCHIO_SIDE_LABEL = {"before": "変更前", "after": "変更後"}
 BATCHIO_TEXTS = {
-    "cannot_read_input": "{label}: {path}: 読めません ({reason})",
-    "not_utf8": "UTF-8 として読めません",
-    "cannot_read": "読めません ({reason})",
+    "cannot_read_input": "{label}: {path}: 読めません（{reason}）",
+    "not_utf8": "UTF-8 で読めません。ファイルの文字コードを確かめてください",
+    "cannot_read": "読めません（{reason}）",
     "not_yaml": "YAML として読めません: {error}",
-    "rules_not_utf8": "正規化ルールのファイルを UTF-8 として読めません",
-    "rules_cannot_read": "正規化ルールのファイルを読めません ({reason})",
+    "rules_not_utf8": "正規化ルールのファイルを UTF-8 で読めません。ファイルの文字コードを確かめてください",
+    "rules_cannot_read": "正規化ルールのファイルを読めません（{reason}）",
     "manifest_exists": "{target}: 既にあります。上書きしません",
-    "manifest_no_folder": "{target}: 書き出し先のフォルダがありません(自動では作りません)",
+    "manifest_no_folder": "{target}: 書き出し先のフォルダがありません。今あるフォルダを指定してください（自動では作りません）",
     "manifest_cannot_write": "{target}: 書けません ({reason})",
     "no_directory": "{folder}: ディレクトリがありません",
-    "folder_cannot_read": "{folder}: 読めません ({reason})",
+    "folder_cannot_read": "{folder}: 読めません（{reason}）",
     "results_exists": "{target}: 既にあります。上書きしません",
-    "results_no_folder": "{target}: 書き出し先のフォルダがありません(自動では作りません)",
+    "results_no_folder": "{target}: 書き出し先のフォルダがありません。今あるフォルダを指定してください（自動では作りません）",
     "results_cannot_write": "{target}: 書けません ({reason})",
 }
 
@@ -4766,6 +4996,7 @@ SMODEL_TEXTS = {
     "raw_form_shape": "単純比較の設定の形が違います",
     "raw_ignore_shape": "無視する行の形が違います",
     "raw_replace_shape": "置き換えの形が違います",
+    "raw_disabled_shape": "無効のルールの形が違います",
     "raw_whitespace_shape": "空白の違いの形が違います",
     "raw_blank_case_shape": "空行・大文字と小文字の形が違います",
     "raw_moves_shape": "行の移動の形が違います",
@@ -4828,6 +5059,66 @@ def device_split_not_opened(folder: Path) -> str:
 
 
 GUI_WEB_TEXTS.update({"compare.split_devices": DEVICE_SPLIT_BUTTON})
+
+
+# --- 1 つのログを機器ごと・コマンドごとに分けて見る「ログを見る」の窓(ADR-0248 決定2 / REQ-377) ---
+COMPARE_BUTTON_LOG_VIEW = "ログを見る…"
+LOG_VIEW_TITLE = "DriftPilot — ログを見る"
+LOG_VIEW_NO_DEVICE = "（機器の名前なし）"  # 機器が 1 台も見つからなかったときの全体の 1 台の名前
+LOG_VIEW_NO_PROMPT = "区切りなし"  # プロンプトが見つからず、全体が 1 区間のとき
+LOG_VIEW_PASTED_NAME = "貼り付け"  # 貼り付けた文の表示名
+LOG_VIEW_READ_FAILED = "ファイルを読めませんでした。表示は変えていません"
+LOG_VIEW_DROP_ONE_TITLE = "ドロップしたファイル"
+LOG_VIEW_DROP_ONE_ONLY = "ファイルは 1 つだけ読みます。最初のファイルを読みました。"
+LOG_VIEW_SPLIT_TITLE = "機器ごとのファイルに書き出す"
+
+
+def log_view_summary(n: int, m: int) -> str:
+    """上の行の「機器 {n} 台・{m} 行」(行の数はファイル全体)。"""
+    return f"機器 {n} 台・{m} 行"
+
+
+def log_view_loaded(name: str) -> str:
+    """窓の下の状態の行: 読めたとき。"""
+    return f"{name} を読みました"
+
+
+def log_view_split_done(folder: Path, n: int) -> str:
+    """書き終えたときの、窓の下の知らせ。後ろに社外秘の注意を付ける。"""
+    return f"機器ごとに分けました: {folder}（{n} 台）。分けたファイルは{save_caution()}"
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "compare.button.log_view": COMPARE_BUTTON_LOG_VIEW,
+        "log_view.button.open": "開く…",
+        "log_view.button.paste": "貼り付け…",
+        "log_view.paste.title": "貼り付け",
+        "log_view.paste.prompt": "ログを貼り付けてください。",
+        "log_view.file": "ファイル",
+        "log_view.empty": "ファイルをドロップするか、「開く…」「貼り付け…」で入れてください。",
+        "log_view.devices.title": "機器",
+        "log_view.devices.col.host": "ホスト名",
+        "log_view.devices.col.commands": "コマンド",
+        "log_view.commands.col.command": "コマンド",
+        "log_view.commands.col.lines": "行",
+        "log_view.commands.col.mark": "印",
+        "log_view.output.col.number": "行",
+        "log_view.output.col.text": "出力",
+        "log_view.mark.error": "エラーの出力",
+        "log_view.mark.preamble": "前置き",
+        "log_view.find.label": "探す",
+        "log_view.find.prev": "前へ",
+        "log_view.find.next": "次へ",
+        "log_view.find.count": "{current} / {total} 件",
+        "log_view.find.none": "見つかりません",
+        "log_view.copy.output": "出力をコピー",
+        "log_view.copy.with_command": "コマンドの行も付けてコピー",
+        "log_view.split.label": "一覧と出力の境目",
+        "log_view.button.export": "機器ごとのファイルに書き出す…",
+        "log_view.status.loading": "読み込んでいます…",
+    }
+)
 
 
 # --- AI の欄の音声入力(PartsPilot の voice-serve を呼ぶ。ADR-0233 / REQ-341) ---

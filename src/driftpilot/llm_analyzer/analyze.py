@@ -99,6 +99,11 @@ def _analyze(
             # 構造化差分をそのカテゴリだけにする(diff_total も絞った後の数になる。正規化した行は呼ぶ側が今と同じ入力で渡す)
             kept = [d for d in structured.diffs if d["category"] == request.category]
             structured = dataclasses.replace(structured, diffs=kept)
+        if request.raw_lines is not None:
+            # 行の差分をその 1 行だけにする(REQ-366 §6)。伏せる判定と前後の文脈は、この後の build_payload が今と同じに付ける
+            raw = _only_line(raw, request.raw_lines)
+            if show is not None and show.raw is not None:
+                show = dataclasses.replace(show, raw=_only_line(show.raw, request.raw_lines))
     else:
         template = template_for(request.prompt_template, "show" if show_compare else None)
         version = prompt_version_of(template)
@@ -173,6 +178,20 @@ def _analyze(
     if question is not None:
         prompt = with_question(prompt, question, _question_target_name(request, masker))
     return _send(request, prompt, built, clock, spans)
+
+
+def _only_line(raw: RawCompareResult | None, lines: tuple[int | None, int | None]) -> RawCompareResult | None:
+    """行の差分を、指した 1 行(変更前の行番号の削除と、変更後の行番号の追加)のものだけにする(REQ-366 §6)。"""
+    if raw is None:
+        return None
+    before_no, after_no = lines
+    kept = [
+        d
+        for d in raw.diffs
+        if (d["op"] == "removed" and before_no is not None and d["before_line_no"] == before_no)
+        or (d["op"] == "added" and after_no is not None and d["after_line_no"] == after_no)
+    ]
+    return dataclasses.replace(raw, diffs=kept)
 
 
 def _question_target_name(request: LlmRequest, masker: Masker) -> str:

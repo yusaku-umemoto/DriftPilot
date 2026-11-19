@@ -6,11 +6,13 @@
 """
 
 import copy
+import hashlib
 import json
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,6 +30,7 @@ from driftpilot.core import (
     CONFIG_PLATFORMS,
     DEFAULT_MAX_TOTAL_DIFFS,
     DEFAULT_RAW_OPTIONS,
+    MAX_PATTERNS,
     RAW_CONTEXT_DEFAULT,
     RAW_CONTEXT_MAX,
     SHOW_OUTSIDE_TABLE_REASONS,
@@ -39,6 +42,7 @@ from driftpilot.core import (
     MultiCompareOutcome,
     MultiStatus,
     PairResult,
+    RawOptionProblem,
     RawOptions,
     RawOptionsRecord,
     Replacement,
@@ -47,11 +51,19 @@ from driftpilot.core import (
     Unpaired,
     analyze_all,
     analyze_compared,
+    NO_DISABLED,
+    RawDisabled,
     check_raw_options,
+    enabled_options,
+    prune_disabled,
     compare_all,
+    exclude_pair,
+    is_error_output,
+    exclude_segment,
     multi_overall_status,
     options_to_plain,
     pair_by_hand,
+    restore_excluded,
     partner_candidates,
     run_compare,
     wants_all,
@@ -73,10 +85,18 @@ from driftpilot.llm_analyzer import (
 from driftpilot.llm_analyzer.answer_format import format_answer, plain_answer
 # 人に渡す出力の伏せる判定(ADR-0156 決定2。AI に送るときと同じ判定の道)
 from driftpilot.llm_analyzer.redact import RedactedResult, RedactError, redact_result, redact_text  # noqa: F401 - RedactError は窓が読む
-from driftpilot.llm_settings import LlmSettings, SettingsError, current_premise
+from driftpilot.llm_settings import LlmSettings, SettingsError, current_premise, load_settings, premise_text_problem
 from driftpilot.llm_settings import build_request as build_llm_request
 from driftpilot.messages import (
     SMODEL_TEXTS,
+    RAW_RULE_KIND_TEXT,
+    RAW_RULE_NO_HITS,
+    RAW_LINE_RULES_NONE,
+    raw_line_rules_side,
+    raw_add_confirm_line,
+    raw_rule_hits_text,
+    raw_rules_title,
+    raw_summary_with_disabled,
     AUTO_PLATFORM_LABEL,
     DEVICE_SPLIT_BUSY,
     DEVICE_SPLIT_NO_DEVICE,
@@ -94,6 +114,8 @@ from driftpilot.messages import (
     EXPORT_CHOICE_DIFFS,
     EXPORT_CHOICE_HTML,
     EXPORT_CHOICE_PAIRS,
+    EXPORT_RAW_RULES_OTHERS,
+    EXPORT_RAW_WITHHELD,
     EXPORT_TITLE_COMPARE,
     MULTI_ERROR_OUTPUT,
     MULTI_SINGLE,
@@ -161,6 +183,7 @@ from driftpilot.messages import (
     raw_move_mark,
     raw_moves_part,
     raw_option_problem_lines,
+    raw_options_parts,
     raw_options_summary_text,
     raw_set_aside_line,
     route_detail_note,
@@ -180,6 +203,8 @@ from driftpilot.messages import (
     sm_preview_summary,
     sm_select_segment_prompt,
     sm_show_fell_back,
+    sm_show_replaced_same,
+    sm_show_skipped_columns,
     sm_show_unexplained,
     sm_unparsed_pair,
     status_breakdown,
@@ -191,8 +216,16 @@ from driftpilot.messages import (
     unreadable_utf8,
     warning_message,
 )
-from driftpilot.raw_settings import load_raw_defaults, load_raw_settings, raw_settings_path
-from driftpilot.report_output import Report, ReportPair, render_diffs_csv, render_html, render_pairs_csv
+from driftpilot.raw_settings import RawSettings, load_raw_defaults, load_raw_settings, raw_settings_path, save_raw_defaults
+from driftpilot.report_output import (
+    Report,
+    ReportPair,
+    ReportRawRule,
+    ReportRawRules,
+    render_diffs_csv,
+    render_html,
+    render_pairs_csv,
+)
 from driftpilot.segmentation.input_forms import InputDecodeError, InputNote, normalize_text, read_config_input
 from driftpilot.storage import (
     JOB_KEY,
@@ -319,6 +352,8 @@ class ScreenInput:
     llm: bool = False
     # 単純比較の設定(ADR-0166)。変えると「入力が変わった」とみなす(is_current は == で比べる。frozen でタプルのため)
     raw_options: RawOptions = DEFAULT_RAW_OPTIONS
+    # show の表の比較で値の違いを比べない列(この窓だけの設定。大文字の名前の並び。REQ-367)
+    skip_columns: tuple[str, ...] = ()
 
     def side(self, side: Side) -> SideSource:
         return self.before if side == "before" else self.after
@@ -371,6 +406,7 @@ def build_request(inp: ScreenInput) -> CompareRequest:
         before_selection=SideSelection(number=inp.before_segment),
         after_selection=SideSelection(number=inp.after_segment),
         raw_options=inp.raw_options,
+        skip_columns=inp.skip_columns,
     )
 
 
@@ -570,6 +606,11 @@ class OutcomeView:
     raw_settings_saved: str | None = None
     # 1組を比べて結果を開いたときに選ぶタブ(structured・raw。show の both・raw だけ。ほかは None=今のタブのまま。REQ-282)。wx は読まない
     open_tab: str | None = None
+    # 構造化比較の行ごとの、show の表の変更の行の変わった列の名前(ほかの行は空。structured_rows と同じ数・同じ並び。REQ-367 §3)
+    structured_columns: list[list[str]] = field(default_factory=list)
+    # 構造化比較の行の番号から、元の行(raw_rows の番号)を探す関数(REQ-367 §2)。単純比較の結果が無いとき(比較方式が構造化だけ)は None。
+    # 探すのは呼んだときだけ(行ごとには探さない)。結果の比べ方には入れない
+    find_source: Callable[[int], int | None] | None = field(default=None, compare=False)
 
 
 def answer_blocks(text: str | None) -> list[dict[str, Any]] | None:
@@ -676,6 +717,20 @@ def show_open_tab(outcome: CompareOutcome) -> str | None:
 
 
 def _structured_note(outcome: CompareOutcome) -> str | None:
+    """構造化のタブの注記。show を表で比べて置き換えで同じとみなした値があれば、その数の 1 行を次の行に足す(ADR-0239 決定 4)。"""
+    note = _structured_note_base(outcome)
+    show = outcome.show
+    if show is not None and show.method in ("structured", "both") and show.replaced_same >= 1:
+        line = sm_show_replaced_same(show.replaced_same)
+        note = line if note is None else f"{note}\n{line}"
+    if show is not None and show.method in ("structured", "both") and show.skipped_columns:
+        # 比べない列(この窓だけの設定)が結果の表にあるときだけ。置き換えの数の 1 行の次に置く(REQ-367)
+        line = sm_show_skipped_columns(show.skipped_columns)
+        note = line if note is None else f"{note}\n{line}"
+    return note
+
+
+def _structured_note_base(outcome: CompareOutcome) -> str | None:
     if outcome.kind is None:
         return None
     if outcome.mode == "raw":
@@ -1043,7 +1098,11 @@ def view_outcome(outcome: CompareOutcome) -> OutcomeView:
     llm = outcome.llm
     # LLM を頼んだときだけ欄を出す(CLI の text と同じ条件)
     shown = llm is not None and llm.reason != "disabled"
+    raw_rows = _raw_rows(outcome)
+    has_raw = outcome.raw is not None or (outcome.show is not None and outcome.show.raw is not None)
     return OutcomeView(
+        structured_columns=structured_columns(outcome),
+        find_source=partial(source_raw_row, outcome, raw_rows) if has_raw else None,
         status=outcome.status,
         status_text=_status_text(outcome, selection),
         status_text_web=_status_text_web(outcome, selection, counts),
@@ -1052,7 +1111,7 @@ def view_outcome(outcome: CompareOutcome) -> OutcomeView:
         titles=tab_titles(counts),
         structured_rows=_structured_rows(outcome),
         structured_note=_structured_note(outcome),
-        raw_rows=_raw_rows(outcome),
+        raw_rows=raw_rows,
         raw_note=_raw_note(outcome),
         unparsed_rows=unparsed_rows,
         unparsed_note=unparsed_note,
@@ -1104,12 +1163,14 @@ def web_settings_summary(
     command: str,
     outcome: CompareOutcome | None = None,
     raw_options: RawOptions | None = None,
+    raw_disabled_count: int = 0,
 ) -> str:
     """pywebview の比較の画面の設定の要約(_web_settings_summary)。raw_options が既定でなければ、単純比較の設定の要約を
-    「・」でつないで後ろに足す(ADR-0166。既定・None なら今と同じ文)。
+    「・」でつないで後ろに足す(ADR-0166。既定・None なら今と同じ文)。raw_disabled_count(REQ-359)は無効のルールの数で、
+    1 以上なら要約に「（無効 M）」を足す(有効なルールもほかの設定も既定でも出す)。
     """
     text = _web_settings_summary(mode, kind, index, typed, command, outcome)
-    summary = raw_options_summary(raw_options) if raw_options is not None else None
+    summary = raw_options_summary(raw_options, raw_disabled_count) if raw_options is not None else None
     return text if summary is None else SUMMARY_SEPARATOR.join([text, summary])
 
 
@@ -1183,13 +1244,20 @@ _RAW_FORM_KEYS = (
     "context_lines",
     "detect_moves",
     "algorithm",
+    # REQ-359: 無効のルール({"ignore_lines": [式…], "replacements": [[式, 置き換える文字]…]})
+    "disabled",
 )
+# 無効のルールの欄の長さの上限(形の確かめ。無視する行は式の数の上限 MAX_PATTERNS を超える欄の値も形としては受け、中身で捨てる)
+MAX_RAW_FORM_DISABLED_ROWS = 100
 
 
 @dataclass(frozen=True)
 class RawForm:
     """画面から来た単純比較の設定の欄の値を読んだもの。options は誤りがあれば None、problems は画面に出す文。
 
+    options は比べるときの設定(無効のルールを除いたもの)。REQ-359: all_options は無効のルールも含めた全部のルール(形が読めれば、
+    式に誤りがあっても入る。「効いているルール」の一覧と保存に使う)、disabled は欄の中のルールに当たる無効のルール(欄に無い式・
+    組は捨てた後のもの)。省けば all_options は options、disabled は無し。
     context_lines は「差分のみ表示」の前後の行数(表示だけの値で options には入れない。REQ-228 §2)。読めなければ既定の 3。
     compare_options は、前後の行数の誤りを除いて読めた設定(ほかの欄に誤りがあれば None。省けば options と同じ)。
     前後の行数は表示だけの値なので、比較の窓はこれで自動の比較を始めるかを決める(前後の行数だけを直しても比べ直さない)。
@@ -1199,10 +1267,21 @@ class RawForm:
     problems: list[str]
     context_lines: int = RAW_CONTEXT_DEFAULT
     compare_options: RawOptions | None = None
+    all_options: RawOptions | None = None
+    disabled: RawDisabled = NO_DISABLED
 
     def __post_init__(self) -> None:
         if self.compare_options is None and self.options is not None:
             object.__setattr__(self, "compare_options", self.options)
+        if self.all_options is None and self.options is not None:
+            object.__setattr__(self, "all_options", self.options)
+
+
+def raw_form_from_settings(settings: RawSettings) -> RawForm:
+    """既定のファイル(raw-compare.json)の中身から作る欄の値(全部のルールと無効。比べるときの設定は有効なものだけ)。"""
+    return RawForm(
+        settings.enabled_options(), [], settings.context_lines, all_options=settings.options, disabled=settings.disabled
+    )
 
 
 def read_context_lines(value: object) -> int | None:
@@ -1216,7 +1295,10 @@ def read_raw_form(value: object) -> RawForm:
     """画面の欄の値を読む。形が違えば ValueError(入口は _BadRequest)。中身の誤りは problems に入れ、options を None にする。
 
     形: {"ignore_lines": 改行でつないだ式, "replacements": [[式, 置き換える文字], ...], "whitespace": 文字列,
-    "ignore_blank_lines": 真偽値, "ignore_case": 真偽値, "context_lines": 数, "detect_moves": 真偽値, "algorithm": 文字列}。
+    "ignore_blank_lines": 真偽値, "ignore_case": 真偽値, "context_lines": 数, "detect_moves": 真偽値, "algorithm": 文字列,
+    "disabled": {"ignore_lines": [式, ...], "replacements": [[式, 置き換える文字], ...]}}(REQ-359)。
+    誤りの確かめと重複の確かめは、無効のルールも含めた全部で行う。RawForm.options は無効のルールを除いたもの。
+    disabled の中で今の欄に無い式・組は捨てる(式を書き換えたら新しいルールで有効)。
     無視する行は改行で分け、行の両端の空白を除いて空になった行は捨てる。
     置き換えは式が空の組を捨てる(置き換える文字は空でよい)。誤りの文の「何行目」「何組目」は、画面の欄の行と組の位置。
     前後の行数が整数で 0〜20 でなければ(null も)、problems に RAW_CONTEXT_PROBLEM を入れる(REQ-228 §2)。
@@ -1241,6 +1323,7 @@ def read_raw_form(value: object) -> RawForm:
         raise ValueError(SMODEL_TEXTS["raw_moves_shape"])
     if not isinstance(value["algorithm"], str):
         raise ValueError(SMODEL_TEXTS["raw_algorithm_shape"])
+    off = _read_disabled_form(value["disabled"])
     context = read_context_lines(value["context_lines"])
     ignore_lines: list[str] = []
     ignore_rows: list[int] = []  # 欄の何行目か(1 始まり)
@@ -1265,23 +1348,92 @@ def read_raw_form(value: object) -> RawForm:
         algorithm=value["algorithm"],  # type: ignore[arg-type]  # 値は check_raw_options が確かめる
     )
     problems = check_raw_options(options)
+    # 手で書いた重複(ADR-0236 決定 1。check_raw_options は重複を確かめない)。誤りがある行・組には出さない
+    duplicates = _raw_duplicates(options, problems, ignore_rows, replace_rows)
     context_lines = RAW_CONTEXT_DEFAULT if context is None else context
     context_problems = [RAW_CONTEXT_PROBLEM] if context is None else []
-    if not problems and not context_problems:
-        return RawForm(options, [], context_lines)
-    if not problems:
+    # 無効のルール(REQ-359)。欄に無い式・組は捨てる。誤りの確かめと重複の確かめは、無効のものも含めた全部で済ませてある
+    disabled = prune_disabled(options, off)
+    active = enabled_options(options, disabled)
+    if not problems and not duplicates and not context_problems:
+        return RawForm(active, [], context_lines, all_options=options, disabled=disabled)
+    if not problems and not duplicates:
         # 前後の行数だけの誤り。比べること・保存は止める(options は None)が、比べる設定は読めている
-        return RawForm(None, context_problems, context_lines, options)
+        return RawForm(None, context_problems, context_lines, active, options, disabled)
     rows = {"ignore_lines": ignore_rows, "replacements": replace_rows}
     shown = [
         replace(p, index=rows[p.field][p.index - 1]) if p.index is not None and p.field in rows else p for p in problems
     ]
-    return RawForm(None, [*raw_option_problem_lines(shown), *context_problems], context_lines)
+    if duplicates:
+        # 欄の順(無視する行 → 置き換え → 空白 → 比べ方)のまま、同じ欄の中は行・組の順に並べる(整列は安定)
+        order = {"ignore_lines": 0, "replacements": 1, "whitespace": 2, "algorithm": 3}
+        shown = sorted([*shown, *duplicates], key=lambda p: (order[p.field], p.index or 0))
+    return RawForm(None, [*raw_option_problem_lines(shown), *context_problems], context_lines, None, options, disabled)
+
+
+def _read_disabled_form(value: object) -> RawDisabled:
+    """欄の値の disabled を読む(形の確かめ。形が違えば ValueError)。無視する行の式は両端の空白を除く(欄の読み方と同じ)。
+
+    欄の中のルールに当たるかどうか(prune_disabled)は、ここでは見ない。
+    """
+    if not isinstance(value, dict) or set(value) != {"ignore_lines", "replacements"}:
+        raise ValueError(SMODEL_TEXTS["raw_disabled_shape"])
+    ignore, items = value["ignore_lines"], value["replacements"]
+    if (
+        not isinstance(ignore, list)
+        or not isinstance(items, list)
+        or len(ignore) > MAX_RAW_FORM_DISABLED_ROWS
+        or len(items) > MAX_RAW_FORM_DISABLED_ROWS
+        or not all(isinstance(x, str) for x in ignore)
+        or not all(isinstance(item, list) and len(item) == 2 and all(isinstance(x, str) for x in item) for item in items)
+    ):
+        raise ValueError(SMODEL_TEXTS["raw_disabled_shape"])
+    return RawDisabled(
+        tuple(x.strip() for x in ignore), tuple(Replacement(pattern, text) for pattern, text in items)
+    )
+
+
+def _raw_duplicates(
+    options: RawOptions, problems: list[RawOptionProblem], ignore_rows: list[int], replace_rows: list[int]
+) -> list[RawOptionProblem]:
+    """同じ式の行・組(2 つ目より後)の誤り(kind は duplicate)。index と detail は画面の欄の位置(式の文字は入れない)。
+
+    無視する行は読んだ式(両端の空白を除いた、空でない行)どうし、置き換えは式が空でない組の (式, 置き換える文字) の両方が
+    ちょうど同じものを比べる(式の意味は比べない)。check_raw_options の誤りがある行・組は、最初の位置として覚えることも
+    重複として出すこともしない(1 つの行・組には最初の 1 件)。
+    """
+    bad_ignore = {p.index for p in problems if p.field == "ignore_lines" and p.index is not None}
+    bad_replace = {p.index for p in problems if p.field == "replacements" and p.index is not None}
+    found: list[RawOptionProblem] = []
+    first_ignore: dict[str, int] = {}
+    for i, pattern in enumerate(options.ignore_lines, start=1):
+        if i in bad_ignore:
+            continue
+        if pattern not in first_ignore:
+            first_ignore[pattern] = ignore_rows[i - 1]
+        else:
+            found.append(RawOptionProblem("ignore_lines", ignore_rows[i - 1], "duplicate", str(first_ignore[pattern])))
+    first_replace: dict[tuple[str, str], int] = {}
+    for i, item in enumerate(options.replacements, start=1):
+        if i in bad_replace:
+            continue
+        key = (item.pattern, item.replacement)
+        if key not in first_replace:
+            first_replace[key] = replace_rows[i - 1]
+        else:
+            found.append(RawOptionProblem("replacements", replace_rows[i - 1], "duplicate", str(first_replace[key])))
+    return found
 
 
 
-def raw_form_values(options: RawOptions, context_lines: int = RAW_FOLD_CONTEXT) -> dict[str, Any]:
-    """設定を画面の欄の値(read_raw_form と同じ形)にする。context_lines は前後の行数(表示だけの値)。"""
+def raw_form_values(
+    options: RawOptions, context_lines: int = RAW_FOLD_CONTEXT, disabled: RawDisabled = NO_DISABLED
+) -> dict[str, Any]:
+    """設定を画面の欄の値(read_raw_form と同じ形)にする。context_lines は前後の行数(表示だけの値)。
+
+    options は無効のルールも含めた全部のルール、disabled は無効のルール(REQ-359。options に無いものは入れない)。
+    """
+    off = prune_disabled(options, disabled)
     return {
         "ignore_lines": "\n".join(options.ignore_lines),
         "replacements": [[r.pattern, r.replacement] for r in options.replacements],
@@ -1291,7 +1443,219 @@ def raw_form_values(options: RawOptions, context_lines: int = RAW_FOLD_CONTEXT) 
         "context_lines": context_lines,
         "detect_moves": options.detect_moves,
         "algorithm": options.algorithm,
+        "disabled": {
+            "ignore_lines": list(off.ignore_lines),
+            "replacements": [[r.pattern, r.replacement] for r in off.replacements],
+        },
     }
+
+
+def raw_rule_rows(
+    options: RawOptions | None, disabled: RawDisabled, record: RawOptionsRecord | None
+) -> tuple[list[dict[str, Any]], str | None]:
+    """単純比較のタブの「効いているルール」の一覧の行と見出し(REQ-359 §4)。ルールが 1 つも無ければ ([], None)。
+
+    options は欄の全部のルール(読めなければ None)、disabled は無効のルール、record は表示中の結果の単純比較の記録(無ければ None)。
+    行は無視する行 → 置き換えの順(欄の順)で、{kind: ignore|replace, kind_text, pattern, replacement, enabled, hits}。
+    hits は「変更前 n・変更後 m」。無効のルール・まだ比べていないとき・記録に無いルール・数を持たない古い保存の結果は「—」。
+    当たった行の数は、記録の options の中で同じ式(置き換えは同じ組)のルールを探して、その位置の rule_hits から引く。
+    """
+    if options is None or (not options.ignore_lines and not options.replacements):
+        return [], None
+    off_ignore, off_replace = set(disabled.ignore_lines), set(disabled.replacements)
+    hits = record.rule_hits if record is not None else None
+    recorded_ignore: list[Any] = list(record.options.get("ignore_lines", [])) if record is not None else []
+    recorded_replace: list[tuple[Any, Any]] = (
+        [(r.get("pattern"), r.get("replacement")) for r in record.options.get("replacements", [])]
+        if record is not None
+        else []
+    )
+
+    def hits_text(kind: str, index: int | None) -> str:
+        found = None if hits is None or index is None else hits.get("ignore_lines" if kind == "ignore" else "replacements")
+        if found is None or index >= len(found):  # type: ignore[operator]
+            return RAW_RULE_NO_HITS
+        return raw_rule_hits_text(found[index]["before"], found[index]["after"])  # type: ignore[index]
+
+    rows: list[dict[str, Any]] = []
+    for pattern in options.ignore_lines:
+        enabled = pattern not in off_ignore
+        index = recorded_ignore.index(pattern) if enabled and pattern in recorded_ignore else None
+        rows.append(
+            {
+                "kind": "ignore",
+                "kind_text": RAW_RULE_KIND_TEXT["ignore"],
+                "pattern": pattern,
+                "replacement": "",
+                "enabled": enabled,
+                "hits": hits_text("ignore", index),
+            }
+        )
+    for item in options.replacements:
+        enabled = item not in off_replace
+        pair = (item.pattern, item.replacement)
+        index = recorded_replace.index(pair) if enabled and pair in recorded_replace else None
+        rows.append(
+            {
+                "kind": "replace",
+                "kind_text": RAW_RULE_KIND_TEXT["replace"],
+                "pattern": item.pattern,
+                "replacement": item.replacement,
+                "enabled": enabled,
+                "hits": hits_text("replace", index),
+            }
+        )
+    off_count = sum(1 for row in rows if not row["enabled"])
+    return rows, raw_rules_title(len(rows) - off_count, off_count)
+
+
+def raw_line_rules(rows: Sequence[RawRow], record: RawOptionsRecord | None) -> list[dict[str, Any]]:
+    """単純比較の表の行ごとの「効いているルール」の表示用の値(REQ-366 §5)。当たったルールのある行だけを返す。
+
+    形は [{index, sides: [{title, rules: [{kind, kind_text, pattern, replacement}], none}]}]。kind は ignore か replace(画面が置き換える文字の
+    出し方を決める印。置き換える文字が空の置き換えと無視する行を見分ける)。index は rows の番号、sides はその行にある側
+    (変更前・変更後)だけ。title は「変更前（12 行目）」。当たったルールが無い側は rules が空で、none に理由の文が入る(ほかは None)。
+    ルールの式・置き換える文字は、記録の options(core に渡した有効なルール)の、line_hits の番号の位置から引く。
+    記録が無い・line_hits を持たない古い保存の結果は [] 。
+    """
+    if record is None or record.line_hits is None:
+        return []
+    ignore_lines = record.options.get("ignore_lines", [])
+    replacements = record.options.get("replacements", [])
+    by_side = {
+        side: {hit["line_no"]: hit for hit in record.line_hits.get(side, [])} for side in ("before", "after")  # type: ignore[attr-defined]
+    }
+
+    def rules_of(hit: Any) -> list[dict[str, str]]:
+        found: list[dict[str, str]] = []
+        number = hit["ignore_line"]
+        if number is not None and 1 <= number <= len(ignore_lines):
+            found.append(
+                {"kind": "ignore", "kind_text": RAW_RULE_KIND_TEXT["ignore"], "pattern": ignore_lines[number - 1], "replacement": ""}
+            )
+        for number in hit["replacements"]:
+            if 1 <= number <= len(replacements):
+                item = replacements[number - 1]
+                found.append(
+                    {
+                        "kind": "replace",
+                        "kind_text": RAW_RULE_KIND_TEXT["replace"],
+                        "pattern": item.get("pattern", ""),
+                        "replacement": item.get("replacement", ""),
+                    }
+                )
+        return found
+
+    result: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        sides: list[dict[str, Any]] = []
+        any_rules = False
+        for side, line_no in (("before", row.before_no), ("after", row.after_no)):
+            if line_no is None:
+                continue
+            hit = by_side[side].get(line_no)
+            rules = rules_of(hit) if hit is not None else []
+            any_rules = any_rules or bool(rules)
+            sides.append(
+                {
+                    "title": raw_line_rules_side(side, line_no),
+                    "rules": rules,
+                    "none": None if rules else RAW_LINE_RULES_NONE,
+                }
+            )
+        if any_rules:
+            result.append({"index": index, "sides": sides})
+    return result
+
+
+# --- 保存したルールを開いている窓へ届ける・この窓だけのルールをいつも効く設定に足す(REQ-361 / ADR-0241) ---
+
+RawBaseline = tuple[RawOptions, RawDisabled]  # 「最後に既定を読んだときの値」(全部のルール, 無効のルール)
+
+
+def raw_baseline(settings: RawSettings) -> RawBaseline:
+    """既定のファイルの中身から、「最後に既定を読んだときの値」を作る(無効のルールは今のルールに当たるものだけ)。"""
+    return settings.options, prune_disabled(settings.options, settings.disabled)
+
+
+def raw_typed_differs(form: RawForm, baseline: RawBaseline) -> bool:
+    """欄の今の値が「最後に既定を読んだときの値」と違うか(「直接書いた値あり」)。
+
+    欄の値(read_raw_form で読んだ RawForm)の全部のルールと、欄の中のルールに当たる無効のルールを比べる。前後の行数は表示だけの値
+    なので比べない。欄の値は、空の置き換えの行・無効の並びなど意味が同じでも文字としては違うことがあるので、dict のままは比べない。
+    全部のルールが読めない(None)ときは違うとみなす。
+    """
+    if form.all_options is None:
+        return True
+    return (form.all_options, prune_disabled(form.all_options, form.disabled)) != baseline
+
+
+@dataclass(frozen=True)
+class RawAdditions:
+    """いつも効く設定に足すルール(窓の並びのまま)。"""
+
+    ignore_lines: tuple[str, ...] = ()
+    replacements: tuple[Replacement, ...] = ()
+
+    def count(self) -> int:
+        return len(self.ignore_lines) + len(self.replacements)
+
+
+def raw_additions(window: RawOptions, saved: RawSettings) -> RawAdditions:
+    """窓の有効なルールのうち、既定のファイルの全部のルール(無効も含む)に無いもの。
+
+    無視する行は式で、置き換えは (式, 置き換える文字) で比べる。窓の並びのまま集め、重なりは 1 つにする。
+    """
+    have_ignore, have_replace = set(saved.options.ignore_lines), set(saved.options.replacements)
+    ignore = [p for p in dict.fromkeys(window.ignore_lines) if p not in have_ignore]
+    replacements = [r for r in dict.fromkeys(window.replacements) if r not in have_replace]
+    return RawAdditions(tuple(ignore), tuple(replacements))
+
+
+@dataclass(frozen=True)
+class RawAppended:
+    """append_raw_rules の結果。settings は足した後の既定(上限を超えるなら None)。ignore・replace は足した後の個数と組数。"""
+
+    settings: RawSettings | None
+    ignore: int
+    replace: int
+
+
+def append_raw_rules(saved: RawSettings, additions: RawAdditions) -> RawAppended:
+    """既定のファイルの中身の最後に、足すルールを足す。空白・空行・大文字小文字・移動・比べ方・前後の行数・無効のルールはそのまま。
+
+    足した後に無視する行が MAX_PATTERNS 個、置き換えが MAX_PATTERNS 組を超えるなら、1 つも足さずに settings を None にする
+    (ちょうど MAX_PATTERNS は足せる)。
+    """
+    ignore = (*saved.options.ignore_lines, *additions.ignore_lines)
+    replacements = (*saved.options.replacements, *additions.replacements)
+    if len(ignore) > MAX_PATTERNS or len(replacements) > MAX_PATTERNS:
+        return RawAppended(None, len(ignore), len(replacements))
+    options = replace(saved.options, ignore_lines=ignore, replacements=replacements)
+    return RawAppended(replace(saved, options=options), len(ignore), len(replacements))
+
+
+def raw_defaults_file(
+    *, platform: str | None = None, env: Mapping[str, str] | None = None, home: Path | None = None
+) -> tuple[Path, RawSettings]:
+    """既定のファイル(raw-compare.json)の場所と中身(無効のルールも含めた全部)。読めない・形が違えば SettingsError。
+
+    比較の窓の「いつも効く設定に足す」が、足す前に読み直すために使う(読み書きは screen_model だけが通る)。
+    """
+    path = raw_settings_path(platform=platform, env=env, home=home).absolute()
+    return path, load_raw_settings(path)
+
+
+def write_raw_defaults_file(path: Path, settings: RawSettings) -> None:
+    """既定のファイルを書く(設定の窓の保存と同じ書き方。無効のルール・前後の行数も書く)。書けなければ SettingsError。"""
+    save_raw_defaults(path, settings.options, settings.context_lines, settings.disabled)
+
+
+def raw_add_confirm_body(additions: RawAdditions) -> str:
+    """確認の本文(1 行に 1 つ。「無視する行: 式」「置き換え: 式 → 置き換える文字」。無視する行 → 置き換えの順)。"""
+    lines = [raw_add_confirm_line("ignore", pattern, None) for pattern in additions.ignore_lines]
+    lines += [raw_add_confirm_line("replace", item.pattern, item.replacement) for item in additions.replacements]
+    return "\n".join(lines)
 
 
 def raw_examples() -> dict[str, list[dict[str, str]]]:
@@ -1304,15 +1668,17 @@ def raw_examples() -> dict[str, list[dict[str, str]]]:
     }
 
 
-def raw_options_summary(options: RawOptions | Mapping[str, Any] | None) -> str | None:
+def raw_options_summary(options: RawOptions | Mapping[str, Any] | None, disabled_count: int = 0) -> str | None:
     """「単純比較の設定: 無視する行 2 件・置き換え 1 組・空白の数を無視・空行を無視・大文字と小文字を無視」。既定なら None。
 
-    options は設定か、保存の形(options_to_plain)。
+    options は設定か、保存の形(options_to_plain)。数は有効なルールの数(呼ぶ側が無効を除いた設定を渡す)。
+    disabled_count(REQ-359)が 1 以上なら「（無効 M）」を足す。有効なルールもほかの設定も既定なら「単純比較の設定: なし（無効 M）」。
+    ただし options が None(誤りのある間)のときは None。
     """
     if options is None:
         return None
     plain = options_to_plain(options) if isinstance(options, RawOptions) else dict(options)
-    return raw_options_summary_text(plain)
+    return raw_summary_with_disabled(raw_options_summary_text(plain), disabled_count)
 
 
 def raw_set_aside_text(record: RawOptionsRecord | None) -> str | None:
@@ -1381,13 +1747,17 @@ def raw_defaults(
 
 def raw_form_defaults(
     *, platform: str | None = None, env: Mapping[str, str] | None = None, home: Path | None = None
-) -> tuple[RawOptions, int, str | None]:
-    """既定の設定と前後の行数(raw-compare.json。REQ-228 §2)。読めなければ (すべてオフ, 3, 帯の文)。"""
+) -> tuple[RawSettings, str | None]:
+    """既定の設定・前後の行数・無効のルール(raw-compare.json。REQ-228 §2・REQ-359)と帯の文。
+
+    設定は無効のルールも含めた全部(RawSettings.options)。比べるときの設定は RawSettings.enabled_options()。
+    読めなければ (すべてオフ・前後の行数 3・無効なし, 帯の文)。
+    """
     try:
         loaded = load_raw_settings(raw_settings_path(platform=platform, env=env, home=home))
     except SettingsError as exc:
-        return DEFAULT_RAW_OPTIONS, RAW_FOLD_CONTEXT, raw_defaults_unreadable(str(exc))
-    return loaded.options, loaded.context_lines, None
+        return RawSettings(DEFAULT_RAW_OPTIONS, RAW_FOLD_CONTEXT), raw_defaults_unreadable(str(exc))
+    return loaded, None
 
 
 # --- LLM(ADR-0018 決定6。送信前のプレビューを必須とする) ---
@@ -1431,14 +1801,27 @@ def with_instruction(plan: LlmPlan, text: str) -> LlmPlan:
 
 
 def with_question(
-    plan: LlmPlan, question: str, prefer: Literal["structured", "raw"] | None, category: str | None, target: str
+    plan: LlmPlan,
+    question: str,
+    prefer: Literal["structured", "raw"] | None,
+    category: str | None,
+    target: str,
+    raw_lines: tuple[int | None, int | None] | None = None,
 ) -> LlmPlan:
     """表示中の差分への質問(確かめた後の文)と、送る差分の種類・カテゴリ・対象を、送らない1回目と送る2回目の両方に入れた計画
     (REQ-312 / ADR-0218 決定2〜4)。
 
     両方に同じ値を入れるので、送信前の確認の全文と、承認した内容の照合(approve)が一致する。
+    raw_lines は単純比較の 1 行だけを聞くときの (変更前の行番号, 変更後の行番号。REQ-366 §6)。
     """
-    fields = {"question": question, "prefer_source": prefer, "category": category, "question_target": target}
+    fields: dict[str, Any] = {
+        "question": question,
+        "prefer_source": prefer,
+        "category": category,
+        "question_target": target,
+    }
+    if raw_lines is not None:
+        fields["raw_lines"] = raw_lines
     send = None if plan.send is None else replace(plan.send, **fields)
     return LlmPlan(first=replace(plan.first, **fields), send=send)
 
@@ -1516,6 +1899,61 @@ def with_current_premise(
     except SettingsError:
         return replace(request, client=ApprovedPromptClient(request.client, _NOTHING_APPROVED))
     return replace(request, premise=premise)
+
+
+@dataclass(frozen=True)
+class SendBasis:
+    """送る前の確認を出したときの設定の値(REQ-371 / ADR-0245 決定1)。承認した送信の直前に、今の設定と比べる。
+
+    秘密の語・使用中のプロファイルの送り先の接続先とモデル・送る差分の上限・全体の上限。キーは持たない。
+    秘密の語は repr に出さない(ほかの値は設定の値で、秘密ではない)。
+    """
+
+    secret_words: tuple[str, ...] = field(repr=False)
+    base_url: str | None
+    model: str | None
+    max_diffs: int
+    max_total_diffs: int
+
+
+def send_basis(settings: LlmSettings) -> SendBasis:
+    """設定から、確認と一緒に持つ値を作る。"""
+    return SendBasis(
+        secret_words=tuple(settings.extra_secret_words),
+        base_url=settings.base_url,
+        model=settings.model,
+        max_diffs=settings.max_diffs,
+        max_total_diffs=settings.max_total_diffs,
+    )
+
+
+def current_send_basis(
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> SendBasis:
+    """送る直前に設定を読み直して、今の値を返す(REQ-371)。指示文と前提のファイルは読まない(前提は with_current_premise が読む)。
+
+    読めなければ SettingsError(呼ぶ側は送らない)。
+    """
+    return send_basis(load_settings(cwd=cwd, env=env, platform=platform, home=home, read_prompt=False))
+
+
+def basis_change(confirmed: SendBasis, now: SendBasis) -> str | None:
+    """確認を出したときの値と今の値を比べる。違いの種類を messages.REREAD_NOT_SENT のキーで返し、同じなら None。
+
+    比べる順は、使用中のプロファイル(接続先かモデル)→ 上限(送る差分・全体)→ 秘密の語。
+    秘密の語は並びを問わず、語の集まりが違うときだけ違う(語が違っても、送る文が変わるかは呼ぶ側が作り直して確かめる)。
+    """
+    if confirmed.base_url != now.base_url or confirmed.model != now.model:
+        return "profile"
+    if confirmed.max_diffs != now.max_diffs or confirmed.max_total_diffs != now.max_total_diffs:
+        return "limits"
+    if set(confirmed.secret_words) != set(now.secret_words):
+        return "secret_words"
+    return None
 
 
 # --- 保存(ADR-0017。自動保存はしない) ---
@@ -2050,6 +2488,156 @@ def unpair_screen(request: CompareRequest, outcome: MultiCompareOutcome, positio
     return unpair_pair(request, outcome, position)
 
 
+def exclude_screen(outcome: MultiCompareOutcome, row: int) -> MultiCompareOutcome:
+    """一覧の行の組・区間を比べる対象から外す(比べない。REQ-367 §4)。行の番号が範囲の外・最後の1行なら ValueError。"""
+    target = row_target(outcome, row)
+    if target is None:
+        raise ValueError("no such row")
+    if target[0] == "pair":
+        return exclude_pair(outcome, target[1])
+    return exclude_segment(outcome, target[1], target[2])
+
+
+def exclude_rows(outcome: MultiCompareOutcome) -> list[bool]:
+    """一覧の行ごとに、比べる対象から外せるか(外すと一覧に組も相手なしも残らなくなる最後の1行は外せない。exclude_screen と同じ決まり)。
+
+    数える行は組と、1つのログの中で組にしたときを除く相手なし(core の _check_not_last と同じ)。それを 1 回だけ数えて、行数に比例する時間で決める。
+    """
+    pairs = len(outcome.pairs)
+    counted = 0 if outcome.single_log else len(outcome.unpaired)
+    result = [pairs - 1 > 0 or counted > 0 for _ in range(pairs)]
+    for _unpaired, is_error in multi_rest(outcome):
+        left = counted - (0 if is_error or outcome.single_log else 1)
+        result.append(pairs > 0 or left > 0)
+    return result
+
+
+def can_exclude_row(outcome: MultiCompareOutcome, row: int) -> bool:
+    """一覧の行が、比べる対象から外せるか(exclude_rows の 1 行分)。範囲の外は偽。"""
+    rows = exclude_rows(outcome)
+    return 0 <= row < len(rows) and rows[row]
+
+
+def excluded_names(outcome: MultiCompareOutcome) -> list[str]:
+    """外した組と区間の名前(外した順)。名前は一覧の行と同じ決まり。"""
+    names: list[str] = []
+    for item in outcome.excluded:
+        if isinstance(item, Unpaired):
+            if is_error_output(item.segment):
+                entry = error_entry(item, outcome.single_log)
+            else:
+                entry = single_entry(item) if outcome.single_log else unpaired_entry(item)
+            names.append(entry.row.name)
+        else:
+            name = item.command if item.command is not None else UNKNOWN_COMMAND
+            names.append(single_pair_name(name, item.before_number, item.after_number) if outcome.single_log else name)
+    return names
+
+
+def restore_screen(
+    request: CompareRequest,
+    *,
+    outcome: MultiCompareOutcome,
+    k: int,
+    llm: LlmRequest | None = None,
+    on_progress: ProgressSink | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> MultiCompareOutcome:
+    """外した組・区間の k 番目を戻す(組はその1組だけ比べ直す。CompareWorker の runner。REQ-367)。llm は使わない。"""
+    return restore_excluded(request, outcome, k, on_progress=on_progress, should_cancel=should_cancel)
+
+
+def structured_columns(outcome: CompareOutcome | None) -> list[list[str]]:
+    """構造化比較の行ごとに、show の表の変更の行なら変わった列の名前の並び、ほかの行は空(_structured_rows と同じ数・同じ並び。REQ-367)。"""
+    if outcome is None:
+        return []
+    if outcome.show is not None:
+        return [list(d["fields"]) if d["op"] == "changed" else [] for d in outcome.show.diffs]
+    if outcome.structured is None:
+        return []
+    return [[] for _ in outcome.structured.diffs]
+
+
+def _value_search_text(value: Any) -> str:
+    """元の行を探す文字。文字はそのまま、整数は数字の文字。真偽値・辞書・リストなどは文字が無いとみなして空。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return ""
+
+
+def _source_probe(outcome: CompareOutcome, index: int) -> tuple[str, str] | None:
+    """構造化比較の index 番目の行から、元の行を探す文字と、探す側("before"・"after")を決める。決められなければ None。"""
+    if outcome.show is not None:
+        diffs = outcome.show.diffs
+        if not 0 <= index < len(diffs):
+            return None
+        d = diffs[index]
+        if d["op"] == "changed":
+            for column, (before, after) in d["fields"].items():
+                for side, value in (("after", after), ("before", before)):
+                    text = _value_search_text(value)
+                    if text:
+                        return text, side
+            return None
+        side = "before" if d["op"] == "removed" else "after"
+        row = d["before"] if d["op"] == "removed" else d["after"]
+        key_field = outcome.show.key_field
+        if isinstance(row, dict) and key_field:
+            text = _value_search_text(row.get(key_field.split("+")[0]))
+            if text:
+                return text, side
+        text = _value_search_text(d.get("key"))
+        return (text, side) if text else None
+    if outcome.structured is None or not 0 <= index < len(outcome.structured.diffs):
+        return None
+    d = outcome.structured.diffs[index]
+    for side in ("after", "before"):
+        text = _value_search_text(d.get(side))
+        if text:
+            return text, side
+    # 値が文字でない行(辞書・真偽値など)は、対象の名前の文字で探す。値があった側で探す
+    name = _value_search_text(d.get("name"))
+    if not name:
+        return None
+    return name, "after" if d.get("after") is not None else "before"
+
+
+def source_raw_row(outcome: CompareOutcome | None, rows: Sequence[RawRow], index: int) -> int | None:
+    """構造化比較の index 番目の行の元の行を、単純比較の行(rows。align_raw の行)から探して、その番号を返す(REQ-367 §2)。
+
+    1. 差分の辞書に before_line_no・after_line_no(整数)があれば、その行番号の行。
+    2. 無ければ行の値の文字で探す。変更後の値なら変更後の側、変更前の値なら変更前の側の文字に含まれる最初の行。
+       大文字・小文字は区別する。空の文字は探さない。差分の行を先に探し、無ければ全部の行から探す。
+    見つからなければ None。今の構造化比較の差分には行番号が無いので、いつも 2. になる。
+    """
+    if outcome is None:
+        return None
+    probe = _source_probe(outcome, index)
+    diffs = outcome.show.diffs if outcome.show is not None else (outcome.structured.diffs if outcome.structured else [])
+    if 0 <= index < len(diffs):
+        d = diffs[index]
+        for side, key in (("after", "after_line_no"), ("before", "before_line_no")):
+            number = d.get(key) if isinstance(d, dict) else None
+            if isinstance(number, int) and not isinstance(number, bool):
+                for position, row in enumerate(rows):
+                    if (row.after_no if side == "after" else row.before_no) == number:
+                        return position
+    if probe is None:
+        return None
+    text, side = probe
+
+    def has(row: RawRow) -> bool:
+        return text in (row.after_text if side == "after" else row.before_text)
+
+    for wanted in (True, False):
+        for position, row in enumerate(rows):
+            if (row.is_diff or not wanted) and has(row):
+                return position
+    return None
+
+
 def whole_answer_lines(llm: LlmAnalysis | None) -> tuple[list[str] | None, str | None]:
     """全体の AI の解析を AI の面に出す行とコピーの文(view_outcome の llm_screen_lines・llm_copy と同じ決まり。ADR-0152 決定3)。
 
@@ -2493,6 +3081,59 @@ def pair_report(
         _raw_report_lines(outcome),
         first_request=first_request if answer is not None else None,
         status_key=outcome.status,
+        raw_rules=_raw_report_rules(outcome, words),
+        raw_compared=outcome.raw is not None or (outcome.show is not None and outcome.show.raw is not None),
+    )
+
+
+def _raw_report_rules(outcome: CompareOutcome, words: Sequence[str]) -> ReportRawRules | None:
+    """報告書に出す、その組を比べた単純比較の設定(REQ-363)。既定の設定(記録が無い)なら None。
+
+    式と置き換える文字は、追加の質問と同じ判定(premise_text_problem。語は初期の語を足したもの)に通し、断られた欄は EXPORT_RAW_WITHHELD にする
+    (種類・当たった行の数・ほかの欄は出す)。置き換える文字が空か空白だけのときは、判定に通さずそのまま出す(空の文は断られるため)。
+    並びは無視する行 → 置き換え(記録の options の順)。当たった行の数は rule_hits の同じ位置(無い・足りなければ None)。
+    """
+    record = outcome_raw_options(outcome)
+    if record is None:
+        return None
+    options = dict(record.options)
+
+    def shown(text: str) -> str:
+        if not text.strip():
+            return text
+        # premise_text_problem は check_question に normalize_words(words) を渡す(長さの上限は質問の 4000 字。式は 200 字までに確かめ済み)
+        return EXPORT_RAW_WITHHELD if premise_text_problem(text, words) is not None else text
+
+    def hit(key: str, index: int) -> tuple[int, int] | None:
+        found = record.rule_hits.get(key) if record.rule_hits is not None else None
+        if found is None or index >= len(found):
+            return None
+        return found[index]["before"], found[index]["after"]  # type: ignore[index]
+
+    rules = [
+        ReportRawRule(RAW_RULE_KIND_TEXT["ignore"], shown(pattern), "", hit("ignore_lines", index))
+        for index, pattern in enumerate(options.get("ignore_lines", []))
+    ]
+    rules += [
+        ReportRawRule(
+            RAW_RULE_KIND_TEXT["replace"],
+            shown(item["pattern"]),
+            shown(item["replacement"]),
+            hit("replacements", index),
+            is_replace=True,
+        )
+        for index, item in enumerate(options.get("replacements", []))
+    ]
+    # ルール以外の設定(空白・空行・大文字と小文字・移動・比べ方)。algorithm_used は渡さない(標準に戻った知らせは raw_lines が出す)
+    rest = raw_options_parts({**options, "ignore_lines": [], "replacements": []})
+    summary = raw_options_summary(options)
+    if summary is None and not rules:
+        return None
+    return ReportRawRules(
+        summary or "",
+        tuple(rules),
+        EXPORT_RAW_RULES_OTHERS.format(parts=SM_SET_ASIDE_SEPARATOR.join(rest)) if rest else None,
+        hashlib.sha256(json.dumps(options, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest(),
     )
 
 

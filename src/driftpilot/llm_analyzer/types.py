@@ -88,6 +88,7 @@ _TEXTS_JA = {
     "question_target_invalid": "question があるときは question_target を structured・show・raw・whole のどれかにしてください",
     "prefer_source_invalid": "prefer_source は structured か raw にしてください",
     "category_invalid": "category は空でない文字列にしてください",
+    "raw_lines_invalid": "raw_lines は question があるときに、1 以上の整数か None の 2 つ組(少なくとも 1 つは整数)にしてください",
 }
 _TEXTS_EN = {
     "max_diffs_invalid": "max_diffs must be an integer of 1 or more: {value!r}",
@@ -101,6 +102,9 @@ _TEXTS_EN = {
     "question_target_invalid": "When question is given, question_target must be one of structured, show, raw and whole",
     "prefer_source_invalid": "prefer_source must be structured or raw",
     "category_invalid": "category must be a non-empty string",
+    "raw_lines_invalid": (
+        "raw_lines must be given with question, as a pair of integers (1 or more) or None, with at least one integer"
+    ),
 }
 _T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
@@ -155,8 +159,22 @@ class LlmRequest:
     category: str | None = field(default=None, repr=False)
     # 質問の節の「対象」の名前の種類(prompt.QUESTION_TARGET_NAMES の鍵)
     question_target: QuestionTarget | None = None
+    # 行の差分の質問の対象を 1 行だけにする(REQ-366 §6)。(変更前の行番号, 変更後の行番号)で、1 から数える。
+    # 片側が無い行(削除・追加)はその側が None。question があるときだけ使える。None なら今と同じ(表示中の差分全部)
+    raw_lines: tuple[int | None, int | None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.raw_lines is not None:
+            pair = self.raw_lines
+            ok = (
+                self.question is not None
+                and isinstance(pair, tuple)
+                and len(pair) == 2
+                and all(n is None or (type(n) is int and n >= 1) for n in pair)
+                and any(n is not None for n in pair)
+            )
+            if not ok:
+                raise ValueError(_T["raw_lines_invalid"])  # 文に中身を入れない
         if self.question is not None:
             if not isinstance(self.question, str) or not self.question.strip():
                 raise ValueError(_T["question_invalid"])  # 文に中身を入れない

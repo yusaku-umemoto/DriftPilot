@@ -73,7 +73,7 @@ webview は読まない(窓は WebSession.open_batch が開いて _attach で渡
 
 import threading
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -90,6 +90,7 @@ from driftpilot.core import (
     LlmRequest,
     ManifestError,
     MultiCompareOutcome,
+    RawOptions,
     combined_summary,
     gave_up_count,
     run_batch,
@@ -128,6 +129,9 @@ from driftpilot.llm_settings import (
     premise_problem,
 )
 from driftpilot.messages import (
+    STATUS_LABEL,
+    BATCH_RAW_FOLLOW_FILE,
+    BATCH_RAW_FOLLOW_LOADED,
     BATCH_AI_REASON_APPROVAL,
     BATCH_AI_REASON_COMPARE,
     BATCH_AI_REASON_NO_TARGET,
@@ -153,6 +157,7 @@ from driftpilot.messages import (
     BATCH_FAILED_TITLE,
     BATCH_LLM_SETTINGS_TITLE,
     BATCH_NOT_SENT_TITLE,
+    REREAD_NOT_SENT,
     BATCH_EDIT_NOT_SAVED,
     BATCH_EDIT_REBUILD,
     BATCH_EDIT_REFUSED_TITLE,
@@ -238,6 +243,7 @@ from driftpilot.screen_model.batch_model import (
     SOURCE_CHOICES,
     TEXT_WILDCARD,
     ApprovalView,
+    BatchOrigin,
     BatchSetupError,
     BatchTableRow,
     PreparedBatch,
@@ -257,6 +263,9 @@ from driftpilot.screen_model.batch_model import (
     prepare_manifest,
     save_payloads,
     save_results,
+    rebuilt_payloads,
+    rechecked_result,
+    returned_result,
     second_stage,
     status_counts_text,
     table_rows,
@@ -266,6 +275,10 @@ from driftpilot.screen_model.batch_model import (
 from driftpilot.screen_model.batch_worker import BatchWorker
 from driftpilot.screen_model.model import (
     CANCELLED,
+    SendBasis,
+    basis_change,
+    current_send_basis,
+    send_basis,
     raw_defaults,
     EXPORT_FILE_TYPES,
     EXPORT_KINDS,
@@ -337,6 +350,19 @@ AI_SUGGESTION_SOURCE = "ai"
 
 class _BadRequest(Exception):
     """画面から受け取った引数の形が違う。"""
+
+
+@dataclass
+class _Recheck:
+    """「この組だけ比べ直す」の途中の記録(REQ-368 §3・§4)。job_id は比べ直す組、previous は比べ直す前の結果(無ければ None。
+    AI の答えを残すか確かめるために持つ)、platform_changed は機種を指定し直した比べ直しか(止まったときは待機の行にする)、
+    fresh はワーカーから戻った新しい結果(まだ置いていない)。
+    """
+
+    job_id: str
+    previous: JobResult | None
+    platform_changed: bool
+    fresh: JobResult | None = None
 
 
 class _PairAsking:
@@ -442,6 +468,8 @@ class BatchApi(Api):
         # AI に組の案を聞く(REQ-219)。待っている確認: (番号, 送る文, (変更前の 名前→パス, 変更後の 名前→パス), 計画, 組の一覧の番号,
         # 送る文を指示とファイル名に区切った部分の並び。REQ-313)。確認の画面(view.pair_ai_preview)と、送っている間のスレッド
         self._pair_ai: tuple[int, str, tuple[dict[str, Path], dict[str, Path]], LlmPlan, int, PromptParts] | None = None
+        # 確認を出したときの設定の値(REQ-371)。確認の番号と組で持つ(確認のタプルの形は変えない)。承認の直前に今の設定と比べる
+        self._pair_ai_basis: tuple[int, SendBasis] | None = None
         self._pair_ai_view: dict[str, Any] | None = None
         self._pair_asking: _PairAsking | None = None
         self._worker: BatchWorker | None = None
@@ -460,8 +488,17 @@ class BatchApi(Api):
         # 答えが届いた組(job の id)ごとの送り先。「比較画面で開く」で答えと一緒に比較の窓へ渡す
         self._sending: tuple[tuple[str, str], str | None] | None = None
         self._answer_sources: dict[str, tuple[tuple[str, str], str | None]] = {}
+        # 結果の版(REQ-362 / ADR-0242 決定1)。「比較画面で開く」で渡す目印に入れ、単一比較の窓から結果が返ったとき、受け取りのときと
+        # 同じ版か確かめる。組を作り直した・「実行」を始めた・直して結果を消した・組の一覧が変わったときに 1 つ増やす
+        # (画面を描き直すための _result_revision は進み具合でも変わるので使わない)
+        self._results_version = 0
+        # 単一比較の窓から結果が返された組(job の id)と、そのとき使った単純比較の設定。行の印(rechecked)の元。
+        # 実行・作り直し・結果を消した組・AI の段で結果が替わった組では消える
+        self._returned: dict[str, RawOptions] = {}
         # AI の段の種類(None・AI_SEND・AI_CHECK)。AI の段の間も _results は始めたときのまま(終わったら対象の組の分だけ入れる)
         self._ai_action: str | None = None
+        # 「この組だけ比べ直す」の途中の記録(REQ-368)。比べ直している間だけ持つ(ワーカーの段は "recheck")
+        self._recheck: _Recheck | None = None
         self._notes: list[str] = []  # AI の場所の下に出す注記(作業フォルダのキーの注記・自動送信で設定が読めない理由)
         # 表示(表の結果・実行中の組・件数の文・選んだ行・進み具合・ステータス・帯)。shown は job の id ごとの表示する結果
         self._shown: dict[str, JobResult] = {}
@@ -474,8 +511,15 @@ class BatchApi(Api):
         self._banner_shown = False  # 実行を始めたら隠し、終わっても隠したまま。組を作り直すとまた出す(REQ-97 §2)
         # 単純比較の既定のファイル(raw-compare.json)を読めないときの帯の文(REQ-228 §7.2)。次に組を作り直すまで残す
         self._raw_band: str | None = None
+        # 設定の窓で保存したいつも効く設定を届けるための記録(REQ-361 §4)。組の単純比較の設定が、フォルダから作った組なら "defaults"
+        # (既定から来た)、組のファイルを開いた組なら "file"、組が無い・作れなかったなら None。_raw_pending は実行中に保存された
+        # 新しい既定(実行していない状態に戻ってから入れ替える)、_raw_follow_band は保存を受けたときの帯の文(組を作り直す・「実行」で消す)
+        self._raw_source: str | None = None
+        self._raw_pending: RawOptions | None = None
+        self._raw_follow_band: str | None = None
         # 待っている送信前の確認: (番号, 送る内容の全体, 確認の画面, 1段目の要約)
         self._approval: tuple[int, BatchLlmPreview, ApprovalView, BatchSummary] | None = None
+        self._approval_basis: tuple[int, SendBasis] | None = None  # 確認を出したときの設定の値(REQ-371)。確認の番号と組
         self._late_notice: dict[str, Any] | None = None  # ワーカーから戻った知らせ(画面は番号で1回だけ出す)
         # 番号(画面は変わったときだけ描き直す・入れ直す)
         self._revision = 0
@@ -483,7 +527,7 @@ class BatchApi(Api):
         self._pairs_revision = 0
         self._result_revision = 0
         self._serial = 0  # 確認・知らせの番号
-        self._character: bool | None = None  # キャラクターの設定(最初に描いたときに読む。ADR-0174 決定1)
+        self._character: bool | None = None  # キャラクターの設定(描いたときに読む。設定の窓で保存したら読み直す。ADR-0245 決定2)
         session.watch(self, self._changed)
 
     def _attach(self, window: Any) -> None:
@@ -646,6 +690,21 @@ class BatchApi(Api):
         """「比較画面で開く」と表の行のダブルクリック。index は表で選んだ行の番号(組の順。未選択は -1)。"""
         return self._call(self._handoff, form, index)
 
+    def recheck(self, job_id: Any) -> dict[str, Any]:
+        """組の行の右クリックの「この組だけ比べ直す」(REQ-368 §3)。その組だけを組の今の設定で比べ直し、行と全体の数を新しくする。
+
+        view.can_recheck が偽のとき(実行中・確認の待ち中・比較の窓が走っている・組が無い)と、知らない組・外した組は何もしない。
+        """
+        return self._call(self._recheck_job, job_id)
+
+    def recheck_platform(self, job_id: Any, index: Any) -> dict[str, Any]:
+        """組の行の右クリックの「機種を指定し直して比べ直す…」(REQ-368 §4)。index は機種の選択肢(view.labels.row_platforms。0 が自動)の番号。
+
+        その組の機種を選んだ機種にして(自動なら手の指定の印を消し、ほかなら付ける)、recheck と同じく比べ直す。
+        種類が config でない組・押せないときは何もしない。
+        """
+        return self._call(self._recheck_platform, job_id, index)
+
     def save_manifest(self, form: Any) -> dict[str, Any]:
         """「この組を保存…」。窓で直した組を新しいファイルへ書く(開いた組のファイルへは書き戻さない。上書きしない)。"""
         return self._call(self._save_manifest, form)
@@ -756,7 +815,8 @@ class BatchApi(Api):
         words = None
         if names and any(result.multi is not None for result in self._shown.values()):
             words = self._secret_words()
-        return table_rows(jobs, self._shown, self._running, self._excluded(), words=words)
+        hand = self._edit.hand_platform if self._edit is not None else frozenset()
+        return table_rows(jobs, self._shown, self._running, self._excluded(), words=words, returned=self._returned, hand=hand)
 
     def _excluded(self) -> frozenset[str]:
         return self._edit.excluded if self._edit is not None else frozenset()
@@ -771,6 +831,18 @@ class BatchApi(Api):
     def _can_edit(self) -> bool:
         """ロックの中で呼ぶ。組を直してよいか(組があり、実行中でも確認の待ち中でも閉じている途中でもない)。"""
         return self._edit is not None and self._idle() and not self._closing
+
+    def _can_recheck(self) -> bool:
+        """ロックの中で呼ぶ。組の行の「この組だけ比べ直す」を出してよいか(REQ-368)。「実行」を押せる条件と同じ考え方
+        (組があり、実行中でも確認の待ち中でも閉じている途中でもなく、比較の画面が走っていない。ADR-0029 決定9)。
+        行ごとの判定(外した組・機種を選べる行か)は画面がする。
+        """
+        return (
+            self._can_edit()
+            and self._prepared is not None
+            and bool(self._prepared.jobs)
+            and self._session.free_for(self)
+        )
 
     def _only(self, side: str) -> tuple[Path, ...]:
         if self._edit is None:
@@ -817,6 +889,7 @@ class BatchApi(Api):
     def _render(self) -> dict[str, Any]:
         """画面に描く状態。表の行は入れない(result() で渡す)。押せるかは wx の _refresh_controls と同じ条件。"""
         self._revision += 1
+        self._apply_raw_pending()  # 実行中に保存された既定は、実行していない状態に戻ってから当てる(REQ-361 §4)
         idle = self._idle() and not self._closing
         folders = self._form["source"] == "folders"
         prepared = self._prepared
@@ -884,6 +957,8 @@ class BatchApi(Api):
             "pair_ai_preview": dict(self._pair_ai_view) if self._pair_ai_view is not None else None,
             # 比較の窓が無い(単独で開いた)ときは押せない
             "can_handoff": jobs > 0 and self._session.has_compare(),
+            # 組の行の右クリックの「この組だけ比べ直す」「機種を指定し直して比べ直す…」(REQ-368)。行ごとの判定は画面がする
+            "can_recheck": self._can_recheck(),
             # 名前の列は、名前(label)のある組が1つ以上あるときだけ出す
             "has_labels": prepared is not None and any(job.label for job in prepared.jobs),
             "banner": self._banner_text(),
@@ -906,7 +981,7 @@ class BatchApi(Api):
             "status": self._status,
             "approval": approval,
             "notice": self._late_notice,
-            # キャラクターの絵を出すか(ADR-0174 決定1。この窓を最初に描いたときの設定)。偽なら絵の要素は hidden のまま
+            # キャラクターの絵を出すか(ADR-0174 決定1。描いたときに読み、設定の窓で保存したら読み直す。ADR-0245 決定2)。偽なら絵の要素は hidden のまま
             "character": self._character_on(),
             # 起動時の絵を出すか(ADR-0174 決定2)。真にするのは --batch で最初に開いた窓の最初の state() だけ(_state)
             "splash": False,
@@ -914,8 +989,16 @@ class BatchApi(Api):
             "update_notice": self._session.update_notice_view(),
         }
 
+    def _reload_character(self) -> None:
+        """設定の窓でキャラクターの設定を保存した後に呼ぶ(WebSession.settings_saved。ADR-0245 決定2・REQ-372)。
+
+        覚えた値を捨てるだけ。次の state() で今の設定を読み直す。比べている途中でも止めない(絵の出し方だけが変わる)。
+        """
+        with self._lock:
+            self._character = None
+
     def _character_on(self) -> bool:
-        """ロックの中で呼ぶ。キャラクターの設定。最初に描いたときに読み、この窓の間は変えない(ADR-0174 決定1)。"""
+        """ロックの中で呼ぶ。キャラクターの設定。描いたときに読んで覚え、設定の窓で保存したら読み直す(ADR-0245 決定2)。"""
         if self._character is None:
             self._character = character_enabled(
                 env=self._where["env"], platform=self._where["platform"], home=self._where["home"]
@@ -926,9 +1009,10 @@ class BatchApi(Api):
         """ロックの中で呼ぶ。帯の文(組の帯と、単純比較の既定のファイルを読めないときの帯。REQ-228 §7.2)。無ければ None。"""
         prepared = self._prepared
         banner = prepared.banner if prepared is not None and prepared.jobs and self._banner_shown else None
-        if self._raw_band is None:
-            return banner
-        return "\n".join([*([banner] if banner else []), self._raw_band])
+        lines = [*([banner] if banner else []), *([self._raw_band] if self._raw_band is not None else [])]
+        if self._raw_follow_band is not None:
+            lines.append(self._raw_follow_band)  # 保存したいつも効く設定を受けたときの帯(REQ-361 §4)
+        return "\n".join(lines) if lines else None
 
     def _fold_states(self) -> dict[str, dict[str, Any]]:
         """ロックの中で呼ぶ(_render から)。片方だけのファイルと候補の折りたたみの開け閉めの初めの値(REQ-224 §5.2)。
@@ -1110,8 +1194,13 @@ class BatchApi(Api):
         self._edit = None
         self._results = {}
         self._answer_sources = {}  # 組を作り直したら結果と一緒に消す(REQ-232 §2)
+        self._returned = {}  # 単一比較の窓から返された印も消す。版を進めて、受け取り済みの比較の窓の結果を捨てさせる(REQ-362)
+        self._results_version += 1
         self._status = ""
         self._raw_band = None
+        self._raw_source = None  # 組を作れたときだけ下で決める(REQ-361 §4)
+        self._raw_pending = None
+        self._raw_follow_band = None
         form = self._form
         folders = form["source"] == "folders"
         guide = folder_guide(form["before_dir"], form["after_dir"]) if folders else manifest_guide(form["manifest"])
@@ -1128,13 +1217,17 @@ class BatchApi(Api):
                     # 単純比較の設定は設定の窓の既定(REQ-228 §7.2)。読めなければ既定(すべてオフ)で作り、帯の文を出す
                     raw_options, self._raw_band = raw_defaults(**self._profile_where())
                     edit = batch_edit.from_pairing(pairing, auto=DEFAULT_FOLDER_AUTO, raw_options=raw_options)
+                    self._raw_source = "defaults"
                 else:
                     prepare_manifest(form["manifest"])  # 読めるかと、読めないときの文は CLI と同じ関数で
                     edit = batch_edit.from_manifest_file(form["manifest"])
+                    self._raw_source = "file"
             except BatchSetupError as exc:
                 notice = self._notice(str(exc), BATCH_SETUP_FAILED_TITLE)
+                self._raw_source = None
             except ManifestError as exc:
                 notice = self._notice(str(exc), BATCH_SETUP_FAILED_TITLE)
+                self._raw_source = None
         self._edit = edit
         self._prepared = edit.to_prepared() if edit is not None else None
         self._only_checked = {side: set() for side in SIDES}
@@ -1149,6 +1242,51 @@ class BatchApi(Api):
         self._pairs_revision += 1
         self._result_revision += 1
         return notice
+
+    def _raw_defaults_saved(self) -> None:
+        """設定の窓で単純比較の既定を保存できた後に、WebSession がロックの外で呼ぶ(REQ-361 §4。画面からは呼べない)。
+
+        窓への「状態が変わった」は呼び出し側(WebSession.settings_saved)が 1 回だけ送るので、ここでは送らない。
+        - 組が無い・来た場所が分からない(組を作れなかった): 何もしない
+        - 組のファイルから開いた組: 入れ替えない。帯だけ
+        - フォルダから作った組: 新しい既定に入れ替える(読めなければ今の「読めない」の帯のまま)。表示中の結果は比べ直すまで今のまま。
+          実行中・送信前の確認の待ち中は _raw_pending に置き、今の実行には効かせない(実行していない状態に戻ってから当てる)
+        """
+        with self._lock:
+            if self._edit is None or self._raw_source is None or self._closing:
+                return
+            if self._raw_source == "file":
+                self._raw_follow_band = BATCH_RAW_FOLLOW_FILE
+                return
+            options, band = raw_defaults(**self._profile_where())
+            if band is not None:
+                self._raw_band = band
+                return
+            self._raw_band = None
+            self._raw_follow_band = BATCH_RAW_FOLLOW_LOADED
+            if self._idle():
+                self._replace_raw_defaults(options)
+            else:
+                self._raw_pending = options
+
+    def _apply_raw_pending(self) -> None:
+        """ロックの中で呼ぶ。待っている新しい既定があり、実行していない状態なら当てる(無ければ何もしない)。"""
+        if self._raw_pending is None or not self._idle():
+            return
+        options, self._raw_pending = self._raw_pending, None
+        if self._edit is not None and self._raw_source == "defaults":
+            self._replace_raw_defaults(options)
+
+    def _replace_raw_defaults(self, options: RawOptions) -> None:
+        """ロックの中で呼ぶ。組の defaults.raw_options だけを差し替える(結果・表・選んだ行・直した印は変えない)。"""
+        assert self._edit is not None
+        edit = batch_edit.with_default_raw_options(self._edit, options)
+        try:
+            prepared = edit.to_prepared()
+        except ManifestError:
+            return  # 読めなくなった規則のファイルなど。入れ替えない(今の組のまま)
+        self._edit = edit
+        self._prepared = prepared
 
     def _confirm_first(self, form: Any, confirmed: Any) -> dict[str, Any] | None:
         """ロックの中で呼ぶ。直した組を作り直す前の確かめ(ADR-0153 決定4)。確かめるときは form を受け取らずに返す。
@@ -1290,6 +1428,7 @@ class BatchApi(Api):
     def _run(self, form: Any) -> dict[str, Any]:
         with self._lock:
             self._take(form)
+            self._apply_raw_pending()  # 実行中に保存された既定は、次の実行から効かせる(REQ-361 §4)
             prepared = self._prepared
             jobs = self._included_jobs()  # 外した組はワーカーに渡さない(REQ-212 §4)
             if prepared is None or not jobs or not self._idle() or self._closing or not self._session.free_for(self):
@@ -1299,6 +1438,9 @@ class BatchApi(Api):
             self._edited_template = None
             self._first, self._second, self._approved, self._results = [], [], {}, {}
             self._answer_sources = {}  # 結果を置き換えるので、答えの送り先の記録も消す(REQ-232 §2)
+            # 全部の組を組の設定で比べ直すので、単一比較の窓から返された印は消す。版も進める(REQ-362 / ADR-0242 決定2)
+            self._returned = {}
+            self._results_version += 1
             self._first_summary = None
             self._shown, self._running = {}, None
             self._counts = ""
@@ -1307,6 +1449,7 @@ class BatchApi(Api):
             if started:
                 # 帯は実行前の確認(ADR-0020)。始まったら隠し、終わっても隠したまま(組を作り直すとまた出る。REQ-97 §2)
                 self._banner_shown = False
+                self._raw_follow_band = None  # 保存を受けたときの帯も、実行を始めたら消す(REQ-361 §4)
             result = self._ok()
         if started:
             self._session.gate_changed(self)
@@ -1478,7 +1621,7 @@ class BatchApi(Api):
         """AI プロファイル(which=llm)かプロンプト(which=prompt)の使用中を変える(REQ-213 §7。設定の窓と同じ保存先に書く)。
 
         実行中・確認の待ち中・閉じている途中、今の一覧に無い id、使用中と同じ id は何も書かない。
-        失敗したら知らせる(画面の選択は view の使用中に戻る)。結果と答えには触らない。書いたら設定の窓に読み直させる(ロックの外)。
+        失敗したら知らせる(画面の選択は view の使用中に戻る)。結果と答えには触らない。書いたら設定の窓に読み直させ、比較の窓・AI の窓にも描き直しを知らせる(ロックの外。REQ-372)。
         """
         if not isinstance(choice_id, str):
             raise _BadRequest
@@ -1500,6 +1643,9 @@ class BatchApi(Api):
             result = self._ok() if action.ok else self._ok(self._notice(action.message, title))
         if written:
             self._session.settings_changed()
+            switched = getattr(self._session, "_profiles_switched", None)
+            if switched is not None:
+                switched(origin=self)  # 比較の窓・AI の窓へ描き直しを知らせる(REQ-372)
         return result
 
     def _cancel(self) -> dict[str, Any]:
@@ -1526,7 +1672,12 @@ class BatchApi(Api):
 
     def _on_result(self, stage: str, result: JobResult) -> None:
         with self._lock:
-            (self._first if stage == "first" else self._second).append(result)
+            if stage == "recheck":
+                # 1 段目・2 段目の一覧には足さない(別に覚え、止まらずに戻ったときに _finish_recheck が置き換える)
+                if self._recheck is not None:
+                    self._recheck.fresh = result
+            else:
+                (self._first if stage == "first" else self._second).append(result)
             if self._closing:
                 return
             self._progress[0] += 1
@@ -1541,7 +1692,11 @@ class BatchApi(Api):
         with self._lock:
             self._worker = None
             if self._closing:
+                self._recheck = None
                 self._session.release(self)  # 窓を閉じた後に戻ってきた。結果は捨て、門だけ返す
+                released = True
+            elif stage == "recheck":
+                self._finish_recheck()  # 比べ直しは AI も自動送信も始めない(自動送信は「実行」の後のもの。REQ-213 §6)
                 released = True
             else:
                 was_run = stage == "first" and self._ai_action is None
@@ -1587,6 +1742,7 @@ class BatchApi(Api):
         assert decision.preview is not None and self._plan.send is not None
         shown = approval_view(decision.preview, self._settings, edited=self._edited_template is not None)
         self._approval = (self._next_serial(), decision.preview, shown, summary)
+        self._approval_basis = (self._approval[0], send_basis(self._settings))  # REQ-371
         return False
 
     def _remember_sources(self) -> None:
@@ -1638,8 +1794,13 @@ class BatchApi(Api):
             self._results = {r.job.id: r for r in final}
             counts = summary.counts
         else:
+            earlier = self._results
             self._results = self._merged(final)
             counts = combined_summary(summary, list(self._results.values())).counts
+            # AI の段は組の設定で比べ直すので、結果が別のものに替わった組は組の設定の結果に戻る。単一比較の窓から返された印も消す(REQ-362)
+            self._returned = {
+                job_id: used for job_id, used in self._returned.items() if self._results.get(job_id) is earlier.get(job_id)
+            }
         self._ai_action = None
         self._edited_template = None
         self._session.release(self)
@@ -1677,6 +1838,8 @@ class BatchApi(Api):
                 self._edited_template = None
                 self._shown = dict(self._results)
                 self._result_revision += 1
+            if self._recheck is not None:
+                self._revert_recheck()  # 比べ直しで止まった。前の結果(機種を替えた比べ直しは待機の行)に戻す
             if self._running is not None:
                 self._running = None  # 止まった組を「実行中」のまま残さない
                 self._result_revision += 1
@@ -1686,6 +1849,117 @@ class BatchApi(Api):
         self._session.gate_changed(self)
         self._changed()
 
+    # --- この組だけ比べ直す(REQ-368。ワーカーの段は "recheck") ---
+
+    def _recheck_job(self, job_id: Any) -> dict[str, Any]:
+        if not isinstance(job_id, str):
+            raise _BadRequest
+        with self._lock:
+            if not self._can_recheck() or not self._is_job(job_id) or job_id in self._excluded():
+                return self._ok()
+            started = self._recheck_one(job_id, self._results.get(job_id), platform_changed=False)
+            result = self._ok()
+        if started:
+            self._session.gate_changed(self)
+        return result
+
+    def _recheck_platform(self, job_id: Any, index: Any) -> dict[str, Any]:
+        if not isinstance(job_id, str) or not _is_int(index) or not 0 <= index < len(WEB_PLATFORM_CHOICES):
+            raise _BadRequest
+        with self._lock:
+            if not self._can_recheck() or not self._is_job(job_id) or job_id in self._excluded():
+                return self._ok()
+            assert self._edit is not None and self._prepared is not None
+            job = next(job for job in self._prepared.jobs if job.id == job_id)
+            if job.kind != "config":
+                return self._ok()  # 機種を選べない行(表の機種の選択と同じ条件)
+            try:
+                edit = batch_edit.set_platform(self._edit, job_id, WEB_PLATFORM_CHOICES[index][0])
+            except ManifestError as exc:
+                return self._rejected(exc)
+            previous = self._results.get(job_id)
+            # 結果は消さずに入れる(前の結果は AI の答えを残すか確かめるために使う。止まったときは _revert_recheck が待機の行にする)
+            self._apply(edit)
+            started = self._recheck_one(job_id, previous, platform_changed=True)
+            result = self._ok()
+        if started:
+            self._session.gate_changed(self)
+        return result
+
+    def _recheck_one(self, job_id: str, previous: JobResult | None, *, platform_changed: bool) -> bool:
+        """ロックの中で呼ぶ。その組 1 つだけをワーカーに渡して比べ直す(組の今の設定。入力の読み込みと自動の機種の包みは「実行」と同じ)。
+
+        結果の版を進め(「実行」と同じ扱い。単一比較の窓から後で届く結果は捨てられる)、その行をすぐ「実行中」にする。
+        ほかの組の表示と結果には触らない。門を取れなければ始めず False(機種を替えた比べ直しは前の結果を消して待機の行にする)。
+        """
+        assert self._prepared is not None
+        job = next((job for job in self._prepared.jobs if job.id == job_id), None)
+        if job is None:
+            return False
+        self._recheck = _Recheck(job_id, previous, platform_changed)
+        self._results_version += 1
+        if not self._start([job], None, None, "recheck"):
+            self._revert_recheck()
+            return False
+        self._running = job_id
+        self._progress_text = ""
+        self._result_revision += 1
+        return True
+
+    def _revert_recheck(self) -> None:
+        """ロックの中で呼ぶ。比べ直しが結果を出さずに終わった(中止・失敗・門を取れなかった)。
+
+        組の設定で比べ直した組は前の結果のまま。機種を指定し直した組は機種が変わっているので、前の結果を消して待機の行にする
+        (表の機種の選択と同じ)。
+        """
+        state, self._recheck = self._recheck, None
+        if state is None:
+            return
+        if state.platform_changed:
+            self._answer_sources.pop(state.job_id, None)
+            self._returned = {job_id: used for job_id, used in self._returned.items() if job_id != state.job_id}
+            self._results = {job_id: r for job_id, r in self._results.items() if job_id != state.job_id}
+        self._shown = dict(self._results)
+        if self._running == state.job_id:
+            self._running = None
+        self._result_revision += 1
+
+    def _finish_recheck(self) -> None:
+        """ロックの中で呼ぶ(ワーカーが終わったとき)。その組の結果だけを置き換え、全体の数を数え直して門を返す。AI は呼ばない。
+
+        結果が無い(中止された)ときは _revert_recheck。AI の答えは、送る差分の本文が前と同じなら残し、違えば外す(rechecked_result)。
+        外したときは答えの送り先の記録も消す。単一比較の窓から返された印は、組の設定で比べ直したので消す。
+        窓の下の内訳(全部の結果から数える)と、判定できなかった組などのステータスの文を作り直す。
+        """
+        state = self._recheck
+        self._session.release(self)
+        self._progress_text = ""
+        if state is None or state.fresh is None or not self._is_job(state.job_id):
+            self._revert_recheck()
+            return
+        self._recheck = None
+        result = rechecked_result(state.previous, state.fresh)
+        if state.previous is not None and result.outcome.llm is not state.previous.outcome.llm:
+            self._answer_sources.pop(state.job_id, None)  # 外した答えの送り先の記録も消す(REQ-232 §2)
+        # dict を作り直す(結果の保存・出力のダイアログを開いている途中なら、「結果が変わった」の確かめで止まる)
+        self._results = {**self._results, state.job_id: result}
+        self._shown, self._running = dict(self._results), None
+        self._returned = {job_id: used for job_id, used in self._returned.items() if job_id != state.job_id}
+        results = list(self._results.values())
+        self._counts = status_counts_text({status: sum(1 for r in results if r.outcome.status == status) for status in STATUS_LABEL})
+        status = []
+        if gave_up := gave_up_count(results):
+            status.append(batch_llm_gave_up(gave_up))
+        undetected = sum(
+            1
+            for r in results
+            if r.job.platform == AUTO_PLATFORM and r.outcome.kind == "config" and platform_undetected(r.outcome.auto_platform)
+        )
+        if undetected:
+            status.append(batch_platform_undetected(undetected))
+        self._status = " ".join(status)
+        self._result_revision += 1
+
     # --- 送信前の確認(ADR-0031。送るかどうかの判断はここだけ) ---
 
     def _answer_approval(self, checked: Any, yes: Any) -> dict[str, Any]:
@@ -1694,7 +1968,8 @@ class BatchApi(Api):
             if pending is None or self._closing or self._worker is not None:
                 return self._ok()  # 待っている確認が無い。何も送らない
             self._approval = None  # 答えたら消す(1つの確認で送れるのは1回だけ)
-            _number, preview, shown, summary = pending
+            number, preview, shown, summary = pending
+            kept_basis, self._approval_basis = self._approval_basis, None  # 確認を出したときの設定の値(REQ-371)
             offered = {row.job_id for row in shown.rows}
             valid = (
                 isinstance(checked, list)
@@ -1717,22 +1992,76 @@ class BatchApi(Api):
                 result = self._ok() if valid else _failure(gui_web_call_failed())
                 released = True
             else:
-                self._approved = approved
-                assert self._prepared is not None and self._plan is not None
-                jobs = [job for job in self._prepared.jobs if job.id in approved]
-                assert self._settings is not None
-                # 2 段目の送り先(答えが届いた組に覚える。ADR-0170 決定1)
-                self._sending = (destination_of(self._settings), self._settings.prompt_profile_name)
-                # 前提の文は送る直前に読み直す。確認の後に書き換えた・消したときは、どの組も承認した文と違うので送らない(ADR-0172 決定5)
-                send = with_current_premise(self._plan.send, **self._profile_where())
-                self._start(jobs, send, approved, "second")  # 門は持ったまま2段目へ
-                result = self._ok()
-                released = False
+                # 送る直前に設定を読み直して、確認を出したときと比べる(REQ-371 / ADR-0245 決定1)。違えば、どの組も送らない
+                confirmed = kept_basis[1] if kept_basis is not None and kept_basis[0] == number else None
+                now, stop = self._reread_approval(confirmed, approved)
+                if stop is not None or now is None:
+                    # 「送らない」を選んだときと同じく、比較の結果だけが残る。AI は呼ばず、知らせを出す
+                    final = declined(self._first)
+                    self._finish(final, combined_summary(summary, final))
+                    if stop is not None:
+                        self._late_notice = {"id": self._next_serial(), **self._notice(*stop)}
+                    result = self._ok()
+                    released = True
+                else:
+                    self._approved = approved
+                    assert self._prepared is not None and self._plan is not None
+                    jobs = [job for job in self._prepared.jobs if job.id in approved]
+                    assert self._settings is not None
+                    # 2 段目の送り先(答えが届いた組に覚える。ADR-0170 決定1)
+                    self._sending = (destination_of(self._settings), self._settings.prompt_profile_name)
+                    send = self._plan.send
+                    if basis_change(confirmed, now) == "secret_words":
+                        # 作り直した文が同じと確かめた今の語で送る(送る要求の語も今の語にそろえる)
+                        send = replace(send, extra_secret_words=tuple(now.secret_words))
+                    # 前提の文は送る直前に読み直す。確認の後に書き換えた・消したときは、どの組も承認した文と違うので送らない(ADR-0172 決定5)
+                    send = with_current_premise(send, **self._profile_where())
+                    self._start(jobs, send, approved, "second")  # 門は持ったまま2段目へ
+                    result = self._ok()
+                    released = False
         if released:
             self._session.gate_changed(self)
             if not result["ok"]:
                 self._changed()  # 画面は失敗の文だけを受け取るので、読み直させる
         return result
+
+    def _reread_approval(
+        self, confirmed: SendBasis | None, approved: Mapping[str, str]
+    ) -> tuple[SendBasis | None, tuple[str, str] | None]:
+        """ロックの中で呼ぶ。承認した 2 段目の送信の直前に、設定を読み直して確認を出したときと比べる(REQ-371 / ADR-0245 決定1)。
+
+        返すのは (今の値, 送らない理由)。送ってよければ (今の値, None)。送らないなら (None, (知らせの文, 題))。
+        使用中のプロファイル(接続先かモデル)・上限・秘密の語の順に比べる。秘密の語が違うときは、承認したすべての組について
+        1 段目の結果から今の語で送る文を作り直し、承認した文と比べる。1 組でも違えば、どの組も送らない
+        (確認は全体で 1 つの承認なので、全体の上限を超えたら 1 件も送らないのと同じ考え方。ADR-0031 決定4)。
+        直した指示文のひな形は、今の語で確かめ直す。設定を読めないときは送らない。
+        """
+        words_text = (REREAD_NOT_SENT["secret_words"], BATCH_NOT_SENT_TITLE)
+        if confirmed is None or self._plan is None:
+            return None, words_text  # 起きないはずの形。確かめられないので送らない
+        try:
+            now = current_send_basis(**self._where)
+        except SettingsError as exc:
+            return None, (str(exc), BATCH_LLM_SETTINGS_TITLE)
+        kind = basis_change(confirmed, now)
+        if kind in ("profile", "limits"):
+            return None, (REREAD_NOT_SENT[kind], BATCH_NOT_SENT_TITLE)
+        if kind != "secret_words":
+            return now, None
+        try:
+            words = tuple(now.secret_words)
+            if self._edited_template is not None:
+                refused = check_question(
+                    self._edited_template, normalize_words(words), max_chars=PROMPT_TEMPLATE_MAX_CHARS
+                )
+                if refused is not None:
+                    return None, (follow_up_refused(refused, PROMPT_TEMPLATE_MAX_CHARS), BATCH_EDIT_REFUSED_TITLE)
+            probe = replace(self._plan.first, extra_secret_words=words)
+            rebuilt = rebuilt_payloads(self._first, probe, set(approved))
+            same = all(rebuilt.get(job_id) == text for job_id, text in approved.items())
+        except Exception:  # noqa: BLE001 - 作り直せないときも、送らない(文面は出さない)
+            same = False
+        return (now, None) if same else (None, words_text)
 
     def _save_approval_payloads(self) -> dict[str, Any]:
         with self._lock:
@@ -1807,9 +2136,46 @@ class BatchApi(Api):
             # まとめて比べた組は比較の窓でもまとめての比較になり、全体の答え(outcome.llm と同じ multi.llm)を持っていく(REQ-241 §5)
             result = self._results.get(job.id)
             answer = handed_answer(result.outcome.llm if result is not None else None, self._answer_sources.get(job.id))
+            # 比べ直した結果を返す先の目印(REQ-362 / ADR-0242)。置き換える行の結果があり、組のファイルで区間を指定していない組だけ。
+            # 区間を指定した組は、比較の窓に区間が渡らず別の範囲を比べることになる(受け取った組と同じ入力にならない)ので返さない
+            if result is not None and job.before.selection_source is None and job.after.selection_source is None:
+                handoff = replace(
+                    handoff, origin=BatchOrigin(job.id, job.before.path, job.after.path, self._results_version, self)
+                )
         self._session.handoff(handoff, answer)  # 比較の窓の Python の側を呼ぶ間はロックを持たない
         with self._lock:
             return self._ok()
+
+    def _take_compare_result(self, origin: BatchOrigin, request: Any, outcome: Any) -> bool:
+        """単一比較の窓で比べ直した結果を受ける(WebSession.compare_result_back がロックの外で呼ぶ。画面からは呼べない。REQ-362 / ADR-0242)。
+
+        次のどれかなら捨てて False: 閉じている途中・目印の送り元がこの窓でない・結果の版が受け取りのときと違う(作り直した・実行し直した)・
+        実行中か送信前の確認の待ち中・組の番号が無い・組のファイルのパスが違う・その組に結果が無い。
+        受けたら、その組の結果を置き換え(AI の答えは送る差分が同じときだけ残す)、全体の数を数え直し、印の元(使った単純比較の設定)を覚え、
+        画面を描き直させて True。AI は呼ばない。組の設定・ほかの組は変えない。
+        """
+        with self._lock:
+            if self._closing or origin.owner is not self or origin.version != self._results_version or not self._idle():
+                return False
+            jobs = self._prepared.jobs if self._prepared is not None else ()
+            job = next((j for j in jobs if j.id == origin.job_id), None)
+            if job is None or job.before.path != origin.before or job.after.path != origin.after:
+                return False
+            previous = self._results.get(job.id)
+            if previous is None:
+                return False
+            result = returned_result(job, previous, request, outcome)
+            if result.outcome.llm is not previous.outcome.llm:
+                self._answer_sources.pop(job.id, None)  # 外した答え(残したのは同じもの)の送り先の記録も消す(REQ-232 §2)
+            # dict を作り直す(結果の保存・出力のダイアログを開いている途中なら、「結果が変わった」の確かめで止まる)
+            self._results = {**self._results, job.id: result}
+            self._shown = dict(self._results)
+            self._returned = {**self._returned, job.id: request.raw_options}
+            counts = {status: sum(1 for r in self._results.values() if r.outcome.status == status) for status in STATUS_LABEL}
+            self._counts = status_counts_text(counts)
+            self._result_revision += 1
+        self._changed()
+        return True
 
     def _open_settings(self, tab: Any) -> dict[str, Any]:
         if tab not in SETTINGS_TABS:
@@ -1929,6 +2295,10 @@ class BatchApi(Api):
         if gone &(set(self._results) | set(self._shown)):
             self._results = {job_id: r for job_id, r in self._results.items() if job_id not in gone}
             self._shown = {job_id: r for job_id, r in self._shown.items() if job_id not in gone}
+        self._returned = {job_id: used for job_id, used in self._returned.items() if job_id not in gone}
+        if gone or pairs:
+            # 組を直して結果を消した・組の一覧が変わった。受け取り済みの比較の窓の結果は捨てる(REQ-362)
+            self._results_version += 1
         if pairs:
             self._only_checked = {side: set() for side in SIDES}
             self._suggestions = []
@@ -2219,6 +2589,7 @@ class BatchApi(Api):
                 return self._ok()
             number = self._next_serial()
             self._pair_ai = (number, prompt, (targets.before, targets.after), plan, self._pairs_revision, parts)
+            self._pair_ai_basis = (number, send_basis(settings))  # REQ-371
             name = destination_of(settings)[1]
             # 送る全文・送り先・送らないファイル。キー・CLI の場所は入れない。
             # この送信は見え方の決まりを足さないので、client に渡る文はこの prompt と 1 文字も違わない(ADR-0177 決定4)
@@ -2264,6 +2635,7 @@ class BatchApi(Api):
             if not _is_int(number) or number != pending[0]:
                 return self._ok()  # 古い確認・違う確認の答え(待っている確認はそのまま)
             self._pair_ai, self._pair_ai_view = None, None  # 答えたら消す(1つの確認で送れるのは1回だけ)
+            kept_basis, self._pair_ai_basis = self._pair_ai_basis, None  # 確認を出したときの設定の値(REQ-371)
             if yes is not True:
                 self._session.release(self)
                 result = self._ok() if isinstance(yes, bool) else _failure(gui_web_call_failed())
@@ -2272,19 +2644,36 @@ class BatchApi(Api):
                 sent_number, prompt, (before, after), plan, revision, parts = pending
                 assert plan.send is not None and plan.send.client is not None
                 refusal: str | None = None
+                refusal_title = BATCH_PAIR_AI_TITLE
                 bad_call = instruction is not None and not isinstance(instruction, str)
-                if isinstance(instruction, str) and instruction != parts.instructions[0]:
-                    words = normalize_words(plan.send.extra_secret_words)
-                    kind = check_question(instruction, words, max_chars=MAX_PROMPT_CHARS)
-                    if kind is not None:
-                        refusal = follow_up_refused(kind, MAX_PROMPT_CHARS)
+                if not bad_call:
+                    # 送る直前に設定を読み直して、確認を出したときと比べる(REQ-371 / ADR-0245 決定1)。違えば送らない
+                    confirmed = kept_basis[1] if kept_basis is not None and kept_basis[0] == sent_number else None
+                    now, stop = self._reread_pair_ai(confirmed)
+                    if stop is not None:
+                        refusal, refusal_title = stop
                     else:
-                        prompt = parts.compose([instruction])
-                        if prompt_too_long(prompt):
-                            refusal = batch_pair_ai_too_long(MAX_PROMPT_CHARS)
+                        assert confirmed is not None and now is not None
+                        words = normalize_words(now.secret_words)
+                        if isinstance(instruction, str) and instruction != parts.instructions[0]:
+                            kind = check_question(instruction, words, max_chars=MAX_PROMPT_CHARS)
+                            if kind is not None:
+                                refusal = follow_up_refused(kind, MAX_PROMPT_CHARS)
+                            else:
+                                prompt = parts.compose([instruction])
+                                if prompt_too_long(prompt):
+                                    refusal = batch_pair_ai_too_long(MAX_PROMPT_CHARS)
+                        if refusal is None and basis_change(confirmed, now) == "secret_words":
+                            # 今の秘密の語で、送る文を確認のときと同じ道で作り直す。1 字でも違えば送らない
+                            instruction_text = instruction if isinstance(instruction, str) else None
+                            refusal = self._check_rebuilt_pair_prompt(prompt, instruction_text, revision, words)
                 if bad_call or refusal is not None:
                     self._session.release(self)
-                    result = _failure(gui_web_call_failed()) if bad_call else self._pair_ai_notice(refusal or "")
+                    result = (
+                        _failure(gui_web_call_failed())
+                        if bad_call
+                        else self._ok(self._notice(refusal or "", refusal_title))
+                    )
                     released = True
                 else:
                     self._start_pair_asking(plan.send.client, prompt, before, after, revision, sent_number)
@@ -2295,6 +2684,44 @@ class BatchApi(Api):
             if not result["ok"]:
                 self._changed()  # 画面は失敗の文だけを受け取るので、読み直させる
         return result
+
+    def _reread_pair_ai(self, confirmed: SendBasis | None) -> tuple[SendBasis | None, tuple[str, str] | None]:
+        """ロックの中で呼ぶ。「AI に案を聞く…」の送信の直前に、設定を読み直して確認を出したときと比べる(REQ-371)。
+
+        返すのは (今の値, 送らない理由)。送ってよい(プロファイルと上限が同じ。秘密の語が違うときは呼ぶ側が送る文を作り直す)なら
+        (今の値, None)。送らないなら (None, (知らせの文, 題))。設定を読めないときは「AI 解析の設定を読めません」の題で理由を出す。
+        """
+        if confirmed is None:
+            return None, (REREAD_NOT_SENT["secret_words"], BATCH_PAIR_AI_TITLE)  # 起きないはずの形。確かめられないので送らない
+        try:
+            now = current_send_basis(**self._where)
+        except SettingsError as exc:
+            return None, (str(exc), BATCH_LLM_SETTINGS_TITLE)
+        kind = basis_change(confirmed, now)
+        if kind in ("profile", "limits"):
+            return None, (REREAD_NOT_SENT[kind], BATCH_PAIR_AI_TITLE)
+        return now, None
+
+    def _check_rebuilt_pair_prompt(
+        self, prompt: str, instruction: str | None, revision: int, words: tuple[str, ...]
+    ) -> str | None:
+        """ロックの中で呼ぶ。秘密の語が変わったとき、組の案を聞く文を今の語で作り直して送る文(prompt)と比べる(REQ-371 §3)。
+
+        送ってよければ None。送らないなら知らせの文。作り直しは _ask_pair_ai と同じ(片方だけのファイルの名前を今の語で選び直して、
+        送る文を組む)。直した指示(instruction。直していなければ None)があれば、同じ指示でつなぐ。1 字でも違えば送らない。
+        """
+        text = REREAD_NOT_SENT["secret_words"]
+        if self._edit is None or self._pairs_revision != revision:
+            return text  # 確認を出したときの組の一覧ではない。確かめられないので送らない
+        try:
+            targets = batch_edit.pair_ai_targets(self._edit.only_before, self._edit.only_after, words)
+            if not targets.before or not targets.after:
+                return text
+            rebuilt = pair_prompt_parts(list(targets.before), list(targets.after))
+            now_prompt = rebuilt.text if instruction is None else rebuilt.compose([instruction])
+        except Exception:  # noqa: BLE001 - 作り直せないときも、送らない(文面は出さない)
+            return text
+        return None if now_prompt == prompt else text
 
     def _start_pair_asking(
         self,

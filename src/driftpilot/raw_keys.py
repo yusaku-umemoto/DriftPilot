@@ -13,7 +13,7 @@ Python の re には時間切れが無いので、重い式は形で断る(check
 import importlib
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, get_args
 
 # 利用者に見える誤りの文。言語に合わせて読み込むときに 1 回だけ選ぶ(messages は読まない決まりのため、ここに持つ)。
@@ -59,7 +59,7 @@ MAX_MATCH_CHARS = 1000  # 正規表現を当てるのは行の先頭からこの
 
 ProblemField = Literal["ignore_lines", "replacements", "whitespace", "algorithm"]
 ProblemKind = Literal[
-    "too_many", "too_long", "bad_pattern", "bad_replacement", "matches_empty", "nested_repeat", "bad_value"
+    "too_many", "too_long", "bad_pattern", "bad_replacement", "matches_empty", "nested_repeat", "bad_value", "duplicate"
 ]
 ProblemPart = Literal["pattern", "replacement"]
 
@@ -110,6 +110,47 @@ DEFAULT_RAW_OPTIONS = RawOptions()
 
 
 @dataclass(frozen=True)
+class RawDisabled:
+    """無効にしたルール(REQ-359。ADR-0240 決定1)。ルールは消さずに、比べるときだけ外す。
+
+    ignore_lines は無視する行の式、replacements は置き換えの組。どちらも RawOptions の中のルールと、式(組は式と置き換える文字の
+    両方)がちょうど同じものを指す(式を書き換えたら別のルール。prune_disabled が今のルールに無いものを捨てる)。
+    """
+
+    ignore_lines: tuple[str, ...] = ()
+    replacements: tuple[Replacement, ...] = ()
+
+    def is_empty(self) -> bool:
+        return not self.ignore_lines and not self.replacements
+
+    def count(self) -> int:
+        return len(self.ignore_lines) + len(self.replacements)
+
+
+NO_DISABLED = RawDisabled()
+
+
+def prune_disabled(options: RawOptions, disabled: RawDisabled) -> RawDisabled:
+    """今のルールに無いものを捨てる。並びはルールの並びにそろえ、重なりは 1 つにする。"""
+    off_ignore, off_replace = set(disabled.ignore_lines), set(disabled.replacements)
+    ignore = [p for p in dict.fromkeys(options.ignore_lines) if p in off_ignore]
+    replacements = [r for r in dict.fromkeys(options.replacements) if r in off_replace]
+    return RawDisabled(tuple(ignore), tuple(replacements))
+
+
+def enabled_options(options: RawOptions, disabled: RawDisabled) -> RawOptions:
+    """無効のルールを除いた設定(ほかの設定はそのまま)。無効が無ければ options そのもの。"""
+    if disabled.is_empty():
+        return options
+    off_ignore, off_replace = set(disabled.ignore_lines), set(disabled.replacements)
+    return replace(
+        options,
+        ignore_lines=tuple(p for p in options.ignore_lines if p not in off_ignore),
+        replacements=tuple(r for r in options.replacements if r not in off_replace),
+    )
+
+
+@dataclass(frozen=True)
 class RawOptionProblem:
     """設定の誤り 1 件。式そのものは持たない(detail は re.error の文だけ)。
 
@@ -120,7 +161,9 @@ class RawOptionProblem:
     field: ProblemField
     index: int | None  # 1 始まり。欄全体の誤りは None
     kind: ProblemKind
-    detail: str | None = None  # re.error の文(bad_pattern・bad_replacement のときだけ)
+    # re.error の文(bad_pattern・bad_replacement のとき)。duplicate のときは、最初の行・組の画面の欄での位置(文字にした数。
+    # 式の文字は入れない。read_raw_form が出す。check_raw_options は duplicate を出さない。ADR-0236)
+    detail: str | None = None
     part: ProblemPart | None = None
 
 
@@ -341,30 +384,112 @@ def options_from_plain(data: object) -> RawOptions:
     return options
 
 
+_DISABLED_KEYS = ("ignore_lines", "replacements")
+
+
+def disabled_to_plain(disabled: RawDisabled) -> dict[str, Any]:
+    """ファイルに書く形(REQ-359 §2)。2 つのキーを両方書く。"""
+    return {
+        "ignore_lines": list(disabled.ignore_lines),
+        "replacements": [{"pattern": r.pattern, "replacement": r.replacement} for r in disabled.replacements],
+    }
+
+
+def disabled_from_plain(data: object) -> RawDisabled:
+    """disabled の形を読む。無いキーは空。形が違えば RawOptionsError(場所は disabled…。式は文に入れない)。"""
+    if not isinstance(data, Mapping):
+        raise _shape_error("disabled", _T["must_be_table"])
+    if any(k not in _DISABLED_KEYS for k in data):
+        raise _shape_error("disabled", _T["unknown_keys"])
+    ignore = data.get("ignore_lines", [])
+    if not isinstance(ignore, list) or not all(isinstance(x, str) for x in ignore):
+        raise _shape_error("disabled.ignore_lines", _T["string_array"])
+    items = data.get("replacements", [])
+    if not isinstance(items, list):
+        raise _shape_error("disabled.replacements", _T["array"])
+    replacements: list[Replacement] = []
+    for i, item in enumerate(items):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != set(_REPLACEMENT_KEYS)
+            or not all(isinstance(item[k], str) for k in _REPLACEMENT_KEYS)
+        ):
+            raise _shape_error(f"disabled.replacements[{i}]", _T["replacement_table"])
+        replacements.append(Replacement(item["pattern"], item["replacement"]))
+    return RawDisabled(tuple(ignore), tuple(replacements))
+
+
 # --- 鍵(§2.2) ---
 
 _SPACES = re.compile(r"[ \t]+")
 
+CompiledReplacements = list[tuple["re.Pattern[str]", str]]
 
-def line_keys(lines: Sequence[str], options: RawOptions) -> list[str | None]:
-    """行ごとの比べる鍵。None は無視した行。すべて既定なら行そのもの。
 
-    順番: 無視する行 → 置き換え(上から順) → 空白 → 空行 → 大文字小文字。正規表現は行の先頭 MAX_MATCH_CHARS 文字だけに当てる。
-    行の移動の検出と比べ方(REQ-228)は鍵を変えないので、鍵に効く 5 つが既定なら行そのもの。
+def compile_replacements(options: RawOptions) -> CompiledReplacements:
+    """置き換えを先にコンパイルする(上から順。誤った式は re.error。入口で require_valid を通した設定に使う)。"""
+    return [(re.compile(r.pattern), r.replacement) for r in options.replacements]
+
+
+def apply_replacements(text: str, replacements: CompiledReplacements) -> str:
+    """文字 1 つに置き換えを上から順に当てる。当てるのは先頭 MAX_MATCH_CHARS 文字まで、残りは後ろにそのままつなぐ(REQ-358)。"""
+    for pattern, replacement in replacements:
+        text = pattern.sub(replacement, text[:MAX_MATCH_CHARS]) + text[MAX_MATCH_CHARS:]
+    return text
+
+
+@dataclass(frozen=True)
+class LineRuleHit:
+    """1 行に当たったルール(REQ-366 §5)。番号は 1 から数える(行番号も、ルールの番号も)。
+
+    ignore_line: その行を無視した式の番号(最初に当たった式)。無視していなければ None。
+    replacements: その行の文字を変えた置き換えの組の番号(上から順)。無視した行では空。
     """
+
+    line_no: int
+    ignore_line: int | None
+    replacements: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class RuleCounts:
+    """ルールごとの当たった行の数(REQ-359 §3)。渡されたルールの並びと同じ順。
+
+    ignore_lines: その式で比べなかった行の数(1 行に複数の式が当たるときは、最初に当たった式に数える)。
+    replacements: その組の置き換えで文字が変わった行の数(最後に無視した行は数えない)。
+    lines: 当たったルールのある行だけ、行番号の順(REQ-366 §5。数え方は上の 2 つと同じ)。
+    """
+
+    ignore_lines: list[int]
+    replacements: list[int]
+    lines: list[LineRuleHit] = field(default_factory=list)
+
+
+def line_keys_traced(lines: Sequence[str], options: RawOptions) -> tuple[list[str | None], RuleCounts]:
+    """line_keys と同じ鍵(同じ順・同じ結果)と、ルールごとの当たった行の数。"""
     if options.keys_default():
-        return list(lines)
+        return list(lines), RuleCounts([], [])
     ignores = [re.compile(p) for p in options.ignore_lines]
-    replacements = [(re.compile(r.pattern), r.replacement) for r in options.replacements]
+    replacements = compile_replacements(options)
+    ignore_hits = [0] * len(ignores)
+    replace_hits = [0] * len(replacements)
     keys: list[str | None] = []
-    for line in lines:
+    line_hits: list[LineRuleHit] = []
+    for line_no, line in enumerate(lines, start=1):
         head = line[:MAX_MATCH_CHARS]
-        if any(p.search(head) for p in ignores):
+        found = next((n for n, p in enumerate(ignores) if p.search(head)), None)
+        if found is not None:
+            ignore_hits[found] += 1
+            line_hits.append(LineRuleHit(line_no, found + 1, ()))
             keys.append(None)
             continue
         key = line
-        for pattern, text in replacements:
-            key = pattern.sub(text, key[:MAX_MATCH_CHARS]) + key[MAX_MATCH_CHARS:]
+        changed: list[int] = []
+        for n, (pattern, replacement) in enumerate(replacements):
+            after = pattern.sub(replacement, key[:MAX_MATCH_CHARS]) + key[MAX_MATCH_CHARS:]
+            if after != key:
+                changed.append(n)
+            key = after
         if options.whitespace == "trailing":
             key = key.rstrip(" \t")
         elif options.whitespace == "amount":
@@ -374,10 +499,24 @@ def line_keys(lines: Sequence[str], options: RawOptions) -> list[str | None]:
         if options.ignore_blank_lines and not key.strip(" \t"):
             keys.append(None)
             continue
+        for n in changed:
+            replace_hits[n] += 1
+        if changed:
+            line_hits.append(LineRuleHit(line_no, None, tuple(n + 1 for n in changed)))
         if options.ignore_case:
             key = key.casefold()
         keys.append(key)
-    return keys
+    return keys, RuleCounts(ignore_hits, replace_hits, line_hits)
+
+
+def line_keys(lines: Sequence[str], options: RawOptions) -> list[str | None]:
+    """行ごとの比べる鍵。None は無視した行。すべて既定なら行そのもの。
+
+    順番: 無視する行 → 置き換え(上から順) → 空白 → 空行 → 大文字小文字。正規表現は行の先頭 MAX_MATCH_CHARS 文字だけに当てる。
+    行の移動の検出と比べ方(REQ-228)は鍵を変えないので、鍵に効く 5 つが既定なら行そのもの。
+    ルールごとの数が要るときは line_keys_traced(鍵は同じ)。
+    """
+    return line_keys_traced(lines, options)[0]
 
 
 def compute_keys(
@@ -385,3 +524,12 @@ def compute_keys(
 ) -> tuple[list[str | None], list[str | None]]:
     """両側の鍵(line_keys を 2 回呼ぶだけ。今のプロセス・今のスレッド)。"""
     return line_keys(before, options), line_keys(after, options)
+
+
+def compute_keys_traced(
+    before: Sequence[str], after: Sequence[str], options: RawOptions
+) -> tuple[list[str | None], list[str | None], RuleCounts, RuleCounts]:
+    """両側の鍵と、側ごとのルールごとの数(compute_keys と同じ鍵)。"""
+    before_keys, before_counts = line_keys_traced(before, options)
+    after_keys, after_counts = line_keys_traced(after, options)
+    return before_keys, after_keys, before_counts, after_counts

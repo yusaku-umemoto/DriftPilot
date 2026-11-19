@@ -22,7 +22,10 @@ import { createAiView } from "./ai_view.js"; // AI の面（REQ-220 §5.1）
 import { bindTail, showTail } from "./path_tail.js"; // ファイルの名前の欄は後ろを見せる（REQ-211 §4）
 import { bindColumnWidths, makeGrip } from "./column_width.js"; // 5 つの表の列の幅の境目（REQ-224 / ADR-0163）
 import { paintMarks } from "./marks.js"; // 変更の行で違う文字の印（REQ-226 / ADR-0165）
+import { nextSortDirection, sortOrder } from "./table_sort.js"; // 構造化比較の表の見出しの並べ替えの比べ方（REQ-369）
 import { fillRawOptions, readRawOptions } from "./raw_options.js"; // 単純比較の設定の欄（REQ-227 / ADR-0166。設定の窓と同じ部品）
+import { openRuleAiWith } from "./raw_options.js"; // 右クリックから「AI に式を頼む…」の小さな窓を値を入れて開く（REQ-360）
+import { digitRule, escapeRegex, ignoreLineRule, ruleFits } from "./raw_rule_text.js"; // 右クリックから足すルールの式（REQ-366 §2〜§4）
 import "./drop.js"; // ファイルのドロップを印の要素へ送る（REQ-205 / ADR-0147）
 import { playSplash, replayOnce, revealCharacters } from "./character.js"; // キャラクターの絵（ADR-0174 / REQ-236）
 
@@ -88,6 +91,29 @@ const shown = {
 };
 let rawRows = []; // 単純比較の行（下の2つの欄に全文を出すため）
 let rawSelected = -1;
+// 右クリックのメニュー（REQ-360・REQ-366）が開いている間だけ持つ、選んだ文字の {index, side, text}（選んだ文字が無いときは text が null）と、
+// 右クリックした行の {index, side}（開いていなければ null。side は右クリックしたセルの側で、分からなければ null）。閉じたときに戻すフォーカス
+let rawMenuPick = null;
+let rawMenuReturn = null;
+// 行ごとに効いているルール（result.raw_line_rules を raw_rows の番号で引く Map。REQ-366 §5）
+let rawLineRules = new Map();
+// 右クリックのメニューの項目の id（上から順。矢印キーの移動順）
+const RAW_MENU_ITEMS = [
+  "raw-menu-ai",
+  "raw-menu-replace",
+  "raw-menu-digits",
+  "raw-menu-ignore",
+  "raw-menu-rules",
+  "raw-menu-ask",
+];
+// 構造化比較のタブ・コマンドの組の一覧の右クリックのメニュー（REQ-367）が開いている間だけ持つ値。開いているメニューの要素・
+// 開く前のフォーカス・右クリックした行の番号（構造化比較は行の番号、組の一覧は一覧の行の番号）。閉じたら null
+const rightMenu = { menu: null, back: null, index: -1 };
+// 構造化比較の行ごとの、show の表の変更の行の変わった列の名前（result.structured_columns）と、元の行を探せるか（result.can_find_source）
+let structuredColumns = [];
+let canFindSource = false;
+// 選んだ文字をそのまま置き換えのルールにするときの、置き換える文字（REQ-366 §2）
+const RAW_RULE_VALUE = "<\u5024>"; // 山かっこの中は「値」（U+5024。画面の言語によらず同じ文字。日本語の文字を JavaScript に書かない決まりのため、コードで書く）
 // 単純比較の行の要素を raw_rows の番号で引く配列（ADR-0155 決定4。折りたたみの行が入るので sectionRowIndex に頼らない）
 let rawEls = [];
 // 単純比較の変更の行の印を raw_rows の番号で引く Map（{before, after}。下の2つの欄にも使う。REQ-226 §4.3）
@@ -101,6 +127,13 @@ let rawMoveLabels = new Map(); // 移動の行の印の文（raw_rows の番号 
 let structuredRows = [];
 let structuredCategory = null;
 let chips = [];
+// 構造化比較の表の並べ替え（REQ-369。画面の中だけ。Python には渡さない）。column は見出しの番号（-1 は元の順）、ariaSort は向き（aria-sort の値）。
+// structuredSortFrom は一括の比較が終わった（「全部」のタブへ移した）とき、元の順へ戻す結果の番号（これ以上の番号の結果を描くときに戻す）。無ければ null。
+// 古い結果の読み込みの答えが遅れて届いても、新しい結果より前のものでは戻さない
+const structuredSort = { column: -1, ariaSort: "none" };
+let structuredSortFrom = null;
+// 数字の部分を数として比べる器（Gi1/0/2 < Gi1/0/10）。言語は並べ替えるときの <html lang>（起動のあとで画面の言語が入るため、ここでは作らない）。言語ごとに 1 つ持つ
+const structuredCollators = new Map();
 // キャラクターの絵（ADR-0174 決定2）。差分なしの絵（構造化と単純比較のタブ）の id、最後に描いた結果の場面、起動時の絵を出したか
 const NO_DIFF_IDS = ["character-no-diff", "character-no-diff-still", "character-no-diff-raw", "character-no-diff-raw-still"];
 const scene = { noDiff: false, neverCompared: true };
@@ -244,6 +277,7 @@ function render(next) {
   shown.revision = next.revision;
   view = next;
   const busy = next.busy;
+  applyStartSplit(next.split_left); // 開いたときの左の面の幅（最初の 1 回だけ。REQ-370）
 
   renderModes(next.labels.modes);
   renderChoices($("kind"), next.labels.kinds);
@@ -334,7 +368,7 @@ function render(next) {
   }
   renderDetached(next.ai_detached);
   renderAiHidden(!next.ai_detached && next.ai_hidden === true);
-  renderMulti(next.multi);
+  renderMulti(next.multi, next.result_revision);
   if (next.result_revision !== shown.result) {
     loadResult();
   }
@@ -381,10 +415,93 @@ function renderRawOptions(next) {
   problems.hidden = raw.problems.length === 0;
   text(problems, raw.problems.join("\n"));
   text($("raw-options-summary"), raw.summary);
+  // 設定の窓で保存した設定を受けたときの帯（REQ-361）。ボタンは load が真のときだけ（文は textContent）
+  const follow = next.raw_follow;
+  $("raw-follow").hidden = follow === null;
+  text($("raw-follow-text"), follow === null ? "" : follow.text);
+  $("raw-follow-load").hidden = follow === null || !follow.load;
   const line = $("raw-settings-line");
   line.hidden = next.raw_settings_line === null;
   text(line, next.raw_settings_line);
   line.title = next.raw_settings_line === null ? "" : next.raw_settings_line;
+  renderRawRules(raw.rules || [], raw.rules_title);
+  renderSkipColumns(next.skip_columns || []);
+}
+
+// この窓だけの「比べない列」（REQ-367 §3）。単純比較の設定の欄（#rawopt-fields）の外の一覧。名前と「外す」のボタン（aria-label は「外す: UPTIME」）。
+// 空なら「なし」。中身が変わったときだけ作り直す。文字は make と textContent だけで入れる
+let shownSkipColumns = null;
+function renderSkipColumns(columns) {
+  const key = JSON.stringify(columns);
+  if (key === shownSkipColumns) {
+    return;
+  }
+  shownSkipColumns = key;
+  const list = $("skip-columns-list");
+  if (columns.length === 0) {
+    list.replaceChildren(make("li", "", $("skip-columns-none").textContent));
+    return;
+  }
+  list.replaceChildren(
+    ...columns.map((name) => {
+      const item = make("li", "", null);
+      const button = make("button", "pilot-button pilot-button--secondary", $("skip-columns-remove").textContent);
+      button.type = "button";
+      button.setAttribute("aria-label", $("skip-columns-remove-template").textContent.replace("{column}", name));
+      button.addEventListener("click", () => act("unskip_column", name));
+      item.append(make("span", "pilot-mono", name), " ", button);
+      return item;
+    }),
+  );
+}
+
+// 単純比較のタブの「効いているルール」の一覧（REQ-359 §4）。ルールが無ければ隠す。行は中身が変わったときだけ作り直す
+// （描くたびに作り直さない）。文字は text() と textContent だけで入れる。作り直したときは、操作していたチェックへ
+// 行の位置でフォーカスを戻す。チェックを切り替えたら、欄（#rawopt-fields）へ rawopt-rule-toggle を送る
+// （欄の無効を切り替えて change を送るのは raw_options.js。そこから今の form_changed に乗る）。
+let shownRules = null;
+function renderRawRules(rules, title) {
+  $("raw-rules").hidden = rules.length === 0;
+  text($("raw-rules-title"), title);
+  const key = JSON.stringify(rules);
+  if (key === shownRules) {
+    return;
+  }
+  shownRules = key;
+  const body = $("raw-rules-table").tBodies[0];
+  const active = document.activeElement;
+  const focused = active && active.dataset && active.dataset.ruleCheck ? Number(active.dataset.ruleCheck) : -1;
+  body.replaceChildren(
+    ...rules.map((rule, index) => {
+      const tr = document.createElement("tr");
+      const checkCell = document.createElement("td");
+      const check = make("input", "pilot-check", null);
+      check.type = "checkbox";
+      check.checked = rule.enabled;
+      check.dataset.ruleCheck = String(index);
+      check.setAttribute("aria-label", `${rule.kind_text}: ${rule.pattern}`);
+      check.addEventListener("change", () => {
+        $("rawopt-fields").dispatchEvent(
+          new CustomEvent("rawopt-rule-toggle", {
+            detail: { kind: rule.kind, pattern: rule.pattern, replacement: rule.replacement, enabled: check.checked },
+          }),
+        );
+      });
+      checkCell.append(check);
+      const pattern = make("td", "pilot-mono", rule.pattern);
+      pattern.title = rule.pattern;
+      const replacement = make("td", "pilot-mono", rule.replacement);
+      replacement.title = rule.replacement;
+      tr.append(checkCell, make("td", "", rule.kind_text), pattern, replacement, make("td", "", rule.hits));
+      return tr;
+    }),
+  );
+  if (focused >= 0) {
+    const again = body.querySelector(`input[data-rule-check="${focused}"]`);
+    if (again !== null) {
+      again.focus();
+    }
+  }
 }
 
 // --- AI の面を別の窓で出しているとき（ADR-0160 決定1） ---
@@ -420,7 +537,7 @@ function renderAiHidden(hidden) {
 
 // まとめての比較の一覧（REQ-122）。行は番号が変わったときだけ作り直し、選んでいる行は aria-selected で表す。
 // 「全部」のタブ（ADR-0152 決定7）は一覧があるときだけ出す。無ければ隠し、開いていれば構造化のタブへ移す。
-function renderMulti(multi) {
+function renderMulti(multi, resultRevision) {
   $("multi").hidden = multi === null;
   $("multi-handle").hidden = multi === null;
   $("tab-all").hidden = multi === null;
@@ -430,6 +547,8 @@ function renderMulti(multi) {
     shown.all = null;
     shown.tab = null;
     $("multi-pairing").hidden = true;
+    renderExcluded([], false);
+    closeRightMenu(false);
     if (!$("panel-all").hidden) {
       selectTab("structured");
     }
@@ -452,6 +571,17 @@ function renderMulti(multi) {
   if (multi.tab_revision !== shown.tab) {
     shown.tab = multi.tab_revision;
     selectTab(multi.tab);
+    // 「全部」のタブへ移るのは、一括の比較が終わったときと一括の保存を開いたときだけ（組を選び直したときは移らない）。
+    // 新しい結果なので、構造化比較の表の並べ替えは元の順へ戻す（REQ-369）。その結果をもう描いていれば今戻し、
+    // まだなら、その番号以上の結果を描くときに戻す（drawResult）
+    if (multi.tab === "all") {
+      if (resultRevision <= shown.result) {
+        resetStructuredSort();
+        applyStructuredSort();
+      } else {
+        structuredSortFrom = resultRevision;
+      }
+    }
   }
   const body = $("multi-table").tBodies[0];
   // 「AI に送る」の列は、まとめて比べた結果のときだけ出す（開いた保存の結果では multi.send が null。REQ-265 §2）
@@ -483,11 +613,39 @@ function renderMulti(multi) {
       fragment.append(tr);
     }
     body.replaceChildren(fragment);
+    closeRightMenu(false); // 行を作り直したので、一覧の右クリックのメニューは閉じる（REQ-367）
   }
   Array.from(body.rows).forEach((tr, index) => {
     tr.setAttribute("aria-selected", String(index === multi.selected));
   });
   drawSendChecks(multi, body);
+  renderExcluded(multi.excluded || [], multi.restore === true);
+}
+
+// 比べる対象から外した区間（REQ-367 §4）。一覧の下の折りたたみ「外した区間 {n}」。中は名前と「戻す」。0 個なら隠す。
+// 中身が変わったときだけ作り直す。文字は make と textContent だけで入れる（外した順の番号 k を戻す口に渡す。戻せないときは押せない）
+let shownExcluded = null;
+function renderExcluded(excluded, restorable) {
+  const box = $("multi-excluded");
+  box.hidden = excluded.length === 0;
+  const key = JSON.stringify([excluded, restorable]);
+  if (key === shownExcluded) {
+    return;
+  }
+  shownExcluded = key;
+  text($("multi-excluded-title"), $("multi-excluded-title-template").textContent.replace("{n}", String(excluded.length)));
+  $("multi-excluded-list").replaceChildren(
+    ...excluded.map((item, k) => {
+      const li = make("li", "", null);
+      const restore = make("button", "pilot-button pilot-button--secondary", $("multi-excluded-restore").textContent);
+      restore.type = "button";
+      restore.disabled = !restorable;
+      restore.setAttribute("aria-label", $("multi-excluded-restore-template").textContent.replace("{name}", item.name));
+      restore.addEventListener("click", () => act("restore_excluded", k));
+      li.append(make("span", "", item.name), " ", restore);
+      return li;
+    }),
+  );
 }
 
 // 行の先頭の「AI に送る」のチェックのセル。状態は描くたびに Python の値で入れる（drawSendChecks）。
@@ -674,10 +832,111 @@ function applyCategory() {
     chip.button.setAttribute("aria-pressed", String(chip.value === structuredCategory));
   }
   const rows = $("structured-table").tBodies[0].rows;
-  for (let index = 0; index < rows.length; index += 1) {
-    rows[index].hidden = structuredCategory !== null && structuredRows[index].category !== structuredCategory;
+  // 行は並べ替えで動くので、位置ではなく元の番号（data-index）で structuredRows から引く（REQ-369）
+  for (const tr of rows) {
+    const index = Number(tr.dataset.index);
+    tr.hidden = structuredCategory !== null && structuredRows[index].category !== structuredCategory;
   }
   reportShown();
+}
+
+// --- 構造化比較の表の並べ替え（REQ-369。画面の中だけ。Python には渡さない） ---
+
+// 今の画面の言語（<html lang>）の、数字の部分を数として比べる器。画面の言語は起動のあとで入るので、並べ替えるたびに取る
+function structuredCollator() {
+  const lang = document.documentElement.lang || "";
+  if (!structuredCollators.has(lang)) {
+    structuredCollators.set(lang, new Intl.Collator(lang || undefined, { numeric: true }));
+  }
+  return structuredCollators.get(lang);
+}
+
+// 並べ替えを元の順へ戻す（表の描き直しは呼び側）
+function resetStructuredSort() {
+  structuredSort.column = -1;
+  structuredSort.ariaSort = "none";
+}
+
+// 列ごとの並べ替えの値（元の行の番号の順）。表の文字ではなく、Python が返した行から取る
+// （操作の列のセルは印に替わっているため言葉の row.op を使う）
+const STRUCTURED_SORT_VALUES = [
+  (row) => row.op,
+  (row) => row.category,
+  (row) => targetItemText(row.target, row.item),
+  (row) => row.before,
+  (row) => row.after,
+];
+
+// 見出しの aria-sort を今の並べ替えに合わせ、行を並べ替える。行の要素は作り直さず、動かすだけ（選んだ行・印・フォーカスはそのまま付いてくる）。
+// 隠れている行（カテゴリで絞った行）も一緒に並べるので、絞り込みを変えても並びは保たれる。元の順は data-index の順。
+// 変更の行の文字の印は td の中にあるので、行を動かしても同じ行に付いたまま
+function applyStructuredSort() {
+  const table = $("structured-table");
+  const heads = table.tHead.rows[0].cells;
+  for (let column = 0; column < heads.length; column += 1) {
+    heads[column].setAttribute("aria-sort", column === structuredSort.column ? structuredSort.ariaSort : "none");
+  }
+  const body = table.tBodies[0];
+  const trs = Array.from(body.rows);
+  if (trs.length === 0) {
+    return;
+  }
+  const byIndex = new Map(trs.map((tr) => [Number(tr.dataset.index), tr]));
+  const column = structuredSort.column;
+  const values =
+    column < 0 || structuredSort.ariaSort === "none"
+      ? []
+      : structuredRows.map((row) => STRUCTURED_SORT_VALUES[column](row));
+  const order =
+    values.length === 0
+      ? structuredRows.map((_row, index) => index)
+      : sortOrder(values, structuredSort.ariaSort, structuredCollator());
+  const next = order.map((index) => byIndex.get(index)).filter((tr) => tr !== undefined);
+  if (next.length !== trs.length || next.every((tr, at) => tr === trs[at])) {
+    return; // すでにその並び（行を動かさない）
+  }
+  // フォーカスのある行は、動かした後に同じ行へ戻す（フォーカスのある要素を DOM で動かすと外れる窓があるため）。見出しにあるときは見出しのまま
+  const active = document.activeElement;
+  const focusedRow = active instanceof Element && body.contains(active) ? active.closest("tr") : null;
+  const fragment = document.createDocumentFragment();
+  for (const tr of next) {
+    fragment.append(tr); // 引数に広げない（数万行でも引数の数の上限に当たらないように）
+  }
+  body.append(fragment);
+  closeRightMenu(false);
+  if (focusedRow !== null) {
+    focusedRow.focus({ preventScroll: true });
+  }
+}
+
+// 見出しを押す・Enter・Space で、その列の向きを進める（昇順 → 降順 → 元の順。別の列を押したら昇順から。ほかの列の並べ替えは外れる）。
+// 列の境目（.pilot-col-resize）の上の事象では並べ替えない
+function onStructuredHeadActivate(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target === null || target.closest(".pilot-col-resize") !== null) {
+    return;
+  }
+  const th = target.closest("th");
+  if (th === null) {
+    return;
+  }
+  if (event.type === "keydown") {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault(); // Space で枠がスクロールしない
+  }
+  const column = th.cellIndex;
+  if (column === structuredSort.column) {
+    structuredSort.ariaSort = nextSortDirection(structuredSort.ariaSort);
+    if (structuredSort.ariaSort === "none") {
+      structuredSort.column = -1;
+    }
+  } else {
+    structuredSort.column = column;
+    structuredSort.ariaSort = "ascending";
+  }
+  applyStructuredSort();
 }
 
 // --- 単純比較の表と「差分のみ表示」（ADR-0155 決定2〜5） ---
@@ -774,9 +1033,18 @@ function nextRaw(step) {
 }
 
 function drawResult(result) {
+  // 一括の比較が終わった（structuredSortFrom の番号以上の）結果を描くときは、構造化比較の表の並べ替えを元の順へ戻す（REQ-369）
+  const sortReset = structuredSortFrom !== null && result.revision >= structuredSortFrom;
+  if (sortReset) {
+    structuredSortFrom = null;
+    resetStructuredSort();
+  }
   // 表の中身の番号（rows_revision）が前に描いたものと同じなら、AI の答えだけが変わった（「AI で解析」の確認・答え。REQ-264 §2）。
   // 表・絞り込み・選んでいる行・スクロールには触らず、AI の答えとキャラクターの場面だけを描き直す
   if (result.rows_revision === shown.rows) {
+    if (sortReset) {
+      applyStructuredSort(); // 表は同じだが、並べ替えは元の順へ戻す
+    }
     aiView.drawResult(result);
     scene.noDiff = result.no_diff === true;
     scene.neverCompared = result.never_compared === true;
@@ -793,6 +1061,8 @@ function drawResult(result) {
   // 選び直さない。選んだあとで、押せるタブの確かめを通す
   if (result.open_tab_revision !== shown.openTab) {
     shown.openTab = result.open_tab_revision;
+    // 新しい結果（比べ直した・保存の結果を開いた）なので、構造化比較の表の並べ替えは元の順へ戻す（REQ-369）
+    resetStructuredSort();
     if (result.open_tab) {
       selectTab(result.open_tab);
       keepSelectableTab(result.fallback_tab);
@@ -814,9 +1084,24 @@ function drawResult(result) {
   );
   // 変更の行の違う文字に印を付ける（変更前は 4 列目、変更後は 5 列目。行を作ったときに 1 回だけ。REQ-226 §4.2・REQ-276）
   paintTableMarks("structured-table", result.structured_rows, result.structured_marks, 3, 4);
+  // 構造化比較の行の右クリック（REQ-367）。行を描き直したので、前のメニューと知らせは閉じて隠す。
+  // 行はフォーカスできる行（tabindex="-1"）にする。キーボードのメニューのキー・Shift+F10 は、フォーカスのある行で開く
+  // 行には元の番号（Python が返した行の番号）を data-index に持たせる。並べ替えても、右クリック・絞り込み・並べ替えはこの番号で行を引く（REQ-369）
+  let structuredIndex = 0;
+  for (const tr of $("structured-table").tBodies[0].rows) {
+    tr.tabIndex = -1;
+    tr.dataset.index = String(structuredIndex);
+    structuredIndex += 1;
+  }
+  structuredColumns = result.structured_columns || [];
+  canFindSource = result.can_find_source === true;
+  closeRightMenu(false);
+  hideStructuredNote();
   // 行を作り直したら、同じカテゴリがあれば同じ絞り込みをかける（無ければ「すべて」に戻す。ADR-0155 決定1）
   structuredRows = result.structured_rows;
   drawChips(result.categories, result.categories_all);
+  // 選んだ並べ替えを新しい表にかけ直す（元の順のときも aria-sort を描き直すため呼ぶ。一括の比較が終わったときは、関数の先頭で元の順へ戻してある）
+  applyStructuredSort();
   text($("raw-note"), result.raw_note);
   // 無視した行・同じとみなした行の数のボタン（REQ-227 §11.4）。結果を描き直したら押していない状態に戻す
   const setAside = $("raw-set-aside");
@@ -825,6 +1110,9 @@ function drawResult(result) {
   rawSetAside = new Set(result.raw_set_aside_rows);
   rawMarkLabels = result.raw_mark_labels || {};
   rawMoveLabels = new Map((result.raw_move_labels || []).map((item) => [item.index, item.text]));
+  closeRawMenu(false); // 行を描き直すので、右クリックのメニューは閉じる（REQ-360）
+  hideRawRuleNote(); // 足せなかった知らせも、描き直したら隠す（REQ-366 §2〜§4）
+  rawLineRules = new Map((result.raw_line_rules || []).map((item) => [item.index, item]));
   rawRows = result.raw_rows;
   rawSelected = -1;
   // 単純比較は専用の関数で描く（折りたたみの行と data-index。差分のみ表示のチェックは作り直した後も付け直す。ADR-0155 決定3〜5）
@@ -908,15 +1196,655 @@ async function jump(step) {
   }
 }
 
-// --- 左右の面の境目（ADR-0148 決定2）。幅は要素の CSS 変数に入れるだけで、保存しない ---
+// --- 単純比較のタブで選んだ文字を、右クリックから「AI に式を頼む…」へ渡す（REQ-360 / ADR-0240 決定3） ---
+// 式の上限（Python の MAX_PATTERN_CHARS）と、貼る行の上限（Python の MAX_PASTED_LINES・MAX_PASTED_CHARS）。
+// JavaScript の文字の長さは Python より大きく数えることがあり、超えない側に倒れる
+const RAW_SELECTION_MAX_CHARS = 200;
+const RULE_AI_MAX_LINES = 100;
+const RULE_AI_MAX_CHARS = 20000;
+
+// 選んだ範囲の端の要素が入っている「1 つの行の片側の文字」の箱。次のどちらかなら { index, side }、それ以外は null。
+// ・#raw-table の本体の 1 つの行（data-index がある行）の、変更前の文字（3 列目）か変更後の文字（5 列目）のセル
+// ・全文の表示（#raw-before・#raw-after）。行は今選んでいる行（rawSelected）
+function rawBoxOf(node) {
+  const element = node instanceof Element ? node : node === null ? null : node.parentElement;
+  if (element === null) {
+    return null;
+  }
+  const cell = element.closest("#raw-table tbody td");
+  if (cell !== null) {
+    const tr = cell.parentElement;
+    const side = cell.cellIndex === 2 ? "before" : cell.cellIndex === 4 ? "after" : null;
+    if (side === null || tr.dataset.index === undefined) {
+      return null;
+    }
+    return { index: Number(tr.dataset.index), side };
+  }
+  const full = element.closest("#raw-before, #raw-after");
+  if (full !== null && rawSelected >= 0) {
+    return { index: rawSelected, side: full.id === "raw-before" ? "before" : "after" };
+  }
+  return null;
+}
+
+// 今の選択が、メニューを出してよいものなら { index, side, text, range }、そうでなければ null。
+// 全部を満たすときだけ: 範囲が 1 つで閉じていない・文字が空でない（前後の空白だけでない）・200 字以下・改行を含まない・
+// 範囲の始まりと終わりが同じ 1 つの行の片側の文字の中にある
+function rawSelectionAt() {
+  const selection = window.getSelection();
+  if (selection === null || selection.rangeCount !== 1 || selection.isCollapsed) {
+    return null;
+  }
+  // 文字は range.toString()（文字の節の元の中身）から取る。選択そのものの toString は画面に出ている文を返すので、
+  // 表のセル（white-space: nowrap）では続く空白が 1 つにまとまり、行の元の文字と合わなくなる
+  const range = selection.getRangeAt(0);
+  const value = range.toString();
+  if (value.trim() === "" || value.length > RAW_SELECTION_MAX_CHARS || /[\r\n]/.test(value)) {
+    return null;
+  }
+  const start = rawBoxOf(range.startContainer);
+  const end = rawBoxOf(range.endContainer);
+  if (start === null || end === null || start.index !== end.index || start.side !== end.side) {
+    return null;
+  }
+  if (rawRows[start.index] === undefined) {
+    return null;
+  }
+  return { index: start.index, side: start.side, text: value, range };
+}
+
+// 小さな窓に入れる行。選んだ側のコマンドの出力の行（その側の行番号がある行を、行番号の順に）から、選んだ行を中心に
+// 前の行と後ろの行を 1 行ずつ交互に足して、100 行・20,000 字（各行の長さの合計＋行の数−1）まで。
+// 選んだ行が変更の行（相手の側の行があり、文字が違う）なら、相手の側のその行を選んだ行のすぐ後に入れる（上限に入るときだけ）。
+// 片方が尽きた・次の行が入らないときは、もう片方だけ続ける。選んだ行そのものが上限を超えるときも、その行は入れる（Python が断る）
+function ruleAiLines(pick) {
+  const side = pick.side;
+  const other = side === "before" ? "after" : "before";
+  const items = [];
+  rawRows.forEach((row, index) => {
+    if (row[`${side}_no`] !== null) {
+      items.push({ index, no: row[`${side}_no`], text: row[`${side}_text`] });
+    }
+  });
+  items.sort((a, b) => a.no - b.no);
+  const at = items.findIndex((item) => item.index === pick.index);
+  const chosen = rawRows[pick.index];
+  if (at < 0) {
+    return [chosen[`${side}_text`]];
+  }
+  const head = []; // 前の行（近い行から遠い行の順）
+  const tail = []; // 後ろの行（選んだ行のすぐ後の相手の側の行を、先頭に入れる）
+  let count = 1; // 入れた行の数
+  let size = chosen[`${side}_text`].length; // 各行の長さの合計＋行の数−1
+  const fits = (line) => count < RULE_AI_MAX_LINES && size + line.length + 1 <= RULE_AI_MAX_CHARS;
+  const add = (list, line) => {
+    list.push(line);
+    count += 1;
+    size += line.length + 1;
+  };
+  if (chosen[`${other}_no`] !== null && chosen[`${other}_text`] !== chosen[`${side}_text`] && fits(chosen[`${other}_text`])) {
+    add(tail, chosen[`${other}_text`]);
+  }
+  let before = at - 1; // 次に足す前の行（尽きたら -1）
+  let after = at + 1; // 次に足す後ろの行（尽きたら items.length）
+  let wantBefore = true;
+  while (before >= 0 || after < items.length) {
+    // 順番の側が尽きていれば、もう片方を使う
+    const useBefore = wantBefore ? before >= 0 : after >= items.length;
+    wantBefore = !wantBefore;
+    const line = useBefore ? items[before].text : items[after].text;
+    if (!fits(line)) {
+      // この側は次の行が入らない。尽きたことにして、もう片方だけ続ける
+      if (useBefore) {
+        before = -1;
+      } else {
+        after = items.length;
+      }
+      continue;
+    }
+    if (useBefore) {
+      add(head, line);
+      before -= 1;
+    } else {
+      add(tail, line);
+      after += 1;
+    }
+  }
+  return [...head.reverse(), chosen[`${side}_text`], ...tail];
+}
+
+function rawMenuOpen() {
+  return !$("raw-menu").hidden;
+}
+
+// メニューを閉じる。restore が真なら、開く前にあったフォーカスへ戻す（Esc のとき）
+function closeRawMenu(restore) {
+  if (!rawMenuOpen()) {
+    return;
+  }
+  $("raw-menu").hidden = true;
+  document.removeEventListener("pointerdown", onRawMenuOutside, true);
+  document.removeEventListener("scroll", onRawMenuScroll, true);
+  const back = rawMenuReturn;
+  rawMenuPick = null;
+  rawMenuReturn = null;
+  if (restore && back !== null && typeof back.focus === "function") {
+    back.focus();
+  }
+}
+
+function onRawMenuOutside(event) {
+  if (!$("raw-menu").contains(event.target)) {
+    closeRawMenu(false);
+  }
+}
+
+function onRawMenuScroll() {
+  closeRawMenu(false);
+}
+
+// 右クリックした行（{index, side}）。右クリックしたセルで決める（REQ-366）。
+// ・表の本文の 1 つの行（data-index がある行）: 変更前の番号か文字のセルなら "before"、変更後の番号か文字のセルなら "after"、印のセルは側が無い（null）
+// ・全文の表示（#raw-before・#raw-after）: 今選んでいる行のその側
+// ・キーボードのメニューのキー（座標が無く、表そのものにフォーカスがある）: 今選んでいる行。側は分からない（null）
+// どれでもなければ null（折りたたみの行・表の外・行を選んでいないキーボード）
+function rawRowAt(event) {
+  const element = event.target instanceof Element ? event.target : null;
+  if (element === null) {
+    return null;
+  }
+  const cell = element.closest("#raw-table tbody td");
+  if (cell !== null) {
+    const tr = cell.parentElement;
+    if (tr.dataset.index === undefined || rawRows[Number(tr.dataset.index)] === undefined) {
+      return null;
+    }
+    const side = cell.cellIndex === 1 || cell.cellIndex === 2 ? "before" : cell.cellIndex === 3 || cell.cellIndex === 4 ? "after" : null;
+    return { index: Number(tr.dataset.index), side };
+  }
+  const full = element.closest("#raw-before, #raw-after");
+  if (full !== null && rawSelected >= 0) {
+    return { index: rawSelected, side: full.id === "raw-before" ? "before" : "after" };
+  }
+  if (element.id === "raw-wrap" && rawSelected >= 0 && rawRows[rawSelected] !== undefined) {
+    return { index: rawSelected, side: null };
+  }
+  return null;
+}
+
+// その行のその側の文字（無ければ null。その側の行番号が無い側）
+function rawSideText(row) {
+  if (row === null || row.side === null || rawRows[row.index] === undefined) {
+    return null;
+  }
+  const item = rawRows[row.index];
+  return item[`${row.side}_no`] === null ? null : item[`${row.side}_text`];
+}
+
+// 出す項目の id の集まり（REQ-360・REQ-366 §2〜§6）。式が 200 文字を超えるときは、その項目を出さない
+function rawMenuAvailable(pick, row) {
+  const ids = new Set();
+  if (pick !== null) {
+    ids.add("raw-menu-ai");
+    if (ruleFits(escapeRegex(pick.text))) {
+      ids.add("raw-menu-replace");
+    }
+    if (/[0-9]/.test(pick.text) && ruleFits(digitRule(pick.text))) {
+      ids.add("raw-menu-digits");
+    }
+  }
+  const line = rawSideText(row);
+  if (line !== null && line.trim() !== "" && ruleFits(ignoreLineRule(line))) {
+    ids.add("raw-menu-ignore");
+  }
+  if (row !== null && rawLineRules.has(row.index)) {
+    ids.add("raw-menu-rules");
+  }
+  if (row !== null && rawRows[row.index].is_diff && view !== null && view.ai.can_ask_shown) {
+    ids.add("raw-menu-ask");
+  }
+  return ids;
+}
+
+// 出している項目のボタン（上から順）
+function rawMenuButtons() {
+  return RAW_MENU_ITEMS.map((id) => $(id)).filter((button) => !button.hidden);
+}
+
+// メニューを (x, y)（窓の座標）に出す。窓の外へはみ出すときは中へ寄せる。選んだ内容は、押したときに選択が消えても使えるよう、ここで持つ。
+// ids は出す項目。出さない項目は隠す
+function openRawMenu(pick, row, ids, x, y) {
+  closeRawMenu(false);
+  closeRightMenu(false); // 構造化比較・一覧のメニューが開いていれば閉じる（REQ-367）
+  hideRawRuleNote(); // 次にメニューを開いたときに、前の知らせを隠す（REQ-366）
+  rawMenuPick = {
+    index: pick !== null ? pick.index : row.index,
+    side: pick !== null ? pick.side : row.side,
+    text: pick !== null ? pick.text : null,
+    row,
+  };
+  rawMenuReturn = document.activeElement;
+  const menu = $("raw-menu");
+  for (const id of RAW_MENU_ITEMS) {
+    $(id).hidden = !ids.has(id);
+  }
+  menu.hidden = false;
+  const box = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(0, Math.min(x, window.innerWidth - box.width))}px`;
+  menu.style.top = `${Math.max(0, Math.min(y, window.innerHeight - box.height))}px`;
+  document.addEventListener("pointerdown", onRawMenuOutside, true);
+  document.addEventListener("scroll", onRawMenuScroll, true);
+  rawMenuButtons()[0].focus();
+}
+
+// 右クリック（キーボードのメニューのキーも同じ contextmenu）。出す項目が 1 つも無ければ、何もしない（preventDefault しない。
+// ブラウザの今のメニューのまま）。あるときだけ、ブラウザのメニューを止めて、窓の中のメニューを出す
+function onRawContextMenu(event) {
+  const pick = rawSelectionAt();
+  const row = rawRowAt(event);
+  const ids = rawMenuAvailable(pick, row);
+  if (ids.size === 0) {
+    return;
+  }
+  event.preventDefault();
+  let x = event.clientX;
+  let y = event.clientY;
+  if (x === 0 && y === 0) {
+    // キーボードから（座標が無い）。選んだ範囲の左下（選んでいなければ選んでいる行の左下）に出す
+    const rect = pick !== null ? pick.range.getBoundingClientRect() : rawEls[row.index].getBoundingClientRect();
+    x = rect.left;
+    y = rect.bottom;
+  }
+  openRawMenu(pick, row, ids, x, y);
+}
+
+// 「選んだ文字を正規表現で消す…」。メニューを閉じてから、行・説明・種類・選んだ文字を入れて小さな窓を開く
+function chooseRawMenu() {
+  const pick = rawMenuPick;
+  closeRawMenu(false);
+  if (pick === null || pick.text === null || rawRows[pick.index] === undefined) {
+    return;
+  }
+  openRuleAiWith({
+    lines: ruleAiLines(pick).join("\n"),
+    description: $("raw-menu-description").textContent,
+    kind: "replace",
+    selection: pick.text,
+  });
+}
+
+// --- 構造化比較のタブ・コマンドの組の一覧の右クリック（REQ-367 / ADR-0244 決定 1・3） ---
+// 開閉・矢印キー・Esc・外を押す・スクロールの動きは単純比較のメニューと同じ。#structured-menu と #multi-menu の 2 つで使う小さな共通の関数
+
+function rightMenuOpen() {
+  return rightMenu.menu !== null;
+}
+
+// 出している項目のボタン（上から順）
+function rightMenuButtons() {
+  return rightMenu.menu === null ? [] : Array.from(rightMenu.menu.querySelectorAll("button")).filter((button) => !button.hidden);
+}
+
+// メニューを閉じる。restore が真なら、開く前にあったフォーカスへ戻す（Esc・項目を押したとき）
+function closeRightMenu(restore) {
+  if (!rightMenuOpen()) {
+    return;
+  }
+  rightMenu.menu.hidden = true;
+  document.removeEventListener("pointerdown", onRightMenuOutside, true);
+  document.removeEventListener("scroll", onRightMenuScroll, true);
+  const back = rightMenu.back;
+  rightMenu.menu = null;
+  rightMenu.back = null;
+  rightMenu.index = -1;
+  if (restore && back !== null && typeof back.focus === "function") {
+    back.focus();
+  }
+}
+
+function onRightMenuOutside(event) {
+  if (rightMenuOpen() && !rightMenu.menu.contains(event.target)) {
+    closeRightMenu(false);
+  }
+}
+
+function onRightMenuScroll() {
+  closeRightMenu(false);
+}
+
+// メニューを (x, y)（窓の座標）に出す。窓の外へはみ出すときは中へ寄せる。index は右クリックした行の番号（押したときに使う）。
+// 出す項目（hidden を外したボタン）は呼ぶ側が決めておく
+function openRightMenu(menu, index, x, y) {
+  closeRawMenu(false);
+  closeRightMenu(false);
+  rightMenu.menu = menu;
+  rightMenu.back = document.activeElement;
+  rightMenu.index = index;
+  menu.hidden = false;
+  const box = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(0, Math.min(x, window.innerWidth - box.width))}px`;
+  menu.style.top = `${Math.max(0, Math.min(y, window.innerHeight - box.height))}px`;
+  document.addEventListener("pointerdown", onRightMenuOutside, true);
+  document.addEventListener("scroll", onRightMenuScroll, true);
+  rightMenuButtons()[0].focus();
+}
+
+// 右クリックした場所（座標が無いキーボードのメニューのキーは、行の左下）
+function menuPosition(event, tr) {
+  if (event.clientX === 0 && event.clientY === 0) {
+    const rect = tr.getBoundingClientRect();
+    return [rect.left, rect.bottom];
+  }
+  return [event.clientX, event.clientY];
+}
+
+function hideStructuredNote() {
+  $("structured-menu-note").hidden = true;
+  text($("structured-menu-note"), "");
+}
+
+function showStructuredNote(value) {
+  text($("structured-menu-note"), value);
+  $("structured-menu-note").hidden = false;
+}
+
+// 右クリックした構造化比較の行（tbody の tr）。キーボードのメニューのキー・Shift+F10（座標が無い）では、フォーカスのある行。
+// 表の外枠（#structured-wrap）にだけフォーカスがあるときは、見えている最初の行（上下の矢印で行を移れる）。見える行が無ければ null
+function structuredRowAt(event) {
+  const element = event.target instanceof Element ? event.target : null;
+  const tr = element === null ? null : element.closest("#structured-table tbody tr");
+  if (tr !== null || event.clientX !== 0 || event.clientY !== 0) {
+    return tr;
+  }
+  const active = document.activeElement;
+  const focused = active instanceof Element ? active.closest("#structured-table tbody tr") : null;
+  return focused !== null ? focused : visibleStructuredRows()[0] || null;
+}
+
+// カテゴリのチップで隠れていない構造化比較の行（上から順）
+function visibleStructuredRows() {
+  return Array.from($("structured-table").tBodies[0].rows).filter((tr) => !tr.hidden);
+}
+
+// 表（#structured-wrap）にフォーカスがあるとき、上下の矢印・Home・End で、見えている行の間をフォーカスが移る
+function onStructuredKeydown(event) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey) {
+    return;
+  }
+  const rows = visibleStructuredRows();
+  if (rows.length === 0) {
+    return;
+  }
+  const at = rows.indexOf(document.activeElement);
+  let next;
+  if (event.key === "Home") {
+    next = 0;
+  } else if (event.key === "End") {
+    next = rows.length - 1;
+  } else if (at < 0) {
+    next = event.key === "ArrowDown" ? 0 : rows.length - 1;
+  } else {
+    next = Math.max(0, Math.min(rows.length - 1, at + (event.key === "ArrowDown" ? 1 : -1)));
+  }
+  event.preventDefault();
+  rows[next].focus();
+}
+
+// 構造化比較の行の右クリック。出す項目が 1 つも無ければ、何もしない（preventDefault しない。今の右クリックのまま）。
+// ・「元の行を単純比較のタブで見る」: その行の上で、元の行を探せるとき（result.can_find_source。比較方式が構造化だけのときは出さない）
+// ・「この列をこの窓だけ比べない」: show の表の変更の行の上で、変わった列ごと（result.structured_columns。追加・削除・config の行・見出しの上では出さない）
+function onStructuredContextMenu(event) {
+  const tr = structuredRowAt(event);
+  if (tr === null) {
+    return;
+  }
+  const index = Number(tr.dataset.index); // 並べ替えた後も元の行の番号（REQ-369）
+  const columns = structuredColumns[index] || [];
+  if (!canFindSource && columns.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  hideStructuredNote(); // 次にメニューを開いたときに、前の知らせを隠す
+  $("structured-menu-source").hidden = !canFindSource;
+  const template = $("structured-menu-skip-template").textContent;
+  $("structured-menu-columns").replaceChildren(
+    ...columns.map((name) => {
+      const button = make("button", "pilot-menu-item", template.replace("{column}", name));
+      button.type = "button";
+      button.setAttribute("role", "menuitem");
+      button.addEventListener("click", () => chooseSkipColumn(name));
+      return button;
+    }),
+  );
+  const [x, y] = menuPosition(event, tr);
+  openRightMenu($("structured-menu"), index, x, y);
+}
+
+// 「元の行を単純比較のタブで見る」。Python が単純比較の行から探した番号（structured_source）を受け、見つからなければ知らせる。
+// 見つかったら単純比較のタブを開き、その行が差分のみ表示（か「無視した行」だけの表示）で隠れていれば、その表示を切ってから、選んで見える所まで動かす
+async function chooseStructuredSource() {
+  const index = rightMenu.index;
+  closeRightMenu(true);
+  if (view === null || index < 0) {
+    return;
+  }
+  const answer = await call("structured_source", form(), index);
+  if (!answer.ok) {
+    text(statusMain, answer.message);
+    return;
+  }
+  render(answer.view);
+  const row = answer.source.row;
+  if (row === null || rawEls[row] === undefined) {
+    showStructuredNote($("structured-menu-not-found").textContent);
+    return;
+  }
+  hideStructuredNote();
+  selectTab("raw");
+  if ($("raw-diff-only").checked && !rawEls[row].dataset.keep) {
+    $("raw-diff-only").checked = false;
+    applyDiffOnly();
+  }
+  if (setAsideOnly() && !rawEls[row].dataset.setAside) {
+    applySetAside(false);
+  }
+  selectRaw(row, true);
+  $("raw-wrap").focus();
+}
+
+// 「この列をこの窓だけ比べない: 列」。skip_column で足す（Python が重複・20 個までを決める）。足せなければ知らせを出す
+async function chooseSkipColumn(name) {
+  closeRightMenu(true);
+  if (view === null) {
+    return;
+  }
+  const answer = await call("skip_column", form(), name);
+  await handle(answer);
+  if (answer.ok && (answer.skip_column === "duplicate" || answer.skip_column === "full")) {
+    showStructuredNote($(answer.skip_column === "duplicate" ? "structured-menu-skip-duplicate" : "structured-menu-skip-full").textContent);
+  }
+}
+
+// コマンドの組の一覧の行の右クリック。外せるときだけ（view.multi.exclude と行ごとの exclude_rows。比較中・開いた保存の結果・最後の1行は出さない）。
+// キーボードのメニューのキーでは、選んでいる行（view.multi.selected）
+function onMultiContextMenu(event) {
+  if (view === null || view.multi === null) {
+    return;
+  }
+  const element = event.target instanceof Element ? event.target : null;
+  const body = $("multi-table").tBodies[0];
+  let tr = element === null ? null : element.closest("#multi-table tbody tr");
+  if (tr === null && event.clientX === 0 && event.clientY === 0 && view.multi.selected >= 0) {
+    tr = body.rows[view.multi.selected] || null;
+  }
+  if (tr === null) {
+    return;
+  }
+  const index = tr.sectionRowIndex;
+  if (view.multi.exclude !== true || (view.multi.exclude_rows || [])[index] !== true) {
+    return;
+  }
+  event.preventDefault();
+  const [x, y] = menuPosition(event, tr);
+  openRightMenu($("multi-menu"), index, x, y);
+}
+
+// 「この区間を比べる対象から外す」。Python が外して一覧を作り直す（exclude_row）
+function chooseMultiExclude() {
+  const index = rightMenu.index;
+  closeRightMenu(true);
+  if (index >= 0) {
+    act("exclude_row", index);
+  }
+}
+
+// --- 右クリックから、ルールを足す・効いているルールを見る・AI に質問する（REQ-366 / ADR-0244 決定 1・2） ---
+
+function hideRawRuleNote() {
+  $("raw-rule-note").hidden = true;
+  text($("raw-rule-note"), "");
+}
+
+// ルールを欄に足す（#rawopt-fields へ rawopt-rule-add を送る。足すのは raw_options.js の addRawRule で、結果は detail.result に返る）。
+// 足せたら change が窓に届き、今の form_changed になる（自動の比較がオンなら比べ直す。保存はしない）。
+// 同じ式が既にあれば足さず、満ちていれば足さない。どちらも欄が閉じていても分かるよう、#raw-rule-note にその文を出す
+function addRuleFromMenu(kind, pattern, replacement) {
+  const detail = { kind, pattern, replacement, result: null };
+  $("rawopt-fields").dispatchEvent(new CustomEvent("rawopt-rule-add", { detail }));
+  if (detail.result === "duplicate" || detail.result === "full") {
+    text($("raw-rule-note"), $(detail.result === "duplicate" ? "rawopt-duplicate" : "rawopt-ai-full").textContent);
+    $("raw-rule-note").hidden = false;
+  } else {
+    hideRawRuleNote();
+  }
+}
+
+// 押したときの選んだ内容を取り出してメニューを閉じる。フォーカスは開く前の場所へ戻す
+function takeRawMenuPick() {
+  const pick = rawMenuPick;
+  closeRawMenu(true);
+  return pick;
+}
+
+// §2: 選んだ文字をそのまま置き換えのルールにする（式は re.escape と同じ逃がし方。置き換える文字は <値>）
+function chooseRawReplace() {
+  const pick = takeRawMenuPick();
+  if (pick !== null && pick.text !== null) {
+    addRuleFromMenu("replace", escapeRegex(pick.text), RAW_RULE_VALUE);
+  }
+}
+
+// §3: 選んだ文字の数字を \d+ にして置き換えのルールにする
+function chooseRawDigits() {
+  const pick = takeRawMenuPick();
+  if (pick !== null && pick.text !== null) {
+    addRuleFromMenu("replace", digitRule(pick.text), RAW_RULE_VALUE);
+  }
+}
+
+// §4: この行（右クリックした側の文字）を無視する行のルールにする
+function chooseRawIgnore() {
+  const pick = takeRawMenuPick();
+  const line = pick === null ? null : rawSideText(pick.row);
+  if (line !== null && line.trim() !== "") {
+    addRuleFromMenu("ignore", ignoreLineRule(line), "");
+  }
+}
+
+// 小さな窓を閉じたら、フォーカスを表に戻す
+function closeLineRules() {
+  const dialog = $("raw-line-rules");
+  if (dialog.open) {
+    dialog.close();
+  }
+}
+
+// §5: この行に効いているルールを小さな窓に出す。側（変更前・変更後）ごとに、当たったルールの種類・式・置き換える文字。
+// 文字は textContent だけで入れる（式・置き換える文字は利用者の文字）
+function chooseRawRules() {
+  const pick = takeRawMenuPick();
+  const entry = pick === null ? undefined : rawLineRules.get(pick.row.index);
+  if (entry === undefined) {
+    return;
+  }
+  const body = $("raw-line-rules-body");
+  body.replaceChildren(
+    ...entry.sides.map((side) => {
+      const section = document.createElement("section");
+      section.append(make("h3", "pilot-dialog-subtitle", side.title));
+      if (side.rules.length === 0) {
+        section.append(make("p", "pilot-note", side.none));
+        return section;
+      }
+      const list = document.createElement("ul");
+      for (const rule of side.rules) {
+        const item = document.createElement("li");
+        item.append(make("span", "", rule.kind_text), " ", make("code", "pilot-mono", rule.pattern));
+        if (rule.kind === "replace") {
+          item.append(" → ", make("code", "pilot-mono", rule.replacement));
+        }
+        list.append(item);
+      }
+      section.append(list);
+      return section;
+    }),
+  );
+  $("raw-line-rules").showModal();
+  $("raw-line-rules-close").focus();
+}
+
+// §6: この差分について AI に質問する。AI の欄を隠していれば先に出し、Python に対象の行を知らせる（shown_changed の 4 つ目）。
+// 知らせた後、AI を別の窓で出していればその窓を前に出す。入力欄に決まった質問を入れて欄に移るのは ai_view.js（番号が変わったときだけ）。
+// 送るのは利用者が送ったときだけ（ここでは送らない）
+async function chooseRawAsk() {
+  const pick = takeRawMenuPick();
+  const item = pick === null ? undefined : rawRows[pick.row.index];
+  if (item === undefined || !item.is_diff) {
+    return;
+  }
+  if (view !== null && view.ai_hidden === true && !view.ai_detached) {
+    await act("set_ai_hidden", false);
+  }
+  await act("shown_changed", "raw", null, { before_no: item.before_no, after_no: item.after_no });
+  if (view !== null && view.ai_detached) {
+    await handle(await call("open_ai_pane"));
+  }
+}
+
+// --- 左右の面の境目（ADR-0148 決定2）。幅は要素の CSS 変数に入れる。動かし終えたら Python が窓の配置のファイル（ui-state.json）に覚える（REQ-370・REQ-374） ---
 
 const split = $("split");
 // 名前は handle にしない（後ろの関数 handle と同じ名前になり、モジュールが読み込めなくなるため）
 const splitHandle = $("split-handle");
-// 利用者が動かした後の左の面の幅の割合（決めた幅 ÷ 全体の幅。ADR-0216 決定4）。動かす前は null で、CSS の初めの幅（58%）のまま。
+// 利用者が動かした後（開いたときに覚えた割合があればその値）の左の面の幅の割合（決めた幅 ÷ 全体の幅。ADR-0216 決定4）。
+// 動かす前で覚えた割合も無いときは null で、CSS の初めの幅（72%）のまま。
 // 窓の大きさが変わっても同じ割合で決め直す。最小の幅に詰めた値では上書きしない
 let leftRatio = null;
 let dragging = null;
+let startSplitApplied = false;
+
+// 開いたときの幅。Python が設定から読んだ割合（view.split_left。無い・範囲の外は null）を、最初の状態が届いたときに 1 回だけ入れる。
+// 割合（%）で入れるので、AI の欄を隠して始めても、あとで出したときにその幅になる。最小の幅は CSS の min-width が守る
+function applyStartSplit(value) {
+  if (startSplitApplied) {
+    return;
+  }
+  startSplitApplied = true;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return;
+  }
+  leftRatio = value;
+  split.style.setProperty("--pilot-split-left", `${value * 100}%`);
+  splitHandle.setAttribute("aria-valuenow", String(Math.round(value * 100)));
+}
+
+// 動かし終えた割合を Python に渡して窓の配置のファイル（ui-state.json。REQ-374）に覚えさせる。AI を別の窓に出している間・まだ割合が無いときは何もしない
+function rememberSplit() {
+  if (view === null || view.ai_detached || leftRatio === null) {
+    return;
+  }
+  act("remember_split", Math.round(leftRatio * 1000) / 1000);
+}
 
 // 左の面の幅を px で決める。両側とも PANE_MIN より狭くしない。境目が隠れている（縦に積んでいる）ときは何もしない（null を返す）。
 // 決めた幅 ÷ 全体の幅を返す。覚えるのは利用者が動かしたときだけ（moveLeftWidth）。
@@ -958,9 +1886,13 @@ splitHandle.addEventListener("pointermove", (event) => {
 });
 for (const name of ["pointerup", "pointercancel"]) {
   splitHandle.addEventListener(name, (event) => {
+    const wasDragging = dragging !== null;
     dragging = null;
     if (splitHandle.hasPointerCapture(event.pointerId)) {
       splitHandle.releasePointerCapture(event.pointerId);
+    }
+    if (wasDragging) {
+      rememberSplit(); // ドラッグを離したときに覚える（REQ-370）
     }
   });
 }
@@ -969,6 +1901,7 @@ splitHandle.addEventListener("keydown", (event) => {
   if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
     event.preventDefault();
     moveLeftWidth(currentLeftWidth() + (event.key === "ArrowLeft" ? -SPLIT_STEP : SPLIT_STEP));
+    rememberSplit(); // 矢印のキーで動かしたときも覚える（REQ-370）
   }
 });
 // 窓の大きさが変わったら、覚えた割合から今の全体の幅で幅を決め直し、最小の幅の中に詰める（割合は書き換えない）
@@ -1254,6 +2187,8 @@ const aiView = createAiView({ $, call: aiCall, act, on, afterPreview: handle });
 const { drawPartial } = aiView;
 
 function selectTab(name) {
+  closeRawMenu(false); // タブを変えたら右クリックのメニューを閉じる（REQ-360）
+  closeRightMenu(false); // 構造化比較・一覧のメニューも閉じる（REQ-367）
   for (const tab of TABS) {
     $(`tab-${tab}`).setAttribute("aria-selected", String(tab === name));
     $(`panel-${tab}`).hidden = tab !== name;
@@ -1362,6 +2297,95 @@ $("raw-wrap").addEventListener("keydown", (event) => {
     selectRaw(nextRaw(event.key === "ArrowDown" ? 1 : -1), true);
   }
 });
+// 文字を選んだ右クリック（キーボードのメニューのキーも contextmenu）で、窓の中のメニューを出す（REQ-360 / ADR-0240 決定3）。
+// 表（#raw-wrap。キーボードでフォーカスがあるのもここ）と、全文の表示（#raw-before・#raw-after）で受ける
+for (const id of ["raw-wrap", "raw-before", "raw-after"]) {
+  $(id).addEventListener("contextmenu", onRawContextMenu);
+}
+$("raw-menu-ai").addEventListener("click", chooseRawMenu); // 押す・Enter（button の既定の動き）
+$("raw-menu-replace").addEventListener("click", chooseRawReplace);
+$("raw-menu-digits").addEventListener("click", chooseRawDigits);
+$("raw-menu-ignore").addEventListener("click", chooseRawIgnore);
+$("raw-menu-rules").addEventListener("click", chooseRawRules);
+$("raw-menu-ask").addEventListener("click", chooseRawAsk);
+// 「この行に効いているルールを見る」の小さな窓。Esc（dialog の既定）か「閉じる」で閉じ、閉じたらフォーカスを表に戻す
+$("raw-line-rules-close").addEventListener("click", closeLineRules);
+$("raw-line-rules").addEventListener("close", () => $("raw-wrap").focus());
+// Esc で閉じてフォーカスを戻す。上下の矢印・Home・End で項目を移る。キー押下の受け手は、メニューの中だけに付ける（document・window には付けない）
+$("raw-menu").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeRawMenu(true);
+    return;
+  }
+  const buttons = rawMenuButtons();
+  const at = buttons.indexOf(document.activeElement);
+  let next = null;
+  if (event.key === "ArrowDown") {
+    next = buttons[(at + 1) % buttons.length];
+  } else if (event.key === "ArrowUp") {
+    next = buttons[(at - 1 + buttons.length) % buttons.length];
+  } else if (event.key === "Home") {
+    next = buttons[0];
+  } else if (event.key === "End") {
+    next = buttons[buttons.length - 1];
+  }
+  if (next !== null) {
+    event.preventDefault();
+    next.focus();
+  }
+});
+// フォーカスがほかの要素へ出たら閉じる。relatedTarget が null のときは閉じない。WebKit（Mac の窓）では、button を押すと
+// フォーカスが外れて空になり、押している途中（mousedown）で focusout が relatedTarget なしで起きる。ここで閉じると
+// click が届かない。外を押したときは、開いている間だけ付ける pointerdown の受け手が閉じる
+$("raw-menu").addEventListener("focusout", (event) => {
+  if (event.relatedTarget !== null && !$("raw-menu").contains(event.relatedTarget)) {
+    closeRawMenu(false);
+  }
+});
+// 構造化比較のタブの行・コマンドの組の一覧の行の右クリック（REQ-367）。キーボードのメニューのキーも contextmenu。
+// 開いたメニューの矢印・Home・End・Esc・フォーカスが外へ出たときは、単純比較のメニューと同じ動き（メニューの中だけに付ける）
+$("structured-wrap").addEventListener("contextmenu", onStructuredContextMenu);
+$("structured-wrap").addEventListener("keydown", onStructuredKeydown);
+// 構造化比較の表の見出し（REQ-369）。押す・Enter・Space で並べ替える（見出しと colgroup は作り直さないので、起動時に 1 回だけ付ける）
+for (const th of $("structured-table").tHead.rows[0].cells) {
+  th.addEventListener("click", onStructuredHeadActivate);
+  th.addEventListener("keydown", onStructuredHeadActivate);
+}
+$("multi-wrap").addEventListener("contextmenu", onMultiContextMenu);
+$("structured-menu-source").addEventListener("click", chooseStructuredSource);
+$("multi-menu-exclude").addEventListener("click", chooseMultiExclude);
+for (const id of ["structured-menu", "multi-menu"]) {
+  $(id).addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeRightMenu(true);
+      return;
+    }
+    const buttons = rightMenuButtons();
+    const at = buttons.indexOf(document.activeElement);
+    let next = null;
+    if (event.key === "ArrowDown") {
+      next = buttons[(at + 1) % buttons.length];
+    } else if (event.key === "ArrowUp") {
+      next = buttons[(at - 1 + buttons.length) % buttons.length];
+    } else if (event.key === "Home") {
+      next = buttons[0];
+    } else if (event.key === "End") {
+      next = buttons[buttons.length - 1];
+    }
+    if (next !== null) {
+      event.preventDefault();
+      next.focus();
+    }
+  });
+  // relatedTarget が null のときは閉じない（単純比較のメニューと同じ理由。外を押したときは pointerdown の受け手が閉じる）
+  $(id).addEventListener("focusout", (event) => {
+    if (event.relatedTarget !== null && !$(id).contains(event.relatedTarget)) {
+      closeRightMenu(false);
+    }
+  });
+}
 $("raw-diff-only").addEventListener("change", () => applyDiffOnly());
 // 「無視した行」のボタンとはどちらか 1 つ（REQ-227 §11.4）。差分のみ表示を付けたら、ボタンは押していない状態に戻す
 $("raw-diff-only").addEventListener("change", () => {
@@ -1380,6 +2404,25 @@ bind("raw-set-aside", () => {
 // 単純比較の設定の欄が変わったら（打ち終わった change・例から足す・置き換えを外す）Python に渡す。値が変われば Python が比較を始める
 $("rawopt-fields").addEventListener("change", () => act("form_changed"));
 bind("rawopt-reset", async () => handle(await call("reset_raw_options")));
+// 帯の「いつも効く設定を読み込む」は「いつも効く設定に戻す」と同じ処理（REQ-361 §3）。帯は Python が消す
+bind("raw-follow-load", async () => handle(await call("reset_raw_options")));
+// 「いつも効く設定に足す」（REQ-361 §5b）。1 回目で Python が足す式の確認（raw_add_confirm）を返したら、dialog.js の confirm で聞き
+// （本文は textContent。既定は「やめる」）、「足す」のときだけ confirmed=true で呼び直す。足すものが無いときは知らせだけ
+bind("rawopt-add-defaults", async () => {
+  if (view === null) {
+    return;
+  }
+  const result = await call("add_raw_to_defaults", form(), false);
+  if (result.ok && result.raw_add_confirm) {
+    const ask = result.raw_add_confirm;
+    render(result.view);
+    if (await confirm(ask.title, ask.body, ask.yes, ask.no)) {
+      await handle(await call("add_raw_to_defaults", form(), true));
+    }
+    return;
+  }
+  await handle(result);
+});
 // まとめての比較の一覧の行を選ぶ（どの組の結果を出すかは Python が決め、result() で取る）。矢印のキーでも動かす
 $("multi-table").tBodies[0].addEventListener("click", (event) => {
   if (event.target.closest(".pilot-check-cell") !== null) {
@@ -1431,6 +2474,7 @@ bind("ai-front", async () => handle(await call("open_ai_pane")));
 bind("ai-hide", () => act("set_ai_hidden", true));
 bind("ai-show", () => act("set_ai_hidden", false));
 bind("cancel", async () => handle(await call("cancel")));
+bind("open-log-view", async () => handle(await call("open_log_view")));
 bind("open-batch", async () => handle(await call("open_batch")));
 bind("open-settings", async () => handle(await call("open_settings")));
 // 新しい版の知らせ（REQ-252 §5）。「更新…」は設定の窓を「更新」のタブで開き、「閉じる」はその起動の間は出さない

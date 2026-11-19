@@ -238,6 +238,7 @@ def run_compare(
                 rules=rules,
                 enabled_ids=request.enabled_rule_ids,
                 options=request.raw_options,
+                skip_columns=request.skip_columns,
             )
             # テンプレートがなければ raw の結果を出す。構造化できたときは --mode both のときだけ raw も付ける
             raw = show.raw if show.method in ("raw", "both") else None

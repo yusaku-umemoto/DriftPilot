@@ -1,7 +1,7 @@
 // キャラクター（Mirarin）の絵を出す部品（ADR-0174 / REQ-236）。比較の窓（compare.js）・一括比較の窓（batch.js）・AI の面（ai_view.js）が使う。
 //
 // 絵は HTML に <img ... class="pilot-character" hidden> で書いてあり、ここでは hidden を外す・付けるだけ（文字は入れない。style の属性も使わない）。
-// 出すかどうかは Python が返す view の character（その窓を最初に描いたときの [gui] character）で決まる。偽なら絵は hidden のまま。
+// 出すかどうかは Python が返す view の character（描いたときに読み、設定の窓で保存したら読み直す [gui] character。ADR-0245 決定2）で決まる。偽なら絵は hidden のまま。
 // 動く絵（.pilot-character--motion）と止まった絵（.pilot-character--still）は両方の hidden を外し、どちらを見せるかは
 // pilot.css の prefers-reduced-motion の決まりに任せる。
 

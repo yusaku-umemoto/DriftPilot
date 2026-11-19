@@ -13,6 +13,10 @@
   AI の窓の Python の側(AiPaneApi)は薄い口だけ。開いたら CompareApi._ai_attached、閉じたら CompareApi._ai_detached を
   ロックの外で呼ぶ
 
+- 「ログを見る」の窓(比較の窓の下の「ログを見る…」で開く。1つだけ。ADR-0248 決定2 / REQ-377)。開いていれば前に出す。
+  比較の窓を閉じたら一緒に閉じる。1 つのログを手元で読むだけの窓で、門は取らず、AI へは何も送らない。
+  watch_drop を渡されたら、窓の読み込みの後にファイルのドロップを受ける
+
 - 起動したときの新しい版の確かめ(ADR-0188 決定2 / REQ-252 §5)。[gui] auto_update_check が真のときだけ、最初の窓
   (比較の窓。--batch だけのときは一括比較の窓)の最初の state() の後に、裏で check_latest を 1 回だけ呼ぶ(1 つの起動で 2 回呼ばない)。
   偽のときは、つなぐ関数を一度も呼ばない。結果が newer のときだけ知らせ(update_notice_view)を置き、比較の窓と一括比較の窓へ
@@ -21,7 +25,7 @@
   app.run が launch_notice(知らせの文)を渡す。同じ帯(update_notice_view)に先に出し、そのときは自動の確かめの知らせは置かない。
   --update-started のときは started_marker(started-ok のパス)も渡り、比較の窓(--batch だけのときは一括比較の窓)の
   最初の state() の後に 1 回だけ書く(mark_update_started。入れ替える側はこれを見て控えを消す)
-- 「全部閉じる」(close_all)。設定の窓の「更新」で新しい版が始まったら、比較・一括比較・AI・設定の窓を全部閉じる
+- 「全部閉じる」(close_all)。設定の窓の「更新」で新しい版が始まったら、比較・一括比較・AI・「ログを見る」・設定の窓を全部閉じる
   (窓が全部閉じると webview.start が戻り、app.run の _finish で終わる)
 - 画面の色(ADR-0189 / REQ-256 §5)。設定の窓・一括比較の窓・AI の窓を開くたびに、設定ファイルの [gui] theme を読んで、
   create_window の url に付ける(theme.themed_window。"system" は付けない)。「表示」の「保存」の後は apply_theme が、
@@ -38,8 +42,9 @@ from typing import TYPE_CHECKING, Any
 
 from driftpilot import __version__
 from driftpilot.gui_web import theme as theme_module
+from driftpilot.gui_web.app_icon import AppIcon
 from driftpilot.gui_web.settings_api import SettingsApi
-from driftpilot.messages import AI_PANE_TITLE, BATCH_TITLE, SETTINGS_TITLE, update_notice_text
+from driftpilot.messages import AI_PANE_TITLE, BATCH_TITLE, LOG_VIEW_TITLE, SETTINGS_TITLE, update_notice_text
 from driftpilot.update import STATE_NEWER, UpdateStatus, check_latest
 from driftpilot.update.apply import write_started_ok
 from driftpilot.screen_model.worker import RunGate
@@ -73,6 +78,13 @@ def _new_ai_api(compare: "CompareApi") -> Any:
     return AiPaneApi(compare)
 
 
+def _new_log_view_api() -> Any:
+    """「ログを見る」の窓の Python の側(log_view_api は compare_api を読むので、使うときに読む。ADR-0248 決定2)。"""
+    from driftpilot.gui_web.log_view_api import LogViewApi
+
+    return LogViewApi()
+
+
 class WebSession:
     """窓をまたいで共有する門・ロック・開いている窓。
 
@@ -84,10 +96,14 @@ class WebSession:
     REQ-115)。省くとドロップを受けない。
     ai_window は AI の窓の create_window に足す引数(url・大きさ・位置・min_size・text_select。app.run が渡す。ADR-0160 決定2)。
     ai_api は AI の窓の Python の側を作る関数(比較の窓の CompareApi を受け取る。開くたびに新しく作る。テストで差し替える)。
+    log_view_window は「ログを見る」の窓の create_window に足す引数(url・大きさ・位置・min_size・text_select。app.run が渡す。
+    ADR-0248 決定2)。log_view_api はその窓の Python の側を作る関数(開くたびに新しく作る。テストで差し替える)。
     update_fetch は起動したときの新しい版の確かめでつなぐ関数(REQ-252 §5。None なら check_latest の既定。テストは偽物を渡す)。
     run_in_background はその確かめを裏で動かす関数(既定はデーモンのスレッド。テストはその場で動かす関数を渡す)。
     launch_notice は更新の後の起動の知らせの文(REQ-253 §7。無ければ None)。started_marker は --update-started で
     渡された started-ok のパス(無ければ None)。write_started はそれを書く関数(テストで差し替える)。
+    app_icon は動いている間のアイコンの切り替え(REQ-373。設定の保存の後、キャラクターのオン・オフが変わったときだけ切り替える。
+    省くと何もしない)。
     theme_of は窓を開くときに画面の色を読む関数(省くと、そのときの theme.current_theme。読めなければ "system")。
     """
 
@@ -102,13 +118,17 @@ class WebSession:
         watch_drop: Callable[[Any, Callable[[Any], None]], None] | None = None,
         ai_window: dict[str, Any] | None = None,
         ai_api: Callable[["CompareApi"], Any] = _new_ai_api,
+        log_view_window: dict[str, Any] | None = None,
+        log_view_api: Callable[[], Any] = _new_log_view_api,
         update_fetch: Callable[[str], bytes] | None = None,
         run_in_background: Callable[[Callable[[], None]], None] = _in_daemon_thread,
         launch_notice: str | None = None,
         started_marker: str | None = None,
         write_started: Callable[[str], Any] = write_started_ok,
         theme_of: Callable[[], str] | None = None,
+        app_icon: AppIcon | None = None,
     ) -> None:
+        self._app_icon = app_icon
         self.lock = threading.RLock()
         self._gate = RunGate()
         self._create_window = create_window or _webview_create_window
@@ -128,6 +148,10 @@ class WebSession:
         self._ai_api = ai_api
         self._ai: tuple[Any, Any] | None = None  # (AI の窓, その Python の側)
         self._ai_opening = False  # AI の窓を作っている途中(二重に開かない)
+        self._log_view_window = dict(log_view_window or {})
+        self._log_view_api = log_view_api
+        self._log_view: tuple[Any, Any] | None = None  # (「ログを見る」の窓, その Python の側)
+        self._log_view_opening = False  # 「ログを見る」の窓を作っている途中(二重に開かない)
         self._splash_taken = False  # 起動時の絵(キャラクター)の番を、最初の窓が使ったか(ADR-0174 決定2)
         # 起動したときの新しい版の確かめ(REQ-252 §5): つなぐ関数・裏で動かす関数・1 回始めたか・知らせの文・閉じたか
         self._update_fetch = update_fetch
@@ -157,7 +181,7 @@ class WebSession:
             windows = []
             if self._compare is not None and not self._compare_closed:
                 windows.append(self._compare[0])
-            windows.extend(pair[0] for pair in (self._batch, self._ai, self._settings) if pair is not None)
+            windows.extend(pair[0] for pair in (self._batch, self._ai, self._settings, self._log_view) if pair is not None)
         theme_module.apply_theme(windows, theme)
 
     # --- 起動時の絵(ADR-0174 決定2) ---
@@ -229,9 +253,11 @@ class WebSession:
             pass
 
     def close_all(self) -> None:
-        """比較・一括比較・AI・設定の窓を全部閉じる(設定の窓の「更新」で新しい版が始まった後。ロックの外で呼ぶ)。"""
+        """比較・一括比較・AI・「ログを見る」・設定の窓を全部閉じる(設定の窓の「更新」で新しい版が始まった後。ロックの外で呼ぶ)。"""
         with self.lock:
-            windows = [pair[0] for pair in (self._settings, self._batch, self._ai, self._compare) if pair is not None]
+            windows = [
+                pair[0] for pair in (self._settings, self._batch, self._ai, self._log_view, self._compare) if pair is not None
+            ]
         for window in windows:
             _destroy(window)
 
@@ -300,9 +326,11 @@ class WebSession:
         with self.lock:
             self._compare_closed = True
             compare, settings, batch, ai = self._compare, self._settings, self._batch, self._ai
+            log_view = self._log_view
             self._settings = None
             self._batch = None
             self._ai = None
+            self._log_view = None
         if compare is not None:
             compare[1]._closed()
         if ai is not None:
@@ -312,6 +340,9 @@ class WebSession:
             _destroy(ai[0])
         if settings is not None:
             _destroy(settings[0])
+        if log_view is not None:
+            log_view[1]._closed()  # これからの操作とドロップは受けない
+            _destroy(log_view[0])
         if batch is not None:
             batch[1]._closed()  # 実行中なら中止を頼む。門はワーカーが戻ったときに返す
             _destroy(batch[0])
@@ -329,6 +360,21 @@ class WebSession:
         if compare[1]._load_handoff(handoff, answer):
             _bring_to_front(compare[0])
         return True
+
+    def compare_result_back(self, origin: Any, request: Any, outcome: Any) -> bool:
+        """単一比較の窓で比べ直した結果を、元の一括比較の窓の組の行へ返す(REQ-362 / ADR-0242。ロックの外で呼ぶ)。
+
+        origin は受け取ったときの組の目印(batch_model.BatchOrigin)。一括比較の窓が無い・開き直した窓(origin.owner と違う)なら False。
+        受け取るか捨てるかは一括比較の窓が決める(版・組・実行中)。受け取って行を置き換えたら True。
+        """
+        with self.lock:
+            batch = self._batch
+        if batch is None or batch[1] is not origin.owner:
+            return False
+        take = getattr(batch[1], "_take_compare_result", None)
+        if take is None:
+            return False
+        return bool(take(origin, request, outcome))
 
     # --- 設定の窓 ---
 
@@ -369,6 +415,10 @@ class WebSession:
             set_on_saved = getattr(api, "_set_on_saved", None)
             if set_on_saved is not None:
                 set_on_saved(self.settings_saved)
+            # 「単純比較」のタブで保存できたら、開いている比較の窓と一括比較の窓へ新しい既定を届ける(REQ-361。_on_saved より先に呼ばれる)
+            set_on_raw_saved = getattr(api, "_set_on_raw_saved", None)
+            if set_on_raw_saved is not None:
+                set_on_raw_saved(lambda: self._raw_defaults_saved(origin=api))
             # 「表示」の「保存」で色が変わったら、開いている窓すべてに当てる(ADR-0189。テストの偽物に口が無くても動く)
             set_on_theme = getattr(api, "_set_on_theme", None)
             if set_on_theme is not None:
@@ -392,6 +442,7 @@ class WebSession:
         """比較の窓で AI プロファイル・プロンプトの使用中を変えた後に呼ぶ(ロックの外で。REQ-206 §5)。
 
         設定の窓が開いていれば、保存していない編集を残して読み直させる(SettingsApi._profiles_changed)。失敗は握りつぶす。
+        ほかの比較の窓・一括比較の窓・AI の窓への知らせは、ここでは送らない(_profiles_switched が送る。REQ-372)。
         """
         with self.lock:
             settings = self._settings
@@ -405,11 +456,12 @@ class WebSession:
         except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
             pass
 
-    def settings_saved(self) -> None:
-        """設定の窓で保存できた後に呼ぶ(ロックの外で。ADR-0176 決定4)。
+    def _profiles_switched(self, origin: Any = None) -> None:
+        """使用中の AI プロファイル・プロンプトを替えた後に呼ぶ(ロックの外で。ADR-0245 決定2・REQ-372。画面からは呼べない)。
 
-        開いている比較の窓(AI の窓が開いていればそちらにも届く)と一括比較の窓へ「状態が変わった」と知らせ、
-        state() を読み直して描き直させる(結果・答え・入力は消さない)。知らせの失敗は握りつぶす。
+        開いている比較の窓(閉じていないとき)と一括比較の窓のうち、origin(替えた窓)以外の _changed を、ロックの外で呼ぶ。
+        比較の窓の _changed は比較の窓と AI の窓の両方へ「状態が変わった」を送る(結果・答え・入力は消さない)。
+        設定の窓へは settings_changed が知らせる。口が無い窓・閉じかけの窓の失敗は捨てる。
         """
         with self.lock:
             targets = []
@@ -418,6 +470,59 @@ class WebSession:
             if self._batch is not None:
                 targets.append(self._batch[1])
         for api in targets:
+            if api is origin:
+                continue
+            changed = getattr(api, "_changed", None)
+            if changed is None:
+                continue
+            try:
+                changed()
+            except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
+                pass
+
+    def _raw_defaults_saved(self, origin: Any = None) -> None:
+        """単純比較の既定(raw-compare.json)が保存された後に呼ぶ(ロックの外で。REQ-361 §3・§4。画面からは呼べない)。
+
+        開いている比較の窓・一括比較の窓・設定の窓のうち、origin(保存した窓)以外の _raw_defaults_saved を、ロックの外で呼ぶ。
+        窓への「状態が変わった」はここでは送らない(settings_saved が 1 回だけ送る)。口が無い窓・閉じかけの窓の失敗は捨てる。
+        """
+        with self.lock:
+            targets = []
+            if self._compare is not None and not self._compare_closed:
+                targets.append(self._compare[1])
+            targets.extend(pair[1] for pair in (self._batch, self._settings) if pair is not None)
+        for api in targets:
+            if api is origin:
+                continue
+            follow = getattr(api, "_raw_defaults_saved", None)
+            if follow is None:
+                continue
+            try:
+                follow()
+            except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
+                pass
+
+    def settings_saved(self) -> None:
+        """設定の窓で保存できた後に呼ぶ(ロックの外で。ADR-0176 決定4)。
+
+        開いている比較の窓(AI の窓が開いていればそちらにも届く)と一括比較の窓へ「状態が変わった」と知らせ、
+        state() を読み直して描き直させる(結果・答え・入力は消さない)。知らせの失敗は握りつぶす。
+        その前に、各窓のキャラクターの設定を読み直させる(_reload_character。ADR-0245 決定2・REQ-372)。
+        新しい版の知らせ(_run_update_check・dismiss_update_notice)からも呼ばれるが、そのときのファイルの値を読むだけである。
+        """
+        with self.lock:
+            targets = []
+            if self._compare is not None and not self._compare_closed:
+                targets.append(self._compare[1])
+            if self._batch is not None:
+                targets.append(self._batch[1])
+        for api in targets:
+            reload_character = getattr(api, "_reload_character", None)
+            if reload_character is not None:
+                try:
+                    reload_character()
+                except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
+                    pass
             changed = getattr(api, "_changed", None)
             if changed is None:
                 continue
@@ -435,6 +540,24 @@ class WebSession:
                 voice_changed()
             except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
                 pass
+        self._follow_app_icon()
+
+    def _follow_app_icon(self) -> None:
+        """動いている間のアイコンを、今のキャラクターの設定に合わせる(変わったときだけ切り替わる。REQ-373)。
+
+        開いている窓(比較・一括比較・AI・設定)を集める(ロックの下。apply_theme と同じ)。切り替えはロックの外で呼び、失敗は捨てる。
+        """
+        if self._app_icon is None:
+            return
+        with self.lock:
+            windows = []
+            if self._compare is not None and not self._compare_closed:
+                windows.append(self._compare[0])
+            windows.extend(pair[0] for pair in (self._batch, self._ai, self._settings, self._log_view) if pair is not None)
+        try:
+            self._app_icon.follow(windows)
+        except Exception:  # noqa: BLE001 - アイコンの切り替えの失敗は保存を止めない
+            pass
 
     def _on_settings_closed(self, window: Any, api: Any = None) -> None:
         """設定の窓が閉じた(画面の「閉じる」でも、窓の上の × でも)。記録を外し、Python の側の _on_closed をロックの外で呼ぶ。
@@ -506,6 +629,54 @@ class WebSession:
             compare = self._compare[1] if self._compare is not None else None
         if compare is not None:
             compare._ai_detached()
+
+    # --- 「ログを見る」の窓(ADR-0248 決定2 / REQ-377) ---
+
+    def open_log_view(self) -> None:
+        """「ログを見る」の窓を開く。開いていれば前に出す(同時に 1 つ。open_settings と同じ形)。
+
+        比較の窓が閉じた後・作っている途中は何もしない。窓を作る間はロックを持たない。
+        窓の色は themed_window で付け、窓の読み込みの後にファイルのドロップを watch_drop で受ける。
+        """
+        with self.lock:
+            if self._compare_closed or self._log_view_opening:
+                return
+            current = self._log_view
+            if current is None:
+                self._log_view_opening = True
+        if current is not None:
+            _bring_to_front(current[0])
+            return
+        try:
+            api = self._log_view_api()
+            window = self._create_window(
+                LOG_VIEW_TITLE, js_api=api, **theme_module.themed_window(self._log_view_window, self._current_theme())
+            )
+            api._attach(window)  # 知らせ・ファイルのダイアログに使う
+            _watch_window_state(window)
+            watch_drop = self._watch_drop
+            if watch_drop is not None:
+                # ファイルのドロップは、読み込みの後に Python の側で受ける(比較の窓・一括比較の窓と同じ)
+                window.events.loaded += lambda: watch_drop(window, api._on_drop)
+            window.events.closed += lambda: self._on_log_view_closed(window)
+            with self.lock:
+                closed = self._compare_closed
+                if not closed:
+                    self._log_view = (window, api)
+            if closed:
+                api._closed()  # 開いている間に比較の窓が閉じた
+                _destroy(window)
+        finally:
+            with self.lock:
+                self._log_view_opening = False
+
+    def _on_log_view_closed(self, window: Any) -> None:
+        with self.lock:
+            current = self._log_view
+            if current is None or current[0] is not window:
+                return
+            self._log_view = None
+        current[1]._closed()
 
     # --- 一括比較の窓 ---
 
