@@ -100,9 +100,11 @@ JavaScript(static/js/compare.js)は返した JSON を描くことと、操作を
 - 送り先の確かめ(ADR-0148 決定7): 承認して送った回と自動送信の回の送り先のプロファイルを組ごとに覚え、追加の質問の前に今の使用中と比べる。
   違えば送らずに confirm を返し、画面が同じ番号で呼び直したときだけ送る(その組の記録を今の送り先に替える)
 - AI の面の切り替え(use_ai_profile・use_prompt_profile): 比較中・質問中は断る。settings_model の use_selected・use_prompt で
-  使用中を変え、設定の窓が開いていれば WebSession.settings_changed で読み直させ、一括比較の窓へは
-  WebSession._profiles_switched で描き直しを知らせる(REQ-372。AI の窓へは _notify_other が届く)。結果と答えは消さない
-- キャラクターの設定(ADR-0245 決定2): 設定の窓で保存したら WebSession.settings_saved が _reload_character を呼び、覚えた値を捨てて
+  使用中を変え、書けたら WebSession.publish({PROFILES}, origin=この窓) で、設定の窓へは読み直しを、一括比較の窓へは描き直しを
+  知らせる(ADR-0250・REQ-379。AI の窓へは _notify_other が届く)。結果と答えは消さない
+- 設定が変わった知らせの受け口(ADR-0250 決定2): _on_settings_change(change)。種類ごとの処理(キャラクターの覚えた値を捨てる・
+  音声入力の設定を読み直す・単純比較の既定に追いつく)を、ここに集める。窓が覚える値を足すときは、ここに捨て方を書く
+- キャラクターの設定(ADR-0245 決定2): 設定の窓で保存したら _on_settings_change が _forget_characters を呼び、覚えた値を捨てて
   次の state() で今の設定を読み直す(送っている途中でも絵の出し方だけが変わる)
 - 「HTML・CSV で出力…」(export_result。ADR-0156 / REQ-216): 押せるのは保存と同じ条件で、保存した結果を開いていないとき(can_export)。
   設定の秘密の語を読めなければ出さない。差分の行・組の名前・ファイル名は AI に送るときと同じ判定で伏せ(model の compare_report・
@@ -195,6 +197,7 @@ from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.gui_web.drop_order import dropped_paths, order_pair
 from driftpilot.gui_web.rule_ai import RuleAi
 from driftpilot.gui_web.session import WebSession
+from driftpilot.gui_web.settings_change import PROFILES, RAW_DEFAULTS, SETTINGS, SettingsChange, quietly
 from driftpilot.gui_web.voice import PANE_AI as VOICE_PANE_AI
 from driftpilot.gui_web.voice import PANE_COMPARE as VOICE_PANE_COMPARE
 from driftpilot.gui_web.voice import TARGET_BOTH as VOICE_TARGET_BOTH
@@ -1107,7 +1110,7 @@ class CompareApi(Api):
         self._ai_window: Any = None
         self._pane = threading.local()
         # キャラクターの絵(ADR-0174 決定1)。窓ごとに、描いたときの [gui] character を覚える。
-        # 設定の窓で保存したら捨てて読み直す(ADR-0245 決定2。_reload_character)。
+        # 設定の窓で保存したら捨てて読み直す(ADR-0245 決定2。_forget_characters)。
         # 鍵は窓("compare"・"ai")。AI の窓を開き直したら、その窓の分だけ読み直す
         self._characters: dict[str, bool] = {}
         # この窓で一度でも比べたか(始めた・保存した結果を開いた・一括比較から受け取った)。空の窓の絵に使う(ADR-0174 決定2)
@@ -2185,8 +2188,36 @@ class CompareApi(Api):
             "update_notice": self._session.update_notice_view(),
         }
 
-    def _reload_character(self) -> None:
-        """設定の窓でキャラクターの設定を保存した後に呼ぶ(WebSession.settings_saved。ADR-0245 決定2・REQ-372)。
+    def _on_settings_change(self, change: SettingsChange) -> None:
+        """設定が変わった知らせを受ける(WebSession.publish がロックの外で呼ぶ。ADR-0250 決定2・REQ-379。画面からは呼べない)。
+
+        種類ごとに、今の口の処理を RAW_DEFAULTS → PROFILES → SETTINGS → NOTICE の順に行い、描き直しは最後に多くても 1 回だけ送る。
+        処理の失敗は(閉じかけの窓。今と同じく)捨てて、ほかの処理と描き直しを続ける。
+        - raw_defaults: 変えた窓が自分でなければ _follow_raw_defaults。描き直す(自分が出した知らせでも)
+        - profiles: 変えた窓が自分でなければ描き直す(自分のときは何もしない)
+        - settings: キャラクターの覚えた値を捨て、音声入力の設定を読み直し、描き直す
+        - notice: 描き直す
+        """
+        mine = change.origin is self
+        redraw = False
+        for kind in change.ordered():
+            if kind == RAW_DEFAULTS:
+                if not mine:
+                    quietly(self._follow_raw_defaults)
+                redraw = True
+            elif kind == PROFILES:
+                redraw = redraw or not mine
+            elif kind == SETTINGS:
+                quietly(self._forget_characters)
+                quietly(self._reload_voice_settings)
+                redraw = True
+            else:
+                redraw = True
+        if redraw:
+            self._changed()
+
+    def _forget_characters(self) -> None:
+        """設定の窓でキャラクターの設定を保存した後に呼ぶ(_on_settings_change。ADR-0245 決定2・REQ-372)。
 
         覚えた値を捨てるだけ。次の state() で、比較の窓と AI の窓がそれぞれ今の設定を読み直す。
         送っている途中でも止めない(絵の出し方だけが変わる)。起動時の絵(splash)は変えない。
@@ -2782,10 +2813,10 @@ class CompareApi(Api):
         self._drop_handed_if_changed(previous)
         self._refresh_save()
 
-    def _raw_defaults_saved(self) -> None:
-        """設定の窓の「単純比較」タブで既定を保存できた後に、WebSession がロックの外で呼ぶ(REQ-361 §3。画面からは呼べない)。
+    def _follow_raw_defaults(self) -> None:
+        """設定の窓の「単純比較」タブで既定を保存できた後に、_on_settings_change がロックの外で呼ぶ(REQ-361 §3。画面からは呼べない)。
 
-        窓への「状態が変わった」は呼び出し側(WebSession.settings_saved)が 1 回だけ送るので、ここでは送らない。
+        窓への「状態が変わった」は _on_settings_change が 1 回だけ送るので、ここでは送らない。
         - 既定のファイルが読めない: 入れ替えない。今の「読めない」の帯だけ
         - 直接書いた値なし(欄の値が「最後に既定を読んだときの値」と同じ): 既定を読み直して入れ替え、帯「いつも効く設定を読み込みました」。
           比べ直すかは欄の値を変えたときと同じ決まり(自動の比較がオンで、比較の設定が変わったときだけ。オフなら「入力か設定を変えました」の状態の文)
@@ -2861,13 +2892,8 @@ class CompareApi(Api):
             # 足した後の既定を「最後に既定を読んだときの値」にする(窓の値と同じなら「直接書いた値なし」になる)
             self._raw_baseline = raw_baseline(appended.settings)
             self._raw_follow = {"text": raw_added_band(additions.count()), "load": False}
-        # 設定の窓・一括比較の窓へ届ける(保存した窓以外の口を呼んでから、「状態が変わった」を 1 回送る)。ロックの外で呼ぶ
-        raw_saved = getattr(self._session, "_raw_defaults_saved", None)
-        if raw_saved is not None:
-            raw_saved(origin=self)
-        settings_saved = getattr(self._session, "settings_saved", None)
-        if settings_saved is not None:
-            settings_saved()
+        # 設定の窓・一括比較の窓へ新しい既定を届け、この窓には描き直しを送る(1 回の知らせ。ADR-0250)。ロックの外で呼ぶ
+        self._session.publish({RAW_DEFAULTS}, origin=self)
         with self._lock:
             return self._ok()
 
@@ -4739,10 +4765,8 @@ class CompareApi(Api):
             written = action.ok
             result = self._ok() if action.ok else self._ok(notice=self._notice(action.message, title))
         if written:
-            self._session.settings_changed()
-            switched = getattr(self._session, "_profiles_switched", None)
-            if switched is not None:
-                switched(origin=self)  # 一括比較の窓へ描き直しを知らせる(AI の窓へは _notify_other が届く。REQ-372)
+            # 設定の窓へ読み直しを、一括比較の窓へ描き直しを知らせる(AI の窓へは _notify_other が届く。REQ-372・ADR-0250)
+            self._session.publish({PROFILES}, origin=self)
         return result
 
     def _ask_in_thread(
@@ -4850,6 +4874,7 @@ class CompareApi(Api):
                     "open_tab": None,
                     "open_tab_revision": self._open_tab_revision,
                     "raw_rows": [],
+                    "raw_prompt": None,
                     "unparsed_note": None,
                     "unparsed_rows": [],
                     "llm": self._llm_text,
@@ -4913,6 +4938,9 @@ class CompareApi(Api):
                         }
                         for row in view.raw_rows
                     ],
+                    # 単純比較のタブの表の一番上に出す、前と後の元の行(REQ-380。{before, after}。無ければ null。見せるだけ)。
+                    # 既存のキーと raw_rows の形は変えず、別のキーで渡す
+                    "raw_prompt": view.raw_prompt,
                     "unparsed_note": view.unparsed_note,
                     "unparsed_rows": [{"op": row.op, "line": row.line, "parents": row.parents} for row in view.unparsed_rows],
                     # llm は知らせの行と AI が返したままの答え(頭の行は除く。ADR-0148 決定8)。llm_blocks はそれを読み取った
@@ -5647,8 +5675,8 @@ class CompareApi(Api):
             except Exception:  # noqa: BLE001 - 閉じた窓への知らせの失敗は捨てる
                 pass
 
-    def _voice_settings_changed(self) -> None:
-        """設定の窓で保存した後(WebSession.settings_saved がロックの外で呼ぶ)。音声入力の設定を読み直す。"""
+    def _reload_voice_settings(self) -> None:
+        """設定の窓で保存した後(_on_settings_change がロックの外で呼ぶ)。音声入力の設定を読み直す。"""
         hub = self._voice
         if hub is not None:
             hub.settings_changed()

@@ -36,7 +36,7 @@
 
 - 動いている間のアイコン(ADR-0246 / REQ-373。gui_web/app_icon.py): start の直前に AppIcon.startup() で設定の
   [gui] character を読み、オンならキャラクター版、オフならピクセル風の画像のパス(Mac は PNG、Windows は .ico)を icon= に渡す。
-  画像が無い・ほかの OS なら icon= を渡さない。保存したときの切り替えは WebSession.settings_saved(--settings だけのときは
+  画像が無い・ほかの OS なら icon= を渡さない。保存したときの切り替えは WebSession.publish(--settings だけのときは
   SettingsApi の保存の後の口)が AppIcon.follow を呼ぶ
 
 webview は run() の中で読む(このモジュールは pywebview 無しでも読める。テストは偽物に差し替える)。
@@ -302,7 +302,7 @@ def run(
         window = webview.create_window(SETTINGS_TITLE, js_api=api, **themed_window(settings_window, theme))
         api._attach(window)  # 知らせ(送っている最中)と「閉じる」に使う
         # 保存できたら動いている間のアイコンを切り替える(WebSession が無いので、ここで直接つなぐ。REQ-373)
-        api._set_on_saved(lambda: app_icon.follow([window]))
+        api._set_publish(lambda kinds, origin=None: app_icon.follow([window]))
         # 窓の上の × で閉じたときも「更新する」の準備を止めて捨てる(REQ-253 §5)。偽の窓に events が無くても動く
         events = getattr(window, "events", None)
         if events is not None and hasattr(events, "closed"):

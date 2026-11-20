@@ -12,7 +12,7 @@
 <!--
   比較の画面（REQ-105。配置は REQ-206 / ADR-0148）。動きは wx の比較画面（gui/app.py）と同じ。
   上から ①上の3行（入力の2行と入れ替え・比較の設定の要約と「変更」と区間の選択）②帯 ③左右の面（左に結果、右に AI の面。境目はドラッグと矢印のキーで動く）
-  ④操作 ⑤ステータス。メニューは作らず、ほかの窓を開く操作（「設定…」と、その左の一括の窓。REQ-106）はボタンにする。
+  ④操作 ⑤ステータス。メニューは作らず、ほかの窓を開く操作はボタンにする（一括の窓とログビューアーの窓は上の右の大きなボタン、「設定…」は下の段の右端。REQ-106・REQ-384）。
   文は書かず、data-text・data-placeholder・data-label（title と aria-label）の鍵で messages.py の文を取る。半角の括弧を含む文と選択肢は、Python が返す状態から描く。
   状態は Python（gui_web/compare_api.py）が返す JSON を js/compare.js が描く。窓の中身は縦にスクロールさせず、左右の面がそれぞれ1本だけスクロールする
 -->
@@ -20,21 +20,39 @@
   <main class="pilot-body">
     <!-- 上の3行（ADR-0148 決定1） -->
     <section class="pilot-group pilot-compare-top">
-      <div class="pilot-input-swap">
-        <div class="pilot-input-grid">
-          <label for="before-name" data-text="compare.side.before"></label>
-          <input id="before-name" class="pilot-input" type="text" readonly>
-          <button type="button" class="pilot-button pilot-button--secondary" id="before-browse" data-text="compare.button.browse"></button>
-          <button type="button" class="pilot-button pilot-button--secondary" id="before-paste" data-text="compare.button.paste"></button>
-          <span id="before-summary"></span>
-          <label for="after-name" data-text="compare.side.after"></label>
-          <input id="after-name" class="pilot-input" type="text" readonly>
-          <button type="button" class="pilot-button pilot-button--secondary" id="after-browse" data-text="compare.button.browse"></button>
-          <button type="button" class="pilot-button pilot-button--secondary" id="after-paste" data-text="compare.button.paste"></button>
-          <span id="after-summary"></span>
+      <!-- 上の2行: 左に入力の2行と入れ替え、右に入口の大きなボタン2つ（ADR-0252 決定2 / REQ-384）。ボタンは入力の2行の高さに収める -->
+      <div class="pilot-compare-head">
+        <div class="pilot-input-swap">
+          <div class="pilot-input-grid">
+            <label for="before-name" data-text="compare.side.before"></label>
+            <input id="before-name" class="pilot-input" type="text" readonly>
+            <button type="button" class="pilot-button pilot-button--secondary" id="before-browse" data-text="compare.button.browse"></button>
+            <button type="button" class="pilot-button pilot-button--secondary" id="before-paste" data-text="compare.button.paste"></button>
+            <span id="before-summary"></span>
+            <label for="after-name" data-text="compare.side.after"></label>
+            <input id="after-name" class="pilot-input" type="text" readonly>
+            <button type="button" class="pilot-button pilot-button--secondary" id="after-browse" data-text="compare.button.browse"></button>
+            <button type="button" class="pilot-button pilot-button--secondary" id="after-paste" data-text="compare.button.paste"></button>
+            <span id="after-summary"></span>
+          </div>
+          <!-- 変更前と変更後の入力と区間の選択を入れ替える（ADR-0078 決定2）。2行にまたがるアイコンのボタン。title と aria-label は data-label の文 -->
+          <button type="button" class="pilot-button pilot-button--secondary pilot-swap" id="swap" data-text="compare.button.swap_icon" data-label="compare.button.swap"></button>
         </div>
-        <!-- 変更前と変更後の入力と区間の選択を入れ替える（ADR-0078 決定2）。2行にまたがるアイコンのボタン。title と aria-label は data-label の文 -->
-        <button type="button" class="pilot-button pilot-button--secondary pilot-swap" id="swap" data-text="compare.button.swap_icon" data-label="compare.button.swap"></button>
+        <!-- 入口のボタン（ADR-0252 決定2 / REQ-384）。中は縦に3段: アイコン・名前・短い説明。title と aria-label は名前と説明をつなげた文（data-label）。塗らない（青で塗る主ボタンと見分ける）。Mirarin の絵（hidden）はキャラクターがオンのときだけ出し、アイコンと説明の代わりに絵と名前の2段にする（ADR-0252 決定3 / REQ-385。出し分けは compare.js の renderCharacters） -->
+        <div class="pilot-entry-group">
+          <button type="button" class="pilot-button pilot-entry" id="open-batch" data-label="compare.button.batch.label">
+            <svg class="pilot-entry-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 2h6l2 2h4a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-2v-2h1V6h-4.8l-2-2H9v1H7V3a1 1 0 0 1 1-1zM3 8h6l2 2h7a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/></svg>
+            <img src="character/entry-batch.png" alt="" aria-hidden="true" class="pilot-character pilot-entry-character" id="character-entry-batch" hidden>
+            <span class="pilot-entry-name" data-text="compare.button.batch"></span>
+            <span class="pilot-entry-note" data-text="compare.button.batch.note"></span>
+          </button>
+          <button type="button" class="pilot-button pilot-entry" id="open-log-view" data-label="compare.button.log_view.label">
+            <svg class="pilot-entry-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M6 2h8l6 6v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm7 1.5V9h5.5zM8 12v2h8v-2zm0 4v2h8v-2z"/></svg>
+            <img src="character/entry-log-viewer.png" alt="" aria-hidden="true" class="pilot-character pilot-entry-character" id="character-entry-log-view" hidden>
+            <span class="pilot-entry-name" data-text="compare.button.log_view"></span>
+            <span class="pilot-entry-note" data-text="compare.button.log_view.note"></span>
+          </button>
+        </div>
       </div>
       <!-- 3行目: 比較の設定の要約（Python が作る文）と「変更」。区間の選択は、どちらかの側に区間が複数あるときだけ出す -->
       <div class="pilot-row pilot-settings-line">
@@ -573,7 +591,7 @@
     </div>
   </main>
 
-  <!-- 下のボタン（ADR-0148 決定3）: 比較・中止、間、保存・開く・出力（ADR-0156）、右端にほかの窓 -->
+  <!-- 下のボタン（ADR-0148 決定3）: 比較・中止、間、保存・開く・出力（ADR-0156）、右端に設定の窓 -->
   <footer class="pilot-footer">
     <button type="button" class="pilot-button pilot-button--primary" id="run" data-text="compare.button.run"></button>
     <button type="button" class="pilot-button pilot-button--secondary" id="cancel" data-text="compare.button.cancel"></button>
@@ -584,9 +602,7 @@
     <!-- 人に渡す形の出力（ADR-0156）。形は選ぶダイアログで、秘密の行は必ず伏せる -->
     <button type="button" class="pilot-button pilot-button--secondary" id="export" data-text="compare.button.export"></button>
     <span class="pilot-note pilot-grow" id="save-note"></span>
-    <!-- 1 つのログを機器ごと・コマンドごとに分けて見る窓（ADR-0248 決定2 / REQ-377）。比べずに手元で読むだけ -->
-    <button type="button" class="pilot-button pilot-button--secondary" id="open-log-view" data-text="compare.button.log_view"></button>
-    <button type="button" class="pilot-button pilot-button--secondary" id="open-batch" data-text="compare.button.batch"></button>
+    <!-- 一括の窓とログビューアーの窓を開くボタンは、上の右へ移した（ADR-0252 決定2 / REQ-384） -->
     <button type="button" class="pilot-button pilot-button--secondary" id="open-settings" data-text="compare.button.settings"></button>
   </footer>
   <div class="pilot-statusbar pilot-statusbar--split" role="status">

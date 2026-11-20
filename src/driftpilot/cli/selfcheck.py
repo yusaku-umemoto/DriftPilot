@@ -85,6 +85,7 @@ GUI_WEB_FILES = (
     "static/js/ai_view.js",
     "static/js/ai_pane.js",
     "static/js/log_view.js",  # 「ログを見る」の窓の動き(ADR-0248 決定2 / REQ-377)
+    "static/js/log_ask.js",  # 「ログを見る」の窓の AI の欄(ADR-0251 決定3 / REQ-382)
     "static/js/answer_view.js",
     "static/js/answer_copy.js",
     "static/js/batch.js",
@@ -111,6 +112,8 @@ GUI_WEB_FILES = (
     "static/character/splash.png",
     "static/character/warning.png",
     "static/character/welcome.png",
+    "static/character/entry-batch.png",  # 比較の窓の入口のボタンの絵(キャラクターがオン。ADR-0252 決定3 / REQ-385)
+    "static/character/entry-log-viewer.png",
     # 答えの吹き出しの顔(ADR-0181 決定4)
     "static/character/avatar.png",
     # 動いている間のアイコン(ADR-0246 / REQ-373)

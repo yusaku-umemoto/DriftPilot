@@ -611,6 +611,9 @@ class OutcomeView:
     # 構造化比較の行の番号から、元の行(raw_rows の番号)を探す関数(REQ-367 §2)。単純比較の結果が無いとき(比較方式が構造化だけ)は None。
     # 探すのは呼んだときだけ(行ごとには探さない)。結果の比べ方には入れない
     find_source: Callable[[int], int | None] | None = field(default=None, compare=False)
+    # 単純比較のタブの表の一番上に出す、選んでいる組の前と後の元の行(`sw-test1#show version`。{"before", "after"}。ADR-0251 決定1・REQ-380)。
+    # 見せるためだけで、比べる文・違いの数には入れない。単純比較の結果が無い・両方とも無いときは None。片方だけ無いときはその側が None
+    raw_prompt: dict[str, str | None] | None = None
 
 
 def answer_blocks(text: str | None) -> list[dict[str, Any]] | None:
@@ -949,6 +952,17 @@ def _raw_rows(outcome: CompareOutcome) -> list[RawRow]:
     return align_raw(seg["before"].selected.body, seg["after"].selected.body, outcome.raw.diffs, outcome.raw.options)
 
 
+def _raw_prompt(outcome: CompareOutcome) -> dict[str, str | None] | None:
+    """単純比較のタブの見出しの行に出す、前と後の元の行(REQ-380)。単純比較で比べた区間の、区間を始めたプロンプトの行。"""
+    seg = outcome.segmentation
+    if outcome.raw is None or seg is None or seg["before"].selected is None or seg["after"].selected is None:
+        return None
+    before, after = seg["before"].selected.prompt_line, seg["after"].selected.prompt_line
+    if before is None and after is None:
+        return None
+    return {"before": before, "after": after}
+
+
 def _unparsed(outcome: CompareOutcome) -> tuple[list[UnparsedRow], str | None]:
     if outcome.kind is None:
         return [], None
@@ -1129,6 +1143,7 @@ def view_outcome(outcome: CompareOutcome) -> OutcomeView:
         structured_off=structured_off(outcome),
         raw_set_aside=raw_set_aside_text(outcome_raw_options(outcome)),
         open_tab=show_open_tab(outcome),
+        raw_prompt=_raw_prompt(outcome),
     )
 
 

@@ -167,7 +167,8 @@ def to_plain(value: Any) -> Any:
     タプルはリスト、IPv4Interface などは文字列にする。None はキーを残して null にする。
     """
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {f.name: to_plain(getattr(value, f.name)) for f in dataclasses.fields(value)}
+        # metadata の saved が False の欄(見せるためだけに持つ値。REQ-380 の元の行)は書かない
+        return {f.name: to_plain(getattr(value, f.name)) for f in dataclasses.fields(value) if f.metadata.get("saved", True)}
     if isinstance(value, dict):
         return {str(k): to_plain(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -691,7 +692,12 @@ def _build(tp: Any, value: Any, where: str) -> Any:
         if not isinstance(value, dict):
             raise _fail(where, _T["not_object"])
         hints = get_type_hints(tp)
-        names = [f.name for f in dataclasses.fields(tp)] if dataclasses.is_dataclass(tp) else list(hints)
+        # 保存しない欄(metadata の saved が False)は読まない。組み立てるときは既定値のまま
+        names = (
+            [f.name for f in dataclasses.fields(tp) if f.metadata.get("saved", True)]
+            if dataclasses.is_dataclass(tp)
+            else list(hints)
+        )
         # 欠けた項目を既定値で補わない(欠けは「無い」ではなく、形が違うことを意味する)。知らないキーは無視する
         absent = [n for n in names if n not in value]
         if absent:

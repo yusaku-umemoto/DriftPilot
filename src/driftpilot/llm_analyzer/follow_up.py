@@ -93,17 +93,25 @@ def _check_turns(turns: Sequence[tuple[str, str]]) -> None:
 
 
 def build_follow_up(
-    payload: str, turns: Sequence[tuple[str, str]], question: str, *, full_text: bool = False
+    payload: str,
+    turns: Sequence[tuple[str, str]],
+    question: str,
+    *,
+    full_text: bool = False,
+    closing: str | None = None,
 ) -> str:
     """送る文。payload(最初に送った全文)をそのまま先頭に置き、やり取りと今の質問を足す。
 
     full_text が真(変更後の全文も送る。ADR-0158 決定6)のときだけ、終わりの文を CLOSING_FULL にする。偽なら今の文のまま。
+    closing を渡したときは、終わりの文をその文にする(「ログを見る」の窓の質問。差分ではなくログへの質問なので終わりの文が違う。
+    REQ-382)。省けば(None)今の文のまま(比較の窓が送る文は 1 字も変わらない)。
     やり取りの形が違うとき、追加の質問がすでに MAX_TURNS 回あるときは ValueError(古いやり取りを落として続けない)。
     """
     _check_turns(turns)
     if question_count(turns) >= MAX_TURNS:
         raise ValueError(f"追加の質問は {MAX_TURNS} 回までです")
-    closing = CLOSING_FULL if full_text else CLOSING
+    if closing is None:
+        closing = CLOSING_FULL if full_text else CLOSING
     lines = [HISTORY_HEADER, *(f"{_LABEL[kind]}: {text}" for kind, text in turns), QUESTION_HEADER, question, END_HEADER, closing]
     separator = "\n" if payload.endswith("\n") else "\n\n"
     return payload + separator + "\n".join(lines) + "\n"

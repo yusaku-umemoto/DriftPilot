@@ -3932,6 +3932,8 @@ GUI_WEB_TEXTS.update(
         "compare.raw.menu.ignore": "この行を無視する行のルールにする",
         "compare.raw.menu.rules": "この行に効いているルールを見る",
         "compare.raw.menu.ask": "この差分について AI に質問する",
+        # 単純比較のタブの表の一番上の見出しの行(プロンプトから始まるコマンドの行。REQ-380 / ADR-0251 決定1)の読み上げの名前
+        "compare.raw.prompt_row": "プロンプトから始まるコマンドの行",
         "compare.raw.line_rules.title": "この行に効いているルール",
         # 構造化比較のタブ・show の表・コマンドの組の一覧の右クリックに足した項目(REQ-367 / ADR-0244 決定1・3)。{column}・{n} は画面が直す
         "compare.structured.menu.source": "元の行を単純比較のタブで見る",
@@ -5061,9 +5063,9 @@ def device_split_not_opened(folder: Path) -> str:
 GUI_WEB_TEXTS.update({"compare.split_devices": DEVICE_SPLIT_BUTTON})
 
 
-# --- 1 つのログを機器ごと・コマンドごとに分けて見る「ログを見る」の窓(ADR-0248 決定2 / REQ-377) ---
-COMPARE_BUTTON_LOG_VIEW = "ログを見る…"
-LOG_VIEW_TITLE = "DriftPilot — ログを見る"
+# --- 1 つのログを機器ごと・コマンドごとに分けて見る「ログビューアー」の窓(ADR-0248 決定2 / REQ-377。名前は ADR-0252 決定1 / REQ-384 で変えた) ---
+COMPARE_BUTTON_LOG_VIEW = "ログビューアー…"
+LOG_VIEW_TITLE = "DriftPilot — ログビューアー"
 LOG_VIEW_NO_DEVICE = "（機器の名前なし）"  # 機器が 1 台も見つからなかったときの全体の 1 台の名前
 LOG_VIEW_NO_PROMPT = "区切りなし"  # プロンプトが見つからず、全体が 1 区間のとき
 LOG_VIEW_PASTED_NAME = "貼り付け"  # 貼り付けた文の表示名
@@ -5105,6 +5107,8 @@ GUI_WEB_TEXTS.update(
         "log_view.commands.col.mark": "印",
         "log_view.output.col.number": "行",
         "log_view.output.col.text": "出力",
+        # 出力の表の 1 行目の見出しの行(プロンプトから始まるコマンドの行。REQ-380 / ADR-0251 決定1)の読み上げの名前
+        "log_view.output.prompt_row": "プロンプトから始まるコマンドの行",
         "log_view.mark.error": "エラーの出力",
         "log_view.mark.preamble": "前置き",
         "log_view.find.label": "探す",
@@ -5115,8 +5119,100 @@ GUI_WEB_TEXTS.update(
         "log_view.copy.output": "出力をコピー",
         "log_view.copy.with_command": "コマンドの行も付けてコピー",
         "log_view.split.label": "一覧と出力の境目",
+        "log_view.lists_split.label": "機器の一覧とコマンドの一覧の境目",
         "log_view.button.export": "機器ごとのファイルに書き出す…",
         "log_view.status.loading": "読み込んでいます…",
+    }
+)
+
+
+# --- 比較の窓の上の入口のボタン(ADR-0252 決定2 / REQ-384)。短い説明と、読み上げの名前(title と aria-label。名前と説明をつなげた文) ---
+COMPARE_BUTTON_BATCH_NOTE = "フォルダーごと比べる"
+COMPARE_BUTTON_LOG_VIEW_NOTE = "1 つのログを分けて見る"
+COMPARE_BUTTON_BATCH_LABEL = f"{COMPARE_BUTTON_BATCH}（{COMPARE_BUTTON_BATCH_NOTE}）"
+COMPARE_BUTTON_LOG_VIEW_LABEL = f"{COMPARE_BUTTON_LOG_VIEW}（{COMPARE_BUTTON_LOG_VIEW_NOTE}）"
+
+GUI_WEB_TEXTS.update(
+    {
+        "compare.button.batch.note": COMPARE_BUTTON_BATCH_NOTE,
+        "compare.button.log_view.note": COMPARE_BUTTON_LOG_VIEW_NOTE,
+        "compare.button.batch.label": COMPARE_BUTTON_BATCH_LABEL,
+        "compare.button.log_view.label": COMPARE_BUTTON_LOG_VIEW_LABEL,
+    }
+)
+
+
+# --- 「ログビューアー」の窓で、表示中のログ(チェックした区間)について AI に質問する(ADR-0251 決定3 / REQ-382) ---
+# どの文にも、ログの中身・質問・答え・キーは入れない(数と決まった文だけ)
+LOG_ASK_INSTRUCTION = (
+    "あなたはネットワーク機器の運用を手伝う技術者です。以下は、利用者が端末で取ったログを機器ごと・コマンドごとに分けたものです。"
+    "秘密の値は伏せてあり、送っていない行があります。利用者の質問に、ログに書かれていることを根拠に答えてください。"
+    "ログから分からないことは、分からないと書いてください。"
+)
+LOG_ASK_QUESTION_LABEL = "質問: "  # 送る文の最後の「質問: {質問}」の見出し
+# 続けての質問の終わりの文(ログ向け。比較の窓の CLOSING の「差分」を「ログ」にしたもの)
+LOG_ASK_CLOSING = "上のログとやり取りだけをもとに答えてください。分からないことは分からないと答えてください。"
+LOG_ASK_CONFIRM_TITLE = "AI に送る内容の確認（ログ）"
+LOG_ASK_PROMPT_TITLE = "送る文（この文だけを送ります。読むだけです）:"
+LOG_ASK_NOTE = "送るログに、ホスト名などが入っていないか確かめてください"
+LOG_ASK_SEND = "送信する"
+LOG_ASK_DONT_SEND = "送信しない"
+LOG_ASK_ASKING = "AI に質問しています…"
+LOG_ASK_NO_LOG = "ログが入っていません。送っていません"
+LOG_ASK_NO_LINES = "送る行がありません。送っていません"
+LOG_ASK_LOG_CHANGED = "確認の後にログが変わったため、送っていません。もう一度確認してください"
+LOG_ASK_PREMISE_CHANGED = "確認の後に毎回付ける前提が変わったため、送っていません。もう一度確認してください"
+LOG_ASK_WORDS_CHANGED = "秘密の語が変わったため、続けて質問できません。「会話を消す」で新しく始めてください"
+
+
+def log_view_scope_shown(device: str, command: str) -> str:
+    """送る区間の行: チェックが無いとき(表示中の 1 区間)。"""
+    return f"表示中の 1 区間を送ります（{device} / {command}）"
+
+
+def log_view_scope_checked(n: int, m: int) -> str:
+    """送る区間の行: チェックした区間があるとき。"""
+    return f"チェックした {n} 区間（{m} 台）を送ります"
+
+
+def log_ask_destination(name: str, model: str | None) -> str:
+    """AI の欄の送り先の行(使用中の AI プロファイルの表示名とモデル。キー・接続先は入れない)。"""
+    return f"送り先: {name}  モデル: {model or '-'}"
+
+
+def log_ask_sections(n: int, m: int) -> str:
+    """送る前の確認の「送る区間」の行。"""
+    return f"送る区間: {n} 区間（{m} 台）"
+
+
+def log_ask_omitted_lines(n: int) -> str:
+    """送る前の確認の、判定できずに送らなかった行の数。"""
+    return f"判定できずに送らなかった行: {n} 行"
+
+
+def log_ask_omitted_sections(n: int) -> str:
+    """送る前の確認の、秘密の出るコマンドのため送らなかった区間の数。"""
+    return f"秘密の出るコマンドのため送らなかった区間: {n} 区間"
+
+
+def log_ask_over_limit(chars: int, limit: int) -> str:
+    """送る文が上限を超えるとき(一部だけ送ることはしない。数だけで中身は入れない)。"""
+    return f"送る行が上限を超えます。チェックを減らしてください（{chars:,} 文字。上限 {limit:,} 文字）"
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "log_view.check.col": "AI に送る",
+        "log_view.check.all_devices": "全部の機器の全部のコマンドを AI に送る",
+        "log_view.check.all_commands": "この機器の全部のコマンドを AI に送る",
+        "log_view.ai.title": "AI に質問",
+        "log_view.ai.split.label": "出力と AI の欄の境目",
+        "log_view.ai.question.label": "AI への質問（表示中のログについて聞きます）",
+        "log_view.ai.question.placeholder": "Shift+Enter で送信、Enter で改行",
+        "log_view.ai.clear": "会話を消す",
+        "log_view.ai.copy": "答えをコピー",
+        "log_view.ai.cancel": "中止",
+        "log_view.ai.empty": "チェックした区間（チェックが無いときは表示中の区間）について質問できます。送る前に、送る内容を確認します。",
     }
 )
 

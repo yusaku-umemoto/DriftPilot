@@ -80,6 +80,7 @@ from typing import Any
 from driftpilot import __version__
 from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.gui_web.rule_ai import RuleAi
+from driftpilot.gui_web.settings_change import PROFILES, RAW_DEFAULTS, SETTINGS, SettingsChange, quietly
 from driftpilot.gui_web.theme import THEME_EVENT
 from driftpilot.llm_analyzer import LLMClient, ShapeNode, send_connection_check
 from driftpilot.llm_settings import (
@@ -436,12 +437,10 @@ class SettingsApi(Api):
         self._raw_values: dict[str, Any] = {}
         self._raw_problems: list[str] = []
         self._fill_raw = 0  # 変わったら、画面は「単純比較」のタブの欄に raw.values を入れ直す
-        # 保存の後に呼ぶ口(ADR-0176 決定4。WebSession.open_settings が渡す)と、この呼び出しで保存できたかの印
-        self._on_saved: Callable[[], None] | None = None
+        # 保存の後に、開いている窓へ「変わった種類」を知らせる口(ADR-0176 決定4・ADR-0250。WebSession.open_settings が渡す)と、
+        # この呼び出しで保存できたかの印(単純比較のタブ以外 = SETTINGS)・単純比較の既定を保存できたかの印(= RAW_DEFAULTS。REQ-361)
+        self._publish: Callable[..., None] | None = None
         self._saved = False
-        # 「単純比較」のタブの保存を、開いている比較の窓・一括比較の窓へ届ける口(REQ-361。WebSession.open_settings が渡す)と、
-        # この呼び出しで単純比較の既定を保存できたかの印(ほかのタブの保存では立てない)
-        self._on_raw_saved: Callable[[], None] | None = None
         self._raw_saved = False
         # 「表示」のタブ(ADR-0189): 開いている窓すべてに色を当てる口(WebSession.apply_theme)・この呼び出しで当てる色・欄を入れ直す番号
         self._on_theme: Callable[[str], None] | None = None
@@ -472,20 +471,30 @@ class SettingsApi(Api):
         """「更新」で新しい版が始まった後に、窓を全部閉じる関数(WebSession.close_all)。渡されなければこの窓だけを閉じる。"""
         self._close_all = callback
 
-    def _set_on_saved(self, callback: Callable[[], None] | None) -> None:
-        """保存できた後に呼ぶ関数(開いている比較の窓と一括比較の窓へ知らせる。ADR-0176 決定4)。
+    def _set_publish(self, callback: Callable[..., None] | None) -> None:
+        """保存できた後に呼ぶ関数(WebSession.publish。開いている窓へ「変わった種類」を知らせる。ADR-0176 決定4・ADR-0250)。
 
-        AI プロファイル・プロンプト・比較と自動の動き・設定ファイル・単純比較の既定・前提の保存が成功した呼び出しの最後に、
-        ロックの外で 1 回だけ呼ぶ。失敗は握りつぶす。
+        AI プロファイル・プロンプト・比較と自動の動き・設定ファイル・前提・単純比較の既定の保存が成功した呼び出しの最後に、
+        ロックの外で 1 回だけ、callback(種類の集まり, origin=この窓) の形で呼ぶ。種類は、単純比較のタブを保存したら RAW_DEFAULTS、
+        ほかを保存したら SETTINGS、両方なら 2 つ。失敗は握りつぶす。
         """
-        self._on_saved = callback
+        self._publish = callback
 
-    def _set_on_raw_saved(self, callback: Callable[[], None] | None) -> None:
-        """「単純比較」のタブで既定を保存できた後に呼ぶ関数(開いている比較の窓・一括比較の窓へ新しい既定を届ける。REQ-361)。
+    def _on_settings_change(self, change: SettingsChange) -> None:
+        """設定が変わった知らせを受ける(WebSession.publish がロックの外で呼ぶ。ADR-0250 決定2・REQ-379。画面からは呼べない)。
 
-        _on_saved(「状態が変わった」の知らせ)より先に、ロックの外で 1 回だけ呼ぶ。ほかのタブの保存では呼ばない。失敗は握りつぶす。
+        変えた窓が自分(この窓で保存した)なら何もしない。種類ごとに、RAW_DEFAULTS → PROFILES の順に行う(失敗は捨てる)。
+        - raw_defaults: 単純比較の欄を読み直す(_follow_raw_defaults)
+        - profiles: 保存していない編集を残して読み直す(_reload_profiles)
+        - settings・notice: 何もしない(描き直しは送らない)
         """
-        self._on_raw_saved = callback
+        if change.origin is self:
+            return
+        for kind in change.ordered():
+            if kind == RAW_DEFAULTS:
+                quietly(self._follow_raw_defaults)
+            elif kind == PROFILES:
+                quietly(self._reload_profiles)
 
     def _set_on_theme(self, callback: Callable[[str], None] | None) -> None:
         """「表示」の「保存」で色が書けた後に呼ぶ関数(開いている窓すべてに当てる。WebSession.apply_theme。ADR-0189)。
@@ -749,22 +758,19 @@ class SettingsApi(Api):
             pass
 
     def _notify_saved(self) -> None:
-        """保存できた印が立っていれば消して、保存の後の口を呼ぶ(ロックの外で。失敗は握りつぶす。ADR-0176 決定4)。"""
+        """保存できた印が立っていれば消して、種類の集まりにして知らせの口を 1 回呼ぶ(ロックの外で。失敗は握りつぶす。ADR-0176 決定4・ADR-0250)。
+
+        単純比較のタブの保存は RAW_DEFAULTS、ほかの保存は SETTINGS(両方なら 2 つを 1 回で)。印が無い・口が無ければ呼ばない。
+        """
         with self._lock:
             saved, self._saved = self._saved, False
             raw_saved, self._raw_saved = self._raw_saved, False
-            callback = self._on_saved
-            raw_callback = self._on_raw_saved
-        if raw_saved and raw_callback is not None:
-            # 単純比較の既定を保存できたときだけ、先に新しい既定を比較の窓・一括比較の窓へ届ける(REQ-361)。その後の「状態が変わった」で描き直す
-            try:
-                raw_callback()
-            except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
-                pass
-        if not saved or callback is None:
+            callback = self._publish
+        kinds = {kind for kind, on in ((SETTINGS, saved), (RAW_DEFAULTS, raw_saved)) if on}
+        if not kinds or callback is None:
             return
         try:
-            callback()
+            callback(kinds, origin=self)
         except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
             pass
 
@@ -911,8 +917,8 @@ class SettingsApi(Api):
         self._prompt_typed = (pane.name, pane.template)
         self._fill_prompt += 1
 
-    def _profiles_changed(self) -> None:
-        """ほかの窓(比較の窓の AI の面)が使用中のプロファイルを変えた後に、WebSession がロックの外で呼ぶ(REQ-206 §5)。
+    def _reload_profiles(self) -> None:
+        """ほかの窓(比較の窓の AI の面)が使用中のプロファイルを変えた後に、_on_settings_change がロックの外で呼ぶ(REQ-206 §5)。
 
         保存していない編集は残して読み直し(_refresh・_refresh_prompt を keep_edits で)、画面には settings.view の知らせで描き直させる。
         まだ一度も描いていなければ何もしない(最初の state() で読む)。窓への知らせはロックの外で送る。
@@ -927,11 +933,11 @@ class SettingsApi(Api):
         if window is not None:
             notify(window, {"type": VIEW_EVENT, "view": view})
 
-    def _raw_defaults_saved(self) -> None:
-        """比較の窓の「いつも効く設定に足す」で既定が書かれた後に、WebSession がロックの外で呼ぶ(REQ-361 §5b。画面からは呼べない)。
+    def _follow_raw_defaults(self) -> None:
+        """比較の窓の「いつも効く設定に足す」で既定が書かれた後に、_on_settings_change がロックの外で呼ぶ(REQ-361 §5b。画面からは呼べない)。
 
         すでに描いていれば、「単純比較」のタブの欄を足した後のファイルの中身で入れ直し(保存前に打っていた変更は消える)、
-        画面には settings.view の知らせで描き直させる(_profiles_changed と同じ形)。まだ一度も描いていなければ何もしない。
+        画面には settings.view の知らせで描き直させる(_reload_profiles と同じ形)。まだ一度も描いていなければ何もしない。
         """
         with self._lock:
             if self._raw_pane is None:
@@ -1463,8 +1469,7 @@ class SettingsApi(Api):
                 self._raw_values = dict(values)
                 self._raw_problems = []
                 return self._ok(notice=self._notice(saved.error, RAW_DEFAULTS_TITLE))
-            self._mark_saved()
-            self._raw_saved = True  # 比較の窓・一括比較の窓へ新しい既定を届ける印(REQ-361。_notify_saved が見る)
+            self._raw_saved = True  # 比較の窓・一括比較の窓へ新しい既定を届ける印(REQ-361。_notify_saved が RAW_DEFAULTS にする)
             self._refresh_raw()
             return self._ok(notice=self._notice(saved.notice or "", RAW_DEFAULTS_TITLE))
 

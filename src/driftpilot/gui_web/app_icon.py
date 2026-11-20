@@ -6,7 +6,7 @@
 
 - 起動のとき: AppIcon.startup() が設定を読み、webview.start(icon=) に渡すパスを返す(app.run)
 - 保存のとき: AppIcon.follow(windows) が設定を読み直し、キャラクターのオン・オフが変わったときだけ切り替える
-  (WebSession.settings_saved から。--settings だけのときは SettingsApi の保存の後の口から)
+  (WebSession.publish から。--settings だけのときは SettingsApi の保存の後の口 _set_publish から)
 - OS ごとの呼び出しはこのモジュールの中に閉じる(AppKit・System は呼ぶときにだけ読む。テストは mac_setter・windows_setter を偽物に替える)
   - Mac: 主の糸(PyObjCTools.AppHelper.callAfter)で NSApplication.setApplicationIconImage_ (pywebview の cocoa と同じ形)
   - Windows: 開いている窓の native(Form)の Icon を、UI の糸(Form.Invoke)で System.Drawing.Icon に替える(pywebview の winforms と同じ形)

@@ -43,6 +43,7 @@ const DIALOG_TEXTS = [
   "compare.multi.paired_by_hand", // 手で組にした組の印（REQ-269）
   "compare.multi.show_raw", // show を単純比較で出した組の印（REQ-282）
   "compare.multi.show_both", // show を表と単純比較の両方で出した組の印（REQ-282）
+  "compare.raw.prompt_row", // 単純比較の表の一番上の見出しの行（元の行）の読み上げの名前（REQ-380）
 ];
 // 一覧の行の show_method（Python が決める）から、印の文のキーを引く（REQ-282）
 const SHOW_METHOD_MARKS = { raw: "compare.multi.show_raw", both: "compare.multi.show_both" };
@@ -116,6 +117,8 @@ let canFindSource = false;
 const RAW_RULE_VALUE = "<\u5024>"; // 山かっこの中は「値」（U+5024。画面の言語によらず同じ文字。日本語の文字を JavaScript に書かない決まりのため、コードで書く）
 // 単純比較の行の要素を raw_rows の番号で引く配列（ADR-0155 決定4。折りたたみの行が入るので sectionRowIndex に頼らない）
 let rawEls = [];
+// 単純比較の表の一番上に出す、前と後の元の行 {before, after}（result.raw_prompt。無ければ null。REQ-380）
+let rawPrompt = null;
 // 単純比較の変更の行の印を raw_rows の番号で引く Map（{before, after}。下の2つの欄にも使う。REQ-226 §4.3）
 let rawMarks = new Map();
 // 単純比較の設定で脇に置いた行（無視した行・同じとみなした行）の raw_rows の番号と、印の文（x は「無視」、= は「同じ」。REQ-227 §11.4）
@@ -135,6 +138,8 @@ let structuredSortFrom = null;
 // 数字の部分を数として比べる器（Gi1/0/2 < Gi1/0/10）。言語は並べ替えるときの <html lang>（起動のあとで画面の言語が入るため、ここでは作らない）。言語ごとに 1 つ持つ
 const structuredCollators = new Map();
 // キャラクターの絵（ADR-0174 決定2）。差分なしの絵（構造化と単純比較のタブ）の id、最後に描いた結果の場面、起動時の絵を出したか
+const ENTRY_CHARACTER_IDS = ["character-entry-batch", "character-entry-log-view"];
+const ENTRY_BUTTON_IDS = ["open-batch", "open-log-view"];
 const NO_DIFF_IDS = ["character-no-diff", "character-no-diff-still", "character-no-diff-raw", "character-no-diff-raw-still"];
 const scene = { noDiff: false, neverCompared: true };
 let splashPlayed = false;
@@ -394,6 +399,11 @@ function renderCharacters(next) {
     scene.neverCompared = false; // 比べ始めたら、結果を読み直す前でも空の窓の絵は出さない
   }
   revealCharacters(["character-welcome"], on && scene.neverCompared);
+  // 入口の 2 つのボタン（ADR-0252 決定3 / REQ-385）。オンのときは Mirarin の絵と名前の 2 段（SVG と短い説明は CSS で隠す）。オフは今のまま
+  revealCharacters(ENTRY_CHARACTER_IDS, on);
+  for (const id of ENTRY_BUTTON_IDS) {
+    $(id).classList.toggle("pilot-entry--character", on);
+  }
   const noDiff = on && scene.noDiff && !next.busy;
   const appeared = noDiff && $("character-no-diff").hidden;
   revealCharacters(NO_DIFF_IDS, noDiff);
@@ -945,10 +955,27 @@ function onStructuredHeadActivate(event) {
 // 折りたたみの範囲の外の行（差分の行と前後 3 行）は data-keep を持つ。折りたたみの行は範囲の最初の行の直前に入れ、data-index を持たない。
 // DocumentFragment に入れて、最後に 1 回だけ表に入れる。大きさを読むものは使わない
 // 変更の行の印は、呼ぶ前に setRawMarks で rawMarks に入れておく。変更前の文字（3 列目）と変更後の文字（5 列目）を行を作るときに描く（REQ-226）
+// 表の一番上には、前と後の元の行（プロンプトから始まるコマンドの行。REQ-380 / ADR-0251 決定1。rawPrompt = result.raw_prompt）を見出しの行として入れる。
+// 見出しの行は data-index を持たず rawEls にも入れない（選ぶ・矢印のキー・右クリックのメニュー・違う文字の印・違いへ飛ぶの対象外）。
+// data-keep と data-set-aside を持つので、「差分のみ表示」でも「無視した行…」を押している間でも隠れない。折りたたみは raw_rows で決まるので対象にならない
+function rawPromptRow(prompt) {
+  const tr = make("tr", "pilot-raw-prompt", null);
+  tr.dataset.keep = "true";
+  tr.dataset.setAside = "true";
+  tr.setAttribute("aria-label", texts["compare.raw.prompt_row"]);
+  for (const value of ["", "", prompt.before === null ? "" : prompt.before, "", prompt.after === null ? "" : prompt.after]) {
+    tr.append(make("td", "", value)); // 文字は textContent で入れる（make）
+  }
+  return tr;
+}
+
 function fillRaw(rows, folds) {
   rawEls = [];
   const foldAt = new Map(folds.map((fold) => [fold.start, fold]));
   const fragment = document.createDocumentFragment();
+  if (rawPrompt !== null) {
+    fragment.append(rawPromptRow(rawPrompt));
+  }
   let hiddenUntil = -1; // 折りたたみの範囲の終わり（この番号の行から先は残す）
   rows.forEach((row, i) => {
     const fold = foldAt.get(i);
@@ -1118,6 +1145,7 @@ function drawResult(result) {
   // 単純比較は専用の関数で描く（折りたたみの行と data-index。差分のみ表示のチェックは作り直した後も付け直す。ADR-0155 決定3〜5）
   // 変更の行の印（result.raw_marks）を番号で引けるように持ってから描く（下の2つの欄にも使う。REQ-226 §4.2・§4.3）
   setRawMarks(result.raw_marks);
+  rawPrompt = result.raw_prompt || null; // fillRaw が表の一番上に入れる（REQ-380）
   fillRaw(rawRows, result.raw_folds);
   applySetAside(false);
   // 下の2つの欄（読むだけの文字の箱。REQ-226 §4.3）は空にする

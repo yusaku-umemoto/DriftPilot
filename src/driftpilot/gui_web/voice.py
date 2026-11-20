@@ -228,7 +228,7 @@ class VoiceHub:
             thread.join(remaining)
 
     def settings_changed(self) -> None:
-        """設定の窓で保存した(session.settings_saved)。enabled・場所の変化を受ける。press は次の録音から。"""
+        """設定の窓で保存した(WebSession.publish → 比較の窓の _on_settings_change)。enabled・場所の変化を受ける。press は次の録音から。"""
         with self._lock:
             if not self._opened or self._closed:
                 return

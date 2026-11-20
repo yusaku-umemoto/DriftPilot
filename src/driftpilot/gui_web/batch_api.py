@@ -99,6 +99,7 @@ from driftpilot.core import (
 from driftpilot.gui_web.bridge import Api, _failure, _guarded, notify
 from driftpilot.gui_web.drop_order import dropped_paths, order_pair
 from driftpilot.gui_web.session import WebSession
+from driftpilot.gui_web.settings_change import PROFILES, RAW_DEFAULTS, SETTINGS, SettingsChange, quietly
 from driftpilot.llm_analyzer import (
     DEFAULT_PROMPT_TEMPLATE,
     FILE_NAMES,
@@ -989,8 +990,35 @@ class BatchApi(Api):
             "update_notice": self._session.update_notice_view(),
         }
 
-    def _reload_character(self) -> None:
-        """設定の窓でキャラクターの設定を保存した後に呼ぶ(WebSession.settings_saved。ADR-0245 決定2・REQ-372)。
+    def _on_settings_change(self, change: SettingsChange) -> None:
+        """設定が変わった知らせを受ける(WebSession.publish がロックの外で呼ぶ。ADR-0250 決定2・REQ-379。画面からは呼べない)。
+
+        種類ごとに、今の口の処理を RAW_DEFAULTS → PROFILES → SETTINGS → NOTICE の順に行い、描き直しは最後に多くても 1 回だけ送る。
+        処理の失敗は(閉じかけの窓。今と同じく)捨てて、ほかの処理と描き直しを続ける。
+        - raw_defaults: 変えた窓が自分でなければ _follow_raw_defaults。描き直す
+        - profiles: 変えた窓が自分でなければ描き直す(自分のときは何もしない)
+        - settings: キャラクターの覚えた値を捨て、描き直す
+        - notice: 描き直す
+        """
+        mine = change.origin is self
+        redraw = False
+        for kind in change.ordered():
+            if kind == RAW_DEFAULTS:
+                if not mine:
+                    quietly(self._follow_raw_defaults)
+                redraw = True
+            elif kind == PROFILES:
+                redraw = redraw or not mine
+            elif kind == SETTINGS:
+                quietly(self._forget_character)
+                redraw = True
+            else:
+                redraw = True
+        if redraw:
+            self._changed()
+
+    def _forget_character(self) -> None:
+        """設定の窓でキャラクターの設定を保存した後に呼ぶ(_on_settings_change。ADR-0245 決定2・REQ-372)。
 
         覚えた値を捨てるだけ。次の state() で今の設定を読み直す。比べている途中でも止めない(絵の出し方だけが変わる)。
         """
@@ -1243,10 +1271,10 @@ class BatchApi(Api):
         self._result_revision += 1
         return notice
 
-    def _raw_defaults_saved(self) -> None:
-        """設定の窓で単純比較の既定を保存できた後に、WebSession がロックの外で呼ぶ(REQ-361 §4。画面からは呼べない)。
+    def _follow_raw_defaults(self) -> None:
+        """設定の窓で単純比較の既定を保存できた後に、_on_settings_change がロックの外で呼ぶ(REQ-361 §4。画面からは呼べない)。
 
-        窓への「状態が変わった」は呼び出し側(WebSession.settings_saved)が 1 回だけ送るので、ここでは送らない。
+        窓への「状態が変わった」は _on_settings_change が 1 回だけ送るので、ここでは送らない。
         - 組が無い・来た場所が分からない(組を作れなかった): 何もしない
         - 組のファイルから開いた組: 入れ替えない。帯だけ
         - フォルダから作った組: 新しい既定に入れ替える(読めなければ今の「読めない」の帯のまま)。表示中の結果は比べ直すまで今のまま。
@@ -1642,10 +1670,8 @@ class BatchApi(Api):
             written = action.ok
             result = self._ok() if action.ok else self._ok(self._notice(action.message, title))
         if written:
-            self._session.settings_changed()
-            switched = getattr(self._session, "_profiles_switched", None)
-            if switched is not None:
-                switched(origin=self)  # 比較の窓・AI の窓へ描き直しを知らせる(REQ-372)
+            # 設定の窓へ読み直しを、比較の窓・AI の窓へ描き直しを知らせる(REQ-372・ADR-0250)
+            self._session.publish({PROFILES}, origin=self)
         return result
 
     def _cancel(self) -> dict[str, Any]:

@@ -73,6 +73,8 @@
      左の幅は画面のスクリプトが要素の上で書き換える（動かし終えたら利用者ごとの設定に覚える。REQ-370） */
   --pilot-split-left: 72%;
   --pilot-pane-min-width: 220px;
+  /* 「ログを見る」の窓の AI の欄の初めの幅（窓の 28%。REQ-382）。覚えた位置があれば画面のスクリプトが要素の上で px に書き換える */
+  --pilot-log-ai-width: 28%;
 }
 
 /* 色の選び方（ADR-0189）。<html> に data-theme が無いときは OS の設定に従う（system）。
@@ -552,6 +554,79 @@ body {
 .pilot-settings-panel {
   flex-wrap: wrap;
   margin: 0;
+}
+
+/*
+ * 比較の画面の上の右の入口のボタン 2 つ（ADR-0252 決定2 / REQ-384）。入力の 2 行と入れ替えのボタンの右に置く。
+ * 設定の行（.pilot-settings-line）はこの外枠の外で、窓の幅いっぱいに使う。
+ * ボタンの高さは入力の 2 行の高さ（28 + 4 + 28 = 60px）に収める: アイコン 20 + 名前 13 × 1.2 + 説明 12 × 1.2
+ * + 枠 1.5 × 2 + 上下の余白 3 × 2 = 約 59px。中は縦に 3 段（アイコン・名前・短い説明）。青い枠で塗らない（青で塗る主ボタンと見分ける）
+ */
+.pilot-compare-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: start;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-entry-group {
+  display: flex;
+  align-items: stretch;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-button.pilot-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3px var(--pilot-space-3);
+  border: 1.5px solid var(--pilot-color-accent);
+  color: var(--pilot-color-accent);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.pilot-entry-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+}
+
+.pilot-entry-name {
+  font-weight: 600;
+}
+
+.pilot-entry-note {
+  color: var(--pilot-color-text-muted);
+  font-size: var(--pilot-font-size-small);
+}
+
+/* キャラクターがオンのとき（ADR-0252 決定3 / REQ-385）: Mirarin の絵（34px 四方）と名前の 2 段。SVG のアイコンと短い説明は隠す。
+ * 高さは 34 + 名前 15.6 + 余白 6 + 枠 3 = 58.6px で、入力の 2 行（60px）と今のボタンに収まる。余白・枠・行の高さ・折り返さない決まりは変えない。
+ * 絵は compare.js が hidden を外す・付ける。オンの印の class（pilot-entry--character）も同じところで付ける・外す */
+.pilot-entry-character {
+  width: 34px;
+  height: 34px;
+}
+
+.pilot-entry--character > .pilot-entry-icon,
+.pilot-entry--character > .pilot-entry-note {
+  display: none;
+}
+
+/* 窓の幅が 1000px 未満のときは短い説明を隠す（アイコンと名前だけ） */
+@media (max-width: 999.98px) {
+  .pilot-entry-note {
+    display: none;
+  }
+}
+
+/* 760px 未満（縦に積む決まり）では、2 つのボタンを入力の下に横に並べる */
+@media (max-width: 759.98px) {
+  .pilot-compare-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .pilot-footer-gap {
@@ -1214,6 +1289,15 @@ body {
 .pilot-raw-fold td {
   color: var(--pilot-color-text-muted);
   text-align: center;
+}
+
+/*
+ * 単純比較の表の一番上の見出しの行（前と後の元の行。プロンプトから始まるコマンドの行。REQ-380 / ADR-0251 決定1）。
+ * 今の見出しに近い控えめな形: 等幅（表の書体）・太字・薄い背景。色は今の変数だけ。違いの印・変わった行の色は付けない
+ */
+.pilot-raw-prompt td {
+  background: var(--pilot-color-surface);
+  font-weight: 600;
 }
 
 /*
@@ -2495,6 +2579,42 @@ mark.pilot-mark {
   --pilot-split-left: 32%;
 }
 
+/*
+ * AI の欄（REQ-382 / ADR-0251 決定3）。窓を「左の面（一覧）｜出力｜AI の欄」にする。AI の欄の初めの幅は窓の 28%（比較の窓と同じ控えめな幅。
+ * 覚えた位置があれば js/log_view.js が px で入れる）で、出力が残りを使う。最小は今の面の最小の幅（--pilot-pane-min-width）。
+ * 隠している間は面と境目が hidden になり、出力が広がる。中身（吹き出し・入力欄・送信のボタン・スピナー）は比較の窓の AI の面の部品を使う。
+ * 一覧のチェックの列（.pilot-col-check）は、見出しのチェックと AI の印（.pilot-ai-mark）が入る幅にし、中のチェックを真ん中に置く
+ */
+.pilot-split--log > .pilot-log-ai-pane {
+  flex: 0 1 var(--pilot-log-ai-width);
+}
+
+.pilot-log-ai-pane > .pilot-note {
+  flex: none;
+  margin: 0 0 var(--pilot-space-1);
+}
+
+.pilot-log-ai-pane .pilot-ai-busy > .pilot-lines {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pilot-split--log col.pilot-col-check {
+  width: 60px;
+}
+
+.pilot-split--log th.pilot-col-check,
+.pilot-split--log td.pilot-check-cell {
+  text-align: center;
+  white-space: nowrap;
+}
+
+@media (max-width: 759.98px) {
+  .pilot-split--log > .pilot-log-ai-pane {
+    flex: 1 1 0;
+  }
+}
+
 .pilot-log-lists {
   gap: var(--pilot-space-2);
 }
@@ -2525,6 +2645,56 @@ mark.pilot-mark {
   flex-grow: 3;
 }
 
+/*
+ * 機器の一覧とコマンドの一覧の間の上下の境目（REQ-381 / ADR-0251 決定2）。左右の境目（.pilot-split-handle）と同じ太さ・形で、向きだけが違う。
+ * 動かす範囲と覚える位置は js/log_view.js と gui_web/log_view_api.py。760px 未満の窓でも隠さない（隠す決まりは .pilot-split-handle にだけ当たる）
+ */
+.pilot-log-lists-handle {
+  flex: none;
+  height: 6px;
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-border);
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.pilot-log-lists-handle:hover,
+.pilot-log-lists-handle:focus-visible {
+  background: var(--pilot-color-accent);
+}
+
+/*
+ * 「ログを見る」の窓の 3 つの表の見出しの列の境目（REQ-381 / ADR-0251 決定2。この窓だけ。比較の窓・一括比較の窓の .pilot-col-resize は 6px のまま）。
+ * つかみを 10px にし、真ん中の 1px にいつも見える線を引く。指を乗せたら（フォーカスしたら）つかみ全体に色が付く。
+ * いちばん右の列の右端は列と列の間ではないので、線は引かない（つかみは残す）
+ */
+.pilot-split--log .pilot-col-resize {
+  width: 10px;
+  background: linear-gradient(
+    to right,
+    transparent calc(50% - 0.5px),
+    var(--pilot-color-border) calc(50% - 0.5px),
+    var(--pilot-color-border) calc(50% + 0.5px),
+    transparent calc(50% + 0.5px)
+  );
+}
+
+.pilot-split--log thead th:last-child > .pilot-col-resize:not(:hover):not(:focus-visible) {
+  background: none;
+}
+
+.pilot-split--log .pilot-col-resize:hover,
+.pilot-split--log .pilot-col-resize:focus-visible {
+  background: var(--pilot-color-accent);
+}
+
+/* 列の幅を測るための見えない要素（js/log_view.js が一時的にセルへ入れて幅を読み、すぐ外す） */
+.pilot-log-probe {
+  position: absolute;
+  visibility: hidden;
+  white-space: pre;
+}
+
 .pilot-col-log-count {
   width: 72px;
 }
@@ -2541,16 +2711,45 @@ mark.pilot-mark {
   flex: none;
 }
 
+/* 操作の行: ①探す・②コピーの 2 つのまとまり。入りきらないときは②が丸ごと次の行に移り、まとまりの中では折り返さない。ボタンの文字は折り返さず、縮めない */
 .pilot-log-tools {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
 }
 
-.pilot-log-tools > .pilot-input {
+.pilot-log-tools-group {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-log-tools-find {
+  flex: 0 1 auto;
+}
+
+.pilot-log-tools-copy {
+  flex: none;
+  margin-left: auto;
+}
+
+.pilot-log-tools-find > .pilot-input {
   flex: 0 1 240px;
-  min-width: 0;
+  min-width: 8em;
+}
+
+.pilot-log-tools-find > label {
+  flex: none;
+  white-space: nowrap;
+}
+
+.pilot-log-tools .pilot-button,
+.pilot-log-tools .pilot-icon-button {
+  flex: none;
+  white-space: nowrap;
 }
 
 .pilot-log-count {
+  flex: none;
   min-width: 6em;
   margin: 0;
   white-space: nowrap;
@@ -2562,7 +2761,7 @@ mark.pilot-mark {
   max-height: none;
 }
 
-/* 出力の表: 等幅・折り返さない。列の幅は ch（js/log_view.js が行の長さから決める）なので、表の書体を等幅にする */
+/* 出力の表: 等幅・折り返さない。列の幅（px）は js/log_view.js が表の等幅の書体で測って入れ、列の幅の部品（js/column_width.js）が決める（行の番号の列と、残りを埋める出力の列）ので、表の書体を等幅にする */
 .pilot-log-output {
   min-width: 100%;
   font-family: var(--pilot-font-family-mono);
@@ -2584,6 +2783,12 @@ mark.pilot-mark {
 .pilot-log-number {
   color: var(--pilot-color-text-muted);
   user-select: none;
+}
+
+/* 出力の表の 1 行目の見出しの行（その区間を始めたプロンプトの行。REQ-380 / ADR-0251 決定1）。今の見出しに近い控えめな形: 等幅（表の書体）・太字・薄い背景 */
+.pilot-log-prompt td {
+  background: var(--pilot-color-surface);
+  font-weight: 600;
 }
 
 /* 空の行も 1 行の高さにする（幅のない文字を足す。コピーする文字には入らない） */

@@ -3984,6 +3984,8 @@ GUI_WEB_TEXTS.update(
         "compare.raw.menu.ignore": "Make this line a rule for lines to ignore",
         "compare.raw.menu.rules": "Show the rules that apply to this line",
         "compare.raw.menu.ask": "Ask AI about this difference",
+        # Accessible name of the heading row at the top of the Simple comparison table (the command line that starts with the prompt; REQ-380 / ADR-0251 decision 1)
+        "compare.raw.prompt_row": "Command line starting with the prompt",
         "compare.raw.line_rules.title": "Rules that apply to this line",
         # Items added to the right-click menus of the Structured tab, the show table and the command pair list (REQ-367 / ADR-0244 decisions 1 and 3). {column} and {n} are filled in by the screen
         "compare.structured.menu.source": "Show the original line in the Simple compare tab",
@@ -5130,9 +5132,9 @@ def device_split_not_opened(folder: Path) -> str:
 GUI_WEB_TEXTS.update({"compare.split_devices": DEVICE_SPLIT_BUTTON})
 
 
-# --- "View log" window: look at one log by device and by command (ADR-0248 decision 2 / REQ-377) ---
-COMPARE_BUTTON_LOG_VIEW = "View log…"
-LOG_VIEW_TITLE = "DriftPilot — View log"
+# --- "Log viewer" window: look at one log by device and by command (ADR-0248 decision 2 / REQ-377; renamed by ADR-0252 decision 1 / REQ-384) ---
+COMPARE_BUTTON_LOG_VIEW = "Log viewer…"
+LOG_VIEW_TITLE = "DriftPilot — Log viewer"
 LOG_VIEW_NO_DEVICE = "(no device name)"  # Name of the single device that stands for the whole log when no device was found
 LOG_VIEW_NO_PROMPT = "Not split"  # When no prompt was found and the whole log is one section
 LOG_VIEW_PASTED_NAME = "Pasted"  # Display name of pasted text
@@ -5174,6 +5176,8 @@ GUI_WEB_TEXTS.update(
         "log_view.commands.col.mark": "Mark",
         "log_view.output.col.number": "Line",
         "log_view.output.col.text": "Output",
+        # Accessible name of the heading row on the first line of the output table (the command line that starts with the prompt; REQ-380 / ADR-0251 decision 1)
+        "log_view.output.prompt_row": "Command line starting with the prompt",
         "log_view.mark.error": "Error output",
         "log_view.mark.preamble": "Preamble",
         "log_view.find.label": "Find",
@@ -5184,8 +5188,100 @@ GUI_WEB_TEXTS.update(
         "log_view.copy.output": "Copy output",
         "log_view.copy.with_command": "Copy with the command line",
         "log_view.split.label": "Divider between the lists and the output",
+        "log_view.lists_split.label": "Divider between the device list and the command list",
         "log_view.button.export": "Write one file per device…",
         "log_view.status.loading": "Loading…",
+    }
+)
+
+
+# --- Entry buttons at the top of the compare window (ADR-0252 decision 2 / REQ-384): short notes and spoken names (title and aria-label: name and note joined) ---
+COMPARE_BUTTON_BATCH_NOTE = "Compare folders"
+COMPARE_BUTTON_LOG_VIEW_NOTE = "Split one log to read"
+COMPARE_BUTTON_BATCH_LABEL = f"{COMPARE_BUTTON_BATCH} — {COMPARE_BUTTON_BATCH_NOTE}"
+COMPARE_BUTTON_LOG_VIEW_LABEL = f"{COMPARE_BUTTON_LOG_VIEW} — {COMPARE_BUTTON_LOG_VIEW_NOTE}"
+
+GUI_WEB_TEXTS.update(
+    {
+        "compare.button.batch.note": COMPARE_BUTTON_BATCH_NOTE,
+        "compare.button.log_view.note": COMPARE_BUTTON_LOG_VIEW_NOTE,
+        "compare.button.batch.label": COMPARE_BUTTON_BATCH_LABEL,
+        "compare.button.log_view.label": COMPARE_BUTTON_LOG_VIEW_LABEL,
+    }
+)
+
+
+# --- Asking the AI about the log shown in the "Log viewer" window (the checked sections; ADR-0251 decision 3 / REQ-382) ---
+# No text contains the log, the question, the answer or a key (only counts and fixed sentences)
+LOG_ASK_INSTRUCTION = (
+    "You are an engineer who helps operate network devices. Below are logs the user captured in a terminal, split by device and by command. "
+    "Secret values are masked, and some lines were not sent. Answer the user's question based on what the logs say. "
+    "If the logs do not tell you, say that you do not know."
+)
+LOG_ASK_QUESTION_LABEL = "Question: "  # Heading of the last "Question: {question}" of the text to send
+# Closing sentence of a follow-up question (for logs. The "differences" of the compare window's CLOSING is "logs" here)
+LOG_ASK_CLOSING = "Answer based only on the logs and the conversation above. If you do not know something, say that you do not know."
+LOG_ASK_CONFIRM_TITLE = "Confirm what is sent to the AI (log)"
+LOG_ASK_PROMPT_TITLE = "Text to send (only this text is sent; read only):"
+LOG_ASK_NOTE = "Check that the log to send does not contain host names or similar."
+LOG_ASK_SEND = "Send"
+LOG_ASK_DONT_SEND = "Don't send"
+LOG_ASK_ASKING = "Asking the AI…"
+LOG_ASK_NO_LOG = "No log is loaded. Nothing was sent."
+LOG_ASK_NO_LINES = "There are no lines to send. Nothing was sent."
+LOG_ASK_LOG_CHANGED = "Nothing was sent, because the log changed after the confirmation. Please confirm again."
+LOG_ASK_PREMISE_CHANGED = "Nothing was sent, because the premise attached every time changed after the confirmation. Please confirm again."
+LOG_ASK_WORDS_CHANGED = 'The secret words changed, so you cannot continue asking. Start again with "Clear conversation".'
+
+
+def log_view_scope_shown(device: str, command: str) -> str:
+    """Scope line: when nothing is checked (the one section shown)."""
+    return f"Sending the 1 section shown ({device} / {command})"
+
+
+def log_view_scope_checked(n: int, m: int) -> str:
+    """Scope line: when sections are checked."""
+    return f"Sending {n} checked {_plural(n, 'section', 'sections')} ({m} {_plural(m, 'device', 'devices')})"
+
+
+def log_ask_destination(name: str, model: str | None) -> str:
+    """Destination line of the AI area (display name and model of the AI profile in use. No key or endpoint)."""
+    return f"Destination: {name}  Model: {model or '-'}"
+
+
+def log_ask_sections(n: int, m: int) -> str:
+    """The "sections to send" line of the confirmation before sending."""
+    return f"Sections to send: {n} ({m} {_plural(m, 'device', 'devices')})"
+
+
+def log_ask_omitted_lines(n: int) -> str:
+    """Number of lines not sent because they could not be judged, in the confirmation before sending."""
+    return f"Lines not sent because they could not be judged: {n}"
+
+
+def log_ask_omitted_sections(n: int) -> str:
+    """Number of sections not sent because their command shows secrets, in the confirmation before sending."""
+    return f"Sections not sent because their command shows secrets: {n}"
+
+
+def log_ask_over_limit(chars: int, limit: int) -> str:
+    """When the text to send exceeds the limit (never sent in part. Only numbers, no content)."""
+    return f"The lines to send exceed the limit. Check fewer sections ({chars:,} characters; limit {limit:,} characters)."
+
+
+GUI_WEB_TEXTS.update(
+    {
+        "log_view.check.col": "Send to AI",
+        "log_view.check.all_devices": "Send all commands of all devices to the AI",
+        "log_view.check.all_commands": "Send all commands of this device to the AI",
+        "log_view.ai.title": "Ask the AI",
+        "log_view.ai.split.label": "Divider between the output and the AI area",
+        "log_view.ai.question.label": "Question for the AI (asks about the log shown)",
+        "log_view.ai.question.placeholder": "Shift+Enter to send, Enter for a new line",
+        "log_view.ai.clear": "Clear conversation",
+        "log_view.ai.copy": "Copy answer",
+        "log_view.ai.cancel": "Cancel",
+        "log_view.ai.empty": "You can ask about the checked sections (or the section shown when nothing is checked). What is sent is confirmed before sending.",
     }
 )
 

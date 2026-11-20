@@ -26,7 +26,7 @@ F5 BIG-IP の形のプロンプト(tmsh の `<人>@(<名前>)(…)(tmos)# ` と 
 
 import collections
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Sequence
 from typing import Literal
 
@@ -137,6 +137,9 @@ class Segment:
     preamble: tuple[str, ...]  # 本文から外した前置き行
     body: tuple[str, ...]
     line_count: int  # 本文の行数
+    # この区間を始めたプロンプトの行(ページ送りの印・色の印を外した後。ADR-0251 決定1。REQ-380)。見せるためだけに持つ。
+    # 比べる文(text)・区間どうしの比較・保存には入れない。区切りなし・前置きだけの区間・プロンプトの行が無い区間は None
+    prompt_line: str | None = field(default=None, compare=False, metadata={"saved": False})
 
     @property
     def text(self) -> str:
@@ -786,21 +789,22 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
     # XR・ASA の形で設定モードのプロンプト(`...(config-if)#`)。この行のコマンドは頭の `do ` を外す
     do_mode_prompts = frozenset(p for p in prompts if strip_do_ok and (_is_xr_mode_prompt(p) or _is_asa_mode_prompt(p)))
 
-    sections: list[tuple[str | None, list[str]]] = []
+    sections: list[tuple[str | None, list[str], str | None]] = []
     cmd: str | None = None
+    pline: str | None = None  # 今の区間を始めたプロンプトの行(REQ-380)
     buf: list[str] = []
 
     def flush() -> None:
-        nonlocal cmd, buf
-        name, body = cmd, buf
-        cmd, buf = None, []
+        nonlocal cmd, buf, pline
+        name, body, started = cmd, buf, pline
+        cmd, buf, pline = None, [], None
         if name is None:
             if not any(line.strip() for line in body):
                 return
             head = next(i for i, line in enumerate(body) if line.strip())
             if BARE_COMMAND.match(body[head].strip()):
                 name, body = _display_command(body[head]), body[head + 1 :]
-        sections.append((name, body))
+        sections.append((name, body, started))
 
     for line in lines:
         if LOGIN.match(line.strip()):
@@ -810,6 +814,7 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
             hw_rest = _huawei_rest(line, hw_hosts)
             if hw_rest is not None:
                 flush()
+                pline = line
                 c = _display_command(hw_rest)
                 if c:
                     cmd = c
@@ -823,6 +828,7 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
             f5_line = _f5_match(line)
             if f5_line is not None and f5_line[0] in f5_hosts:
                 flush()
+                pline = line
                 c = _display_command(f5_line[2])
                 if c:
                     cmd = c
@@ -834,6 +840,7 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
         hit = next((p for p in by_length if line.startswith(p)), None)
         if hit is not None:
             flush()
+            pline = line
             c = _strip_dollar(_display_command(line[len(hit) :]))
             if hit in do_mode_prompts:
                 c = _strip_do(c)
@@ -843,6 +850,7 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
         mode = CONFIG_MODE_PROMPT.match(line)
         if mode and mode.group("host") in hosts:
             flush()
+            pline = line
             c = _strip_dollar(_display_command(mode.group("rest")))
             c = _strip_do(c)
             if c:
@@ -852,6 +860,7 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
         if plain_rest is not None:
             # 設定モードを抜けた通常のプロンプト(`Router# `・`Router> `。ADR-0209 決定7 の2)
             flush()
+            pline = line
             c = _strip_dollar(_display_command(plain_rest))
             if c:
                 cmd = c
@@ -868,15 +877,15 @@ def split_log(text: str, prompt: str | Sequence[str] | None = None) -> SplitResu
             following = sections[i][0]
 
     segments: list[Segment] = []
-    for index, (name, body) in enumerate(sections):
+    for index, (name, body, started) in enumerate(sections):
         pre, rest = _finish(body)
         if any(line.strip() for line in rest):
-            segments.append(Segment(len(segments) + 1, name, pre, rest, len(rest)))
+            segments.append(Segment(len(segments) + 1, name, pre, rest, len(rest), started))
         elif name and (_f5_keep_word(name) if f5_hosts is not None else _first_word(name)) in KEEP_EMPTY_COMMANDS:
             # 出力が空でも、見るためのコマンドの区間は残す(ADR-0201 決定4)。
             # ただし、次のコマンドが同じか語の途中で続くなら、Tab で補った跡なので残さない(ADR-0237 決定1)
             following_command = next_commands[index]
             if following_command is not None and _tab_remnant(name, following_command):
                 continue
-            segments.append(Segment(len(segments) + 1, name, pre, (), 0))
+            segments.append(Segment(len(segments) + 1, name, pre, (), 0, started))
     return SplitResult(prompts, source, tuple(segments), marks)

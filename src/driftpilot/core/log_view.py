@@ -19,6 +19,8 @@ class LogSegment:
     lines: tuple[str, ...]
     has_preamble: bool
     is_error: bool
+    # この区間を始めたプロンプトの行(例: `sw-test1#show version`。無ければ None。見せるためだけ。ADR-0251 決定1・REQ-380)
+    prompt_line: str | None = None
 
     @property
     def line_count(self) -> int:
@@ -48,6 +50,7 @@ def log_devices(text: str) -> tuple[LogDevice, ...]:
                 lines=tuple(segment.body),
                 has_preamble=bool(segment.preamble),
                 is_error=is_error_output(segment),
+                prompt_line=segment.prompt_line,
             )
             for segment in result.segments
         )

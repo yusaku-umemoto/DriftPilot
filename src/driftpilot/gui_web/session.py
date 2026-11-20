@@ -17,6 +17,9 @@
   比較の窓を閉じたら一緒に閉じる。1 つのログを手元で読むだけの窓で、門は取らず、AI へは何も送らない。
   watch_drop を渡されたら、窓の読み込みの後にファイルのドロップを受ける
 
+- 設定が変わったときの窓への知らせ(ADR-0250 / REQ-379)。口は publish(変わった種類, origin) の 1 つだけ。開いている窓の
+  _on_settings_change を 1 回ずつ呼び、その後にアプリのアイコンを合わせる(色は別の道の apply_theme)
+
 - 起動したときの新しい版の確かめ(ADR-0188 決定2 / REQ-252 §5)。[gui] auto_update_check が真のときだけ、最初の窓
   (比較の窓。--batch だけのときは一括比較の窓)の最初の state() の後に、裏で check_latest を 1 回だけ呼ぶ(1 つの起動で 2 回呼ばない)。
   偽のときは、つなぐ関数を一度も呼ばない。結果が newer のときだけ知らせ(update_notice_view)を置き、比較の窓と一括比較の窓へ
@@ -37,13 +40,14 @@
 
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from driftpilot import __version__
 from driftpilot.gui_web import theme as theme_module
 from driftpilot.gui_web.app_icon import AppIcon
 from driftpilot.gui_web.settings_api import SettingsApi
+from driftpilot.gui_web.settings_change import NOTICE, SettingsChange
 from driftpilot.messages import AI_PANE_TITLE, BATCH_TITLE, LOG_VIEW_TITLE, SETTINGS_TITLE, update_notice_text
 from driftpilot.update import STATE_NEWER, UpdateStatus, check_latest
 from driftpilot.update.apply import write_started_ok
@@ -228,7 +232,7 @@ class WebSession:
             if self._update_dismissed or self._launch_notice is not None:
                 return  # 更新の後の起動の知らせを出しているときは置かない
             self._update_notice = update_notice_text(status.latest, status.current)
-        self.settings_saved()  # 比較の窓と一括比較の窓に「状態が変わった」と知らせる(同じ口)
+        self.publish({NOTICE})  # 比較の窓と一括比較の窓に「状態が変わった」と知らせる(同じ口)
 
     def update_notice_view(self) -> str | None:
         """比較の窓と一括比較の窓の上に出す知らせの文。出さないときは None。更新の後の起動の知らせを先に返す。"""
@@ -266,7 +270,7 @@ class WebSession:
         with self.lock:
             self._update_dismissed = True
             self._update_notice = None
-        self.settings_saved()
+        self.publish({NOTICE})
 
     # --- 門 ---
 
@@ -411,14 +415,10 @@ class WebSession:
             )
             api._attach(window)  # 「閉じる」・接続テストの知らせ・ファイルのダイアログに使う
             _watch_window_state(window)
-            # 保存できたら、開いている比較の窓と一括比較の窓へ知らせる(ADR-0176 決定4。テストの偽物に口が無くても動く)
-            set_on_saved = getattr(api, "_set_on_saved", None)
-            if set_on_saved is not None:
-                set_on_saved(self.settings_saved)
-            # 「単純比較」のタブで保存できたら、開いている比較の窓と一括比較の窓へ新しい既定を届ける(REQ-361。_on_saved より先に呼ばれる)
-            set_on_raw_saved = getattr(api, "_set_on_raw_saved", None)
-            if set_on_raw_saved is not None:
-                set_on_raw_saved(lambda: self._raw_defaults_saved(origin=api))
+            # 保存できたら、開いている窓へ「変わった種類」を知らせる(ADR-0176 決定4・ADR-0250。テストの偽物に口が無くても動く)
+            set_publish = getattr(api, "_set_publish", None)
+            if set_publish is not None:
+                set_publish(self.publish)
             # 「表示」の「保存」で色が変わったら、開いている窓すべてに当てる(ADR-0189。テストの偽物に口が無くても動く)
             set_on_theme = getattr(api, "_set_on_theme", None)
             if set_on_theme is not None:
@@ -438,106 +438,26 @@ class WebSession:
             with self.lock:
                 self._opening = False
 
-    def settings_changed(self) -> None:
-        """比較の窓で AI プロファイル・プロンプトの使用中を変えた後に呼ぶ(ロックの外で。REQ-206 §5)。
+    def publish(self, kinds: Iterable[str], origin: Any = None) -> None:
+        """設定が変わった後に呼ぶ、窓への知らせの 1 つの口(ロックの外で。ADR-0250 決定1〜3・REQ-379。画面からは呼べない)。
 
-        設定の窓が開いていれば、保存していない編集を残して読み直させる(SettingsApi._profiles_changed)。失敗は握りつぶす。
-        ほかの比較の窓・一括比較の窓・AI の窓への知らせは、ここでは送らない(_profiles_switched が送る。REQ-372)。
+        kinds は変わった種類(settings_change の 4 つ。1 つ以上。誤りは ValueError)、origin は変えた窓の口(無ければ None)。
+        ロックの下で開いている窓の口を集め(比較の窓は閉じていないときだけ。順は比較の窓・一括比較の窓・設定の窓・ログを見る窓)、
+        ロックの外で各窓の _on_settings_change を 1 回ずつ呼ぶ。名前で探すのはこの口だけで、口が無い窓は飛ばす。
+        閉じかけの窓の失敗は捨てる。全部の窓に知らせた後に、アプリのアイコンを今のキャラクターの設定に合わせる(_follow_app_icon)。
         """
-        with self.lock:
-            settings = self._settings
-        if settings is None:
-            return
-        refresh = getattr(settings[1], "_profiles_changed", None)
-        if refresh is None:
-            return
-        try:
-            refresh()
-        except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
-            pass
-
-    def _profiles_switched(self, origin: Any = None) -> None:
-        """使用中の AI プロファイル・プロンプトを替えた後に呼ぶ(ロックの外で。ADR-0245 決定2・REQ-372。画面からは呼べない)。
-
-        開いている比較の窓(閉じていないとき)と一括比較の窓のうち、origin(替えた窓)以外の _changed を、ロックの外で呼ぶ。
-        比較の窓の _changed は比較の窓と AI の窓の両方へ「状態が変わった」を送る(結果・答え・入力は消さない)。
-        設定の窓へは settings_changed が知らせる。口が無い窓・閉じかけの窓の失敗は捨てる。
-        """
+        change = SettingsChange(frozenset(kinds), origin)
         with self.lock:
             targets = []
             if self._compare is not None and not self._compare_closed:
                 targets.append(self._compare[1])
-            if self._batch is not None:
-                targets.append(self._batch[1])
+            targets.extend(pair[1] for pair in (self._batch, self._settings, self._log_view) if pair is not None)
         for api in targets:
-            if api is origin:
-                continue
-            changed = getattr(api, "_changed", None)
-            if changed is None:
+            receive = getattr(api, "_on_settings_change", None)
+            if receive is None:
                 continue
             try:
-                changed()
-            except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
-                pass
-
-    def _raw_defaults_saved(self, origin: Any = None) -> None:
-        """単純比較の既定(raw-compare.json)が保存された後に呼ぶ(ロックの外で。REQ-361 §3・§4。画面からは呼べない)。
-
-        開いている比較の窓・一括比較の窓・設定の窓のうち、origin(保存した窓)以外の _raw_defaults_saved を、ロックの外で呼ぶ。
-        窓への「状態が変わった」はここでは送らない(settings_saved が 1 回だけ送る)。口が無い窓・閉じかけの窓の失敗は捨てる。
-        """
-        with self.lock:
-            targets = []
-            if self._compare is not None and not self._compare_closed:
-                targets.append(self._compare[1])
-            targets.extend(pair[1] for pair in (self._batch, self._settings) if pair is not None)
-        for api in targets:
-            if api is origin:
-                continue
-            follow = getattr(api, "_raw_defaults_saved", None)
-            if follow is None:
-                continue
-            try:
-                follow()
-            except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
-                pass
-
-    def settings_saved(self) -> None:
-        """設定の窓で保存できた後に呼ぶ(ロックの外で。ADR-0176 決定4)。
-
-        開いている比較の窓(AI の窓が開いていればそちらにも届く)と一括比較の窓へ「状態が変わった」と知らせ、
-        state() を読み直して描き直させる(結果・答え・入力は消さない)。知らせの失敗は握りつぶす。
-        その前に、各窓のキャラクターの設定を読み直させる(_reload_character。ADR-0245 決定2・REQ-372)。
-        新しい版の知らせ(_run_update_check・dismiss_update_notice)からも呼ばれるが、そのときのファイルの値を読むだけである。
-        """
-        with self.lock:
-            targets = []
-            if self._compare is not None and not self._compare_closed:
-                targets.append(self._compare[1])
-            if self._batch is not None:
-                targets.append(self._batch[1])
-        for api in targets:
-            reload_character = getattr(api, "_reload_character", None)
-            if reload_character is not None:
-                try:
-                    reload_character()
-                except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
-                    pass
-            changed = getattr(api, "_changed", None)
-            if changed is None:
-                continue
-            try:
-                changed()
-            except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
-                pass
-        # 音声入力の設定(「音声入力」のタブ。enabled・場所・押し方)を、開いている比較の窓へ知らせる(ADR-0233 決定6)。
-        # 比較の窓だけが持つ。公開の名前は足さない(_ で始まる口。失敗は捨てる)
-        with self.lock:
-            compare = self._compare[1] if self._compare is not None and not self._compare_closed else None
-        voice_changed = getattr(compare, "_voice_settings_changed", None)
-        if voice_changed is not None:
-            try:
-                voice_changed()
+                receive(change)
             except Exception:  # noqa: BLE001 - 閉じかけの窓への知らせの失敗は捨てる
                 pass
         self._follow_app_icon()

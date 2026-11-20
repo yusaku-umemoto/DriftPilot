@@ -10,9 +10,11 @@
   <script type="module" src="js/log_view.js"></script>
 </head>
 <!--
-  「ログを見る」の画面（ADR-0248 決定2 / REQ-377）。比べずに、1 つのログを機器ごと・コマンドごとに分けて手元で読むだけの窓。何も送らない。
-  上から ①上の行（ファイル名・機器と行の数・「開く…」「貼り付け…」） ②左右の面（左に機器の一覧とコマンドの一覧、右に選んだコマンドの出力。
-  境目はドラッグと矢印のキーで動く） ③操作（機器ごとのファイルに書き出す…） ④ステータス。
+  「ログを見る」の画面（ADR-0248 決定2 / REQ-377）。比べずに、1 つのログを機器ごと・コマンドごとに分けて手元で読む窓。
+  AI に送るのは、右の AI の欄で質問したときだけ（表示中の区間か、チェックした区間。送る前に必ず確認を出す。ADR-0251 決定3 / REQ-382）。
+  上から ①上の行（ファイル名・機器と行の数・「開く…」「貼り付け…」） ②3 つの面（左に機器の一覧とコマンドの一覧、真ん中に選んだコマンドの出力、
+  右に AI の欄。境目はドラッグと矢印のキーで動く。機器の一覧とコマンドの一覧の間にも上下の境目がある。AI の欄は隠せる）
+  ③操作（機器ごとのファイルに書き出す…） ④ステータス。
   文は書かず、data-text・data-label（title と aria-label）の鍵で messages.py の文を取る。半角の括弧を含む文（機器の数・行の数・状態の行）は
   Python が返す状態から描く。状態は Python（gui_web/log_view_api.py）が返す JSON を js/log_view.js が描く。
   窓の中身は縦にスクロールさせず、左右の面の表がそれぞれスクロールする。出力の表は折り返さず、横にもスクロールする。
@@ -31,20 +33,22 @@
       </div>
     </section>
 
-    <!-- ②左右の面。左の面の初めの幅は 32%、どちらも最小 220px。760px 未満は縦に積む。幅は覚えない -->
+    <!-- ②左右の面。左の面の初めの幅は 32%、どちらも最小 220px。760px 未満は縦に積む。左右の境目と上下の境目の位置は ui-state.json に覚える（REQ-381） -->
     <div class="pilot-fill pilot-split pilot-split--resizable pilot-split--log" id="split">
       <div class="pilot-split-pane pilot-log-lists" id="lists">
         <!-- 機器の一覧（ホスト名・コマンドの数） -->
-        <section class="pilot-log-list" aria-labelledby="devices-title">
+        <section class="pilot-log-list" id="devices-list" aria-labelledby="devices-title">
           <h2 class="pilot-group-title" id="devices-title" data-text="log_view.devices.title"></h2>
           <div class="pilot-table-wrap" id="devices-wrap" tabindex="0">
             <table class="pilot-table pilot-table--fixed" id="devices-table">
               <colgroup>
+                <col class="pilot-col-check">
                 <col>
                 <col class="pilot-col-log-count">
               </colgroup>
               <thead>
                 <tr>
+                  <th scope="col" class="pilot-col-check"><input type="checkbox" class="pilot-check" id="check-all-devices" data-label="log_view.check.all_devices"><span class="pilot-ai-mark" data-text="compare.multi.send_mark" aria-hidden="true"></span></th>
                   <th scope="col" data-text="log_view.devices.col.host"></th>
                   <th scope="col" class="pilot-num" data-text="log_view.devices.col.commands"></th>
                 </tr>
@@ -53,17 +57,21 @@
             </table>
           </div>
         </section>
+        <!-- 機器の一覧とコマンドの一覧の境目。上下の矢印のキーで 20px ずつ、ドラッグでも動く。名前は data-label の文 -->
+        <div class="pilot-log-lists-handle" id="lists-handle" role="separator" tabindex="0" aria-orientation="horizontal" aria-controls="devices-list" aria-valuenow="40" aria-valuemin="0" aria-valuemax="100" data-label="log_view.lists_split.label"></div>
         <!-- 選んだ機器のコマンドの一覧（コマンド・行の数・印）。印は「エラーの出力」「前置き」 -->
-        <section class="pilot-log-list">
+        <section class="pilot-log-list" id="commands-list">
           <div class="pilot-table-wrap" id="commands-wrap" tabindex="0">
             <table class="pilot-table pilot-table--fixed" id="commands-table">
               <colgroup>
+                <col class="pilot-col-check">
                 <col>
                 <col class="pilot-col-log-count">
                 <col class="pilot-col-log-mark">
               </colgroup>
               <thead>
                 <tr>
+                  <th scope="col" class="pilot-col-check"><input type="checkbox" class="pilot-check" id="check-all-commands" data-label="log_view.check.all_commands"><span class="pilot-ai-mark" data-text="compare.multi.send_mark" aria-hidden="true"></span></th>
                   <th scope="col" data-text="log_view.commands.col.command"></th>
                   <th scope="col" class="pilot-num" data-text="log_view.commands.col.lines"></th>
                   <th scope="col" data-text="log_view.commands.col.mark"></th>
@@ -77,16 +85,21 @@
       <!-- 一覧と出力の境目。左右の矢印のキーで 20px ずつ、ドラッグでも動く。名前は data-label の文 -->
       <div class="pilot-split-handle" id="split-handle" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="lists" aria-valuenow="32" aria-valuemin="0" aria-valuemax="100" data-label="log_view.split.label"></div>
       <section class="pilot-split-pane pilot-log-output-pane" id="output-pane">
-        <!-- 探す（文字そのまま・大文字と小文字を区別しない。今の区間の行だけ）とコピー -->
+        <!-- 操作の行は 2 つのまとまり。①探す（文字そのまま・大文字と小文字を区別しない。今の区間の行だけ） ②コピー。入りきらないときは②が丸ごと次の行に移る（まとまりの中では折り返さない） -->
         <div class="pilot-row pilot-log-tools">
-          <label for="find" data-text="log_view.find.label"></label>
-          <input id="find" class="pilot-input" type="search" autocomplete="off" spellcheck="false">
-          <button type="button" class="pilot-button pilot-button--secondary" id="find-prev" data-text="log_view.find.prev"></button>
-          <button type="button" class="pilot-button pilot-button--secondary" id="find-next" data-text="log_view.find.next"></button>
-          <span class="pilot-note pilot-log-count" id="find-count" role="status"></span>
-          <span class="pilot-spacer"></span>
-          <button type="button" class="pilot-button pilot-button--secondary" id="copy-output" data-text="log_view.copy.output"></button>
-          <button type="button" class="pilot-button pilot-button--secondary" id="copy-with-command" data-text="log_view.copy.with_command"></button>
+          <div class="pilot-log-tools-group pilot-log-tools-find">
+            <label for="find" data-text="log_view.find.label"></label>
+            <input id="find" class="pilot-input" type="search" autocomplete="off" spellcheck="false">
+            <button type="button" class="pilot-button pilot-button--secondary" id="find-prev" data-text="log_view.find.prev"></button>
+            <button type="button" class="pilot-button pilot-button--secondary" id="find-next" data-text="log_view.find.next"></button>
+            <span class="pilot-note pilot-log-count" id="find-count" role="status"></span>
+          </div>
+          <div class="pilot-log-tools-group pilot-log-tools-copy">
+            <button type="button" class="pilot-button pilot-button--secondary" id="copy-output" data-text="log_view.copy.output"></button>
+            <button type="button" class="pilot-button pilot-button--secondary" id="copy-with-command" data-text="log_view.copy.with_command"></button>
+            <!-- AI の欄を隠している間だけ出す「« AI」（出す。比較の窓と同じ形・同じ文） -->
+            <button type="button" class="pilot-icon-button pilot-icon-button--text" id="log-ai-show" data-text="compare.ai.show_text" data-label="compare.ai.show" hidden></button>
+          </div>
         </div>
         <p class="pilot-note" id="empty" data-text="log_view.empty"></p>
         <!-- 選んだコマンドの出力（行番号つき・等幅・折り返しなし）。選んだ区間の行だけを描く -->
@@ -104,6 +117,40 @@
             </thead>
             <tbody></tbody>
           </table>
+        </div>
+      </section>
+      <!-- 出力と AI の欄の境目。左右の矢印のキーで 20px ずつ、ドラッグでも動く。AI の欄を隠している間は隠す。名前は data-label の文 -->
+      <div class="pilot-split-handle" id="ai-split-handle" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="ai-pane" aria-valuenow="72" aria-valuemin="0" aria-valuemax="100" data-label="log_view.ai.split.label"></div>
+      <!-- AI の欄（ADR-0251 決定3 / REQ-382）。表示中の区間か、チェックした区間を、送る前の確認を通してから AI に質問する。
+           上から 題と「隠す」・送り先の行・送る区間の行・会話（答え）・誤りの行・送信中・質問の欄（中に送信のボタン）・「会話を消す」と「答えをコピー」。
+           文は data-text・data-label の鍵で取り、会話は Python が返す状態から textContent だけで描く（js/log_ask.js） -->
+      <section class="pilot-split-pane pilot-log-ai-pane" id="ai-pane" aria-labelledby="ai-title">
+        <div class="pilot-ai-head">
+          <h2 class="pilot-group-title" id="ai-title" data-text="log_view.ai.title"></h2>
+          <button type="button" class="pilot-icon-button" id="ai-hide" data-text="compare.ai.hide_icon" data-label="compare.ai.hide"></button>
+        </div>
+        <p class="pilot-note pilot-lines" id="ai-destination"></p>
+        <p class="pilot-note pilot-lines" id="ai-scope"></p>
+        <div class="pilot-chat" id="ai-chat" tabindex="0" role="log" aria-live="polite">
+          <p class="pilot-note" id="ai-empty" data-text="log_view.ai.empty"></p>
+          <div class="pilot-chat-turns" id="ai-turns"></div>
+          <p class="pilot-note pilot-lines" id="ai-note" hidden></p>
+          <p class="pilot-note pilot-lines" id="ai-error" role="alert" hidden></p>
+          <div class="pilot-ai-busy" id="ai-busy" hidden><span class="pilot-spinner pilot-spinner--small" aria-hidden="true"></span><span class="pilot-lines" id="ai-busy-text" role="status"></span><button type="button" class="pilot-button pilot-button--secondary" id="ai-cancel" data-text="log_view.ai.cancel"></button></div>
+        </div>
+        <div class="pilot-ai-controls">
+          <div class="pilot-chat-input">
+            <textarea id="ai-question" class="pilot-input pilot-wide" rows="2" spellcheck="false" data-label="log_view.ai.question.label" data-placeholder="log_view.ai.question.placeholder"></textarea>
+            <div class="pilot-chat-input-buttons">
+              <button type="button" class="pilot-icon-button pilot-chat-send" id="ai-send" data-label="compare.ai.send" disabled>
+                <svg class="pilot-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 4l7 8h-4.5v8h-5v-8H5z"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="pilot-row">
+            <button type="button" class="pilot-button pilot-button--secondary" id="ai-clear" data-text="log_view.ai.clear" disabled></button>
+            <button type="button" class="pilot-button pilot-button--secondary" id="ai-copy" data-text="log_view.ai.copy" disabled></button>
+          </div>
         </div>
       </section>
     </div>
