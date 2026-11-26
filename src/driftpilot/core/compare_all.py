@@ -22,6 +22,10 @@ LLM 解析(REQ-122 §4・§5 / ADR-0084 決定6)は、CLI の --all-segments --l
 続けて失敗したら残りでは呼ばない・比較が失敗した組には送らない)。要約と承認は core.batch_llm の関数に PairResult をそのまま渡す。
 比較の窓は analyze_all で全部の組を1つの文にして1回で送る(ADR-0152 決定3。記号の表は全部の組で1つ)。
 一括比較のまとめて比べた組も、組ごとに analyze_all で同じ文を作って1回で送る(ADR-0178 決定4・REQ-241。core.batch._run_one)。
+
+ログ全体の切り分けと入力の案内は、compare_all の 1 回の呼び出しで両側とも 1 回だけ作り、組ごとの run_compare の prepared に渡す
+(ADR-0258。REQ-393。組の数だけ切り分け直さない。結果は変えない)。pair_by_hand・restore_excluded も、番号の表を作る切り分けを
+そのまま渡す。作った値はその呼び出しの中の変数にだけ持ち、モジュールの変数・キャッシュ・クラスの属性には覚えない。
 """
 
 import dataclasses
@@ -33,8 +37,9 @@ from driftpilot import i18n
 from driftpilot.config_parser.family_hint import AUTO_PLATFORM
 from driftpilot.config_parser.platforms import CONFIG_PLATFORM_NAMES
 from driftpilot.core.batch import _LlmPerJob
-from driftpilot.core.compare import llm_inputs, looks_not_sir, run_compare
+from driftpilot.core.compare import PreparedSide, llm_inputs, looks_not_sir, prepare_sides, run_compare
 from driftpilot.core.types import (
+    SIDES,
     CompareCancelled,
     CompareError,
     CompareOutcome,
@@ -49,6 +54,7 @@ from driftpilot.llm_analyzer.payload import LlmInputs
 from driftpilot.segmentation import (
     Segment,
     SegmentPair,
+    SplitResult,
     command_key,
     has_repeats,
     is_error_output,
@@ -189,8 +195,11 @@ def compare_all(
     on_pair(何組目か, 比べる組の数, コマンドの文)は各組を比べる前に1回呼ぶ(REQ-264 §3。数は両側がそろった組。
     コマンド不明は None)。どれも省けば今と同じ動き。
     """
-    all_before = split_log(request.before.text, prompt=request.prompt).segments
-    all_after = split_log(request.after.text, prompt=request.prompt).segments
+    # 両側の切り分けと入力の案内は 1 回だけ作り、組ごとの run_compare に渡す(ADR-0258。この呼び出しの中の変数にだけ持つ)
+    splits = _splits(request)
+    prepared = prepare_sides(request, splits)
+    all_before = splits["before"].segments
+    all_after = splits["after"].segments
     # エラーの出力の区間は組にする前に外す(ADR-0195 決定1)
     before = tuple(s for s in all_before if not is_error_output(s))
     after = tuple(s for s in all_after if not is_error_output(s))
@@ -215,7 +224,7 @@ def compare_all(
         if on_pair is not None:
             on_pair(index, total, pair.before.command)
         pair_req = pair_request(request, pair)
-        outcome = _run_one(pair_req, llm_per_pair.request(str(index)), on_progress)
+        outcome = _run_one(pair_req, llm_per_pair.request(str(index)), on_progress, prepared=prepared)
         llm_per_pair.record(outcome.llm)
         results.append(PairResult(pair.before.command, pair.before.number, pair.after.number, pair_req, outcome, index))
     if single_log:
@@ -224,11 +233,19 @@ def compare_all(
     return MultiCompareOutcome(overall_status(results, unpaired), results, unpaired, error_outputs=error_outputs)
 
 
+def _splits(request: CompareRequest) -> dict[SideName, SplitResult]:
+    """両側の文を、要求のプロンプトで切り分ける(compare_all と同じ切り分け)。"""
+    return {side: split_log(getattr(request, side).text, prompt=request.prompt) for side in SIDES}
+
+
+def _numbered_from(splits: Mapping[SideName, SplitResult]) -> tuple[dict[int, Segment], dict[int, Segment]]:
+    """切り分けの結果から、両側の区間を番号から引ける形にする(エラーの出力の区間も含む)。"""
+    return {s.number: s for s in splits["before"].segments}, {s.number: s for s in splits["after"].segments}
+
+
 def _numbered(request: CompareRequest) -> tuple[dict[int, Segment], dict[int, Segment]]:
     """両側の区間を、compare_all と同じ切り分けで番号から引ける形にする(エラーの出力の区間も含む)。"""
-    before = split_log(request.before.text, prompt=request.prompt).segments
-    after = split_log(request.after.text, prompt=request.prompt).segments
-    return {s.number: s for s in before}, {s.number: s for s in after}
+    return _numbered_from(_splits(request))
 
 
 def _regroup(
@@ -322,7 +339,8 @@ def pair_by_hand(
     """
     if outcome.single_log:
         raise ValueError("single_log")
-    befores, afters = _numbered(request)
+    splits = _splits(request)
+    befores, afters = _numbered_from(splits)
     if before_number not in befores or after_number not in afters:
         raise ValueError("no such segment")
     before, after = befores[before_number], afters[after_number]
@@ -349,7 +367,7 @@ def pair_by_hand(
         raise CompareCancelled("pair")
     key = None if before.command is None else command_key(before.command)
     pair_req = pair_request(request, SegmentPair(key, before, after))
-    result = _run_one(pair_req, None, on_progress)
+    result = _run_one(pair_req, None, on_progress, prepared=prepare_sides(request, splits))
     kept.append(PairResult(before.command, before_number, after_number, pair_req, result, 0, manual=True))
     return _regroup(outcome, kept, loose)
 
@@ -466,13 +484,14 @@ def restore_excluded(
         else:
             unpaired = sorted([*unpaired, target], key=lambda u: (u.side != "before", u.segment.number))
         return _assemble(outcome, pairs, unpaired, error_outputs, excluded)
-    befores, afters = _numbered(request)
+    splits = _splits(request)
+    befores, afters = _numbered_from(splits)
     before, after = befores[target.before_number], afters[target.after_number]
     if should_cancel is not None and should_cancel():
         raise CompareCancelled("pair")
     key = None if before.command is None else command_key(before.command)
     pair_req = pair_request(request, SegmentPair(key, before, after))
-    result = _run_one(pair_req, None, on_progress)
+    result = _run_one(pair_req, None, on_progress, prepared=prepare_sides(request, splits))
     restored = PairResult(before.command, target.before_number, target.after_number, pair_req, result, 0, manual=target.manual)
     at = next((n for n, p in enumerate(pairs) if p.before_number > restored.before_number), len(pairs))
     pairs.insert(at, restored)
@@ -670,7 +689,11 @@ def overall_status(pairs: Sequence[HasOutcome], unpaired: Sequence[Unpaired]) ->
 
 
 def _run_one(
-    request: CompareRequest, llm: LlmRequest | None, on_progress: Callable[[str], None] | None
+    request: CompareRequest,
+    llm: LlmRequest | None,
+    on_progress: Callable[[str], None] | None,
+    *,
+    prepared: Mapping[SideName, PreparedSide] | None = None,
 ) -> CompareOutcome:
     stages: list[str] = []
 
@@ -681,6 +704,9 @@ def _run_one(
 
     # llm が無いときは run_compare に渡さない(今までどおり。run_batch と同じ)
     options: dict[str, Any] = {"llm": llm} if llm is not None else {}
+    # prepared も無いときは渡さない(ADR-0258。渡すのは compare_all・pair_by_hand・restore_excluded の中だけ)
+    if prepared is not None:
+        options["prepared"] = prepared
     try:
         return run_compare(request, on_progress=progress, **options)
     except Exception as exc:  # noqa: BLE001 - 1組の失敗で全体を止めない(REQ-121 §3)

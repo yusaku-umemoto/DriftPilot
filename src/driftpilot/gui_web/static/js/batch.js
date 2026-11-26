@@ -26,7 +26,7 @@
 import { call, on } from "./bridge.js";
 import { confirm, notice, panel } from "./dialog.js";
 import { view as viewOnly } from "./dialog.js";
-import { choose } from "./dialog.js"; // 「HTML・CSV で出力…」の形を選ぶ（ADR-0156）
+import { chooseWithCheck } from "./dialog.js"; // 「HTML・CSV で出力…」の形と、秘密の行を伏せるかを選ぶ（ADR-0156・ADR-0257）
 import { make, text } from "./dom.js";
 import { renderAnswer } from "./answer_view.js";
 import { copyIcon, copyText } from "./answer_copy.js";
@@ -51,6 +51,8 @@ const EXTRA_TEXTS = [
   "batch.answer",
   "batch.export.title",
   "batch.export.body",
+  "batch.export.mask",
+  "batch.export.unmasked",
   // 行の複数選択と見出しの「全部」のチェック（ADR-0176 決定2・3）
   "batch.select.title",
   "batch.select.one",
@@ -1472,14 +1474,23 @@ bind("run", () => act("run"));
 bind("cancel", async () => handle(await call("cancel")));
 bind("save-manifest", () => act("save_manifest"));
 bind("save-results", () => act("save_results"));
-// 「HTML・CSV で出力…」（ADR-0156）。本文は伏せる決まりの案内（決定9）、選択肢は Python が渡す。「やめる」でなければ形を渡す
+// 「HTML・CSV で出力…」（ADR-0156）。本文は伏せる決まりの案内（決定9）、選択肢は Python が渡す。
+// 本文の下に「秘密の行を伏せる（おすすめ）」のチェック（開くたびにオン。前の選び方は覚えない。ADR-0257）。「やめる」でなければ形とチェックの状態を渡す
 bind("export", async () => {
   if (view === null) {
     return;
   }
-  const kind = await choose(texts["batch.export.title"], texts["batch.export.body"], view.labels.export_choices, "html", "cancel");
-  if (kind !== "cancel") {
-    await act("export_result", kind);
+  const check = { label: texts["batch.export.mask"], warning: texts["batch.export.unmasked"] };
+  const { value, checked } = await chooseWithCheck(
+    texts["batch.export.title"],
+    texts["batch.export.body"],
+    view.labels.export_choices,
+    "html",
+    "cancel",
+    check,
+  );
+  if (value !== "cancel") {
+    await act("export_result", value, checked);
   }
 });
 bind("handoff", () => {

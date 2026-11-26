@@ -53,6 +53,30 @@ export function choose(title, body, choices, focusValue, cancelValue) {
   return open(title, make("p", "pilot-dialog-body", body), buttons, safe, { focusButton: focusButton < 0 ? safe : focusButton });
 }
 
+// 本文の下にチェックが 1 つある choose（「HTML・CSV で出力…」の「秘密の行を伏せる」。ADR-0257）。check は {label, warning}。
+// チェックは開くたびにオンから始め（前の選び方を覚えない）、外したときだけ warning の文を出し、オンに戻すと消す。
+// フォーカス（focusValue のボタン）と Esc（cancelValue）は choose と同じ。チェックは標準のチェックボックスなので Tab で届き、Space で切り替わる。
+// 解決する値は {value: 選んだボタンの value, checked: 閉じたときのチェックの状態}。文字はすべて textContent で入れる。
+export async function chooseWithCheck(title, body, choices, focusValue, cancelValue, check) {
+  const buttons = choices.map((choice) => ({ label: choice.label, value: choice.value }));
+  const safe = buttons.findIndex((button) => button.value === cancelValue);
+  const focusButton = buttons.findIndex((button) => button.value === focusValue);
+  const box = make("input", "pilot-check", null);
+  box.type = "checkbox";
+  box.checked = true;
+  const warning = make("p", "pilot-dialog-warning", check.warning);
+  warning.hidden = box.checked;
+  box.addEventListener("change", () => {
+    warning.hidden = box.checked;
+  });
+  const label = make("label", "pilot-dialog-check", null);
+  label.append(box, make("span", "", check.label));
+  const content = make("div", "pilot-dialog-body", null);
+  content.append(make("p", "pilot-dialog-text", body), label, warning);
+  const value = await open(title, content, buttons, safe, { focusButton: focusButton < 0 ? safe : focusButton });
+  return { value, checked: box.checked };
+}
+
 // はい・いいえの確かめ。「はい」なら true。既定（フォーカス・Esc）は noLabel のほう。
 export function confirm(title, body, yesLabel, noLabel) {
   return open(title, make("p", "pilot-dialog-body", body), [{ label: yesLabel, value: true }, { label: noLabel, value: false }], 1);

@@ -89,6 +89,8 @@ _TEXTS_JA = {
     "prefer_source_invalid": "prefer_source は structured か raw にしてください",
     "category_invalid": "category は空でない文字列にしてください",
     "raw_lines_invalid": "raw_lines は question があるときに、1 以上の整数か None の 2 つ組(少なくとも 1 つは整数)にしてください",
+    "skip_structured_invalid": "skip_structured は question があるときに、0 以上の整数の空でない tuple にしてください",
+    "skip_raw_invalid": "skip_raw は question があるときに、0 以上の整数の空でない tuple にしてください",
 }
 _TEXTS_EN = {
     "max_diffs_invalid": "max_diffs must be an integer of 1 or more: {value!r}",
@@ -105,6 +107,8 @@ _TEXTS_EN = {
     "raw_lines_invalid": (
         "raw_lines must be given with question, as a pair of integers (1 or more) or None, with at least one integer"
     ),
+    "skip_structured_invalid": "skip_structured must be given with question, as a non-empty tuple of integers (0 or more)",
+    "skip_raw_invalid": "skip_raw must be given with question, as a non-empty tuple of integers (0 or more)",
 }
 _T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 
@@ -162,8 +166,34 @@ class LlmRequest:
     # 行の差分の質問の対象を 1 行だけにする(REQ-366 §6)。(変更前の行番号, 変更後の行番号)で、1 から数える。
     # 片側が無い行(削除・追加)はその側が None。question があるときだけ使える。None なら今と同じ(表示中の差分全部)
     raw_lines: tuple[int | None, int | None] | None = field(default=None, repr=False)
+    # 表示中の差分への質問で送らない構造化差分の位置(REQ-389。構造化比較の表で隠した行)。structured.diffs の番号で、
+    # show を表で比べたときは show.diffs の番号(0 から数える)。question があるときだけ使える。None なら今と同じ(送らないものは無い)
+    skip_structured: tuple[int, ...] | None = field(default=None, repr=False)
+    # 表示中の差分への質問で送らない行の差分の位置(REQ-391。単純比較の表で印の列の絞り込みで隠した行)。raw.diffs の番号
+    # (show の結果なら show.raw.diffs の番号。0 から数える)。question があるときだけ使える。None なら今と同じ(送らないものは無い)
+    skip_raw: tuple[int, ...] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.skip_raw is not None:
+            skip = self.skip_raw
+            ok = (
+                self.question is not None
+                and isinstance(skip, tuple)
+                and len(skip) >= 1
+                and all(type(n) is int and n >= 0 for n in skip)
+            )
+            if not ok:
+                raise ValueError(_T["skip_raw_invalid"])  # 文に中身を入れない
+        if self.skip_structured is not None:
+            skip = self.skip_structured
+            ok = (
+                self.question is not None
+                and isinstance(skip, tuple)
+                and len(skip) >= 1
+                and all(type(n) is int and n >= 0 for n in skip)
+            )
+            if not ok:
+                raise ValueError(_T["skip_structured_invalid"])  # 文に中身を入れない
         if self.raw_lines is not None:
             pair = self.raw_lines
             ok = (

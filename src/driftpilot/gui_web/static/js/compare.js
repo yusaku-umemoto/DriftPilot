@@ -16,13 +16,14 @@
 import { call, on } from "./bridge.js";
 import { notice, panel } from "./dialog.js";
 import { confirm } from "./dialog.js"; // 「機器ごとに分けて…」の書き出す前の注意（REQ-267）
-import { choose } from "./dialog.js"; // 「HTML・CSV で出力…」の形を選ぶ（ADR-0156）
+import { chooseWithCheck } from "./dialog.js"; // 「HTML・CSV で出力…」の形と、秘密の行を伏せるかを選ぶ（ADR-0156・ADR-0257）
 import { make, text } from "./dom.js";
 import { createAiView } from "./ai_view.js"; // AI の面（REQ-220 §5.1）
 import { bindTail, showTail } from "./path_tail.js"; // ファイルの名前の欄は後ろを見せる（REQ-211 §4）
 import { bindColumnWidths, makeGrip } from "./column_width.js"; // 5 つの表の列の幅の境目（REQ-224 / ADR-0163）
 import { paintMarks } from "./marks.js"; // 変更の行で違う文字の印（REQ-226 / ADR-0165）
 import { nextSortDirection, sortOrder } from "./table_sort.js"; // 構造化比較の表の見出しの並べ替えの比べ方（REQ-369）
+import { createColumnFilter, opensFilter } from "./column_filter.js"; // 見出しの列の絞り込みの値の一覧の窓（REQ-391）
 import { fillRawOptions, readRawOptions } from "./raw_options.js"; // 単純比較の設定の欄（REQ-227 / ADR-0166。設定の窓と同じ部品）
 import { openRuleAiWith } from "./raw_options.js"; // 右クリックから「AI に式を頼む…」の小さな窓を値を入れて開く（REQ-360）
 import { digitRule, escapeRegex, ignoreLineRule, ruleFits } from "./raw_rule_text.js"; // 右クリックから足すルールの式（REQ-366 §2〜§4）
@@ -39,11 +40,24 @@ const DIALOG_TEXTS = [
   "compare.dialog.cancel",
   "compare.export.title",
   "compare.export.body",
+  "compare.export.mask",
+  "compare.export.unmasked",
   "compare.col.resize",
   "compare.multi.paired_by_hand", // 手で組にした組の印（REQ-269）
   "compare.multi.show_raw", // show を単純比較で出した組の印（REQ-282）
   "compare.multi.show_both", // show を表と単純比較の両方で出した組の印（REQ-282）
   "compare.raw.prompt_row", // 単純比較の表の一番上の見出しの行（元の行）の読み上げの名前（REQ-380）
+  "compare.column_filter.label", // 見出しの絞り込みのボタンの読み上げの名前のひな形（{column} を列の名前に直す。REQ-391）
+  "compare.raw.col.mark", // 単純比較の印の列の名前（絞り込みのボタンの読み上げの名前に使う。見出しの見た目は空のまま）
+  "compare.col.op", // 構造化比較の見出しの名前（絞り込みのボタンの読み上げの名前に使う。見出しの文と同じ鍵）
+  "compare.col.category",
+  "compare.col.target_item",
+  "compare.col.before",
+  "compare.col.after",
+  // 「クリア」（ADR-0254 / REQ-388）。title は data-label にしない（読み上げの名前が「クリア」から説明の文に替わるため）。確かめの題と本文
+  "compare.clear.title",
+  "compare.clear.confirm.title",
+  "compare.clear.confirm.body",
 ];
 // 一覧の行の show_method（Python が決める）から、印の文のキーを引く（REQ-282）
 const SHOW_METHOD_MARKS = { raw: "compare.multi.show_raw", both: "compare.multi.show_both" };
@@ -130,6 +144,21 @@ let rawMoveLabels = new Map(); // 移動の行の印の文（raw_rows の番号 
 let structuredRows = [];
 let structuredCategory = null;
 let chips = [];
+// 右クリックで隠している「同じ変更」（REQ-389）。鍵は Python が決める。窓は Python が返した値だけを使う:
+// structuredSameCounts は行ごとの同じ変更の行の数 N（result.structured_same_counts）、sameHidden は隠す行の番号（view.same_changes.hidden）、
+// sameOnly はだけ表示か、sameKey は描いた same_changes の印（変わったときだけ隠し直す。隠していなければ ""）
+let structuredSameCounts = [];
+let sameHidden = new Set();
+let sameOnly = false;
+let sameKey = "";
+// 列の絞り込み（REQ-391 / ADR-0256）。窓は Python が返した値だけを使う（view.column_filters）:
+// filterHidden は構造化比較の列の絞り込み（カテゴリの列を含む）で隠す行の番号、structuredChipsNone はカテゴリの列を 2 つ以上選んでいるか
+// （どのチップも押していない見た目。1 つだけのときは structuredCategory がそのカテゴリ）、rawFilterHidden は印の列で隠す単純比較の行の番号、
+// filterKey は描いた column_filters の印（変わったときだけ隠し直す。絞っていなければ ""）
+let filterHidden = new Set();
+let structuredChipsNone = false;
+let rawFilterHidden = new Set();
+let filterKey = "";
 // 構造化比較の表の並べ替え（REQ-369。画面の中だけ。Python には渡さない）。column は見出しの番号（-1 は元の順）、ariaSort は向き（aria-sort の値）。
 // structuredSortFrom は一括の比較が終わった（「全部」のタブへ移した）とき、元の順へ戻す結果の番号（これ以上の番号の結果を描くときに戻す）。無ければ null。
 // 古い結果の読み込みの答えが遅れて届いても、新しい結果より前のものでは戻さない
@@ -353,10 +382,15 @@ function render(next) {
   $("open-result").disabled = !next.can_open;
   $("export").disabled = !next.can_export;
   $("cancel").disabled = !next.can_cancel;
+  // 「クリア」（ADR-0254 / REQ-388）。押せないときは disabled にせず、aria-disabled と title（理由。Python が決める）で表す（フォーカスが止まり、理由が読める）
+  $("clear").setAttribute("aria-disabled", next.can_clear ? "false" : "true");
+  $("clear").title = next.can_clear ? texts["compare.clear.title"] : next.clear_reason || "";
   $("prev-diff").disabled = !next.can_jump;
   $("next-diff").disabled = !next.can_jump;
   // 差分のみ表示は、差分が無いときは押せない（can_jump と同じ条件。ADR-0155 決定2）。チェックの状態は変えない
   $("raw-diff-only").disabled = !next.can_jump;
+  // 列の絞り込み（REQ-391）。印の列で絞っている間は、差分のみ表示を押せなくする（上の disabled を決め直すので、この後に呼ぶ）
+  renderFilters(next.column_filters || null);
   text(statusMain, next.status.main);
   text($("status-side"), next.status.side);
   // 比較中は結果の面の真ん中にスピナーと今の段階の文を重ねる（REQ-205 / ADR-0147 決定3）。クリックは受けない。
@@ -436,6 +470,32 @@ function renderRawOptions(next) {
   line.title = next.raw_settings_line === null ? "" : next.raw_settings_line;
   renderRawRules(raw.rules || [], raw.rules_title);
   renderSkipColumns(next.skip_columns || []);
+  renderSame(next.same_changes || null);
+}
+
+// 隠している「同じ変更」（REQ-389 / ADR-0255）。表の上の 1 行（文は Python が作る。textContent だけで入れる）と、隠す行の切り替え。
+// same は view.same_changes（隠していなければ null）。rows_revision が今描いている表（shown.rows）と違う値は、新しい表を描くまで使わない
+// （drawResult が新しい表を描いたあとにもう一度呼ぶ）。前と変わったときだけ、カテゴリの絞り込みと同じ切り替え（applyCategory）で行を隠し直す
+function renderSame(same) {
+  if (same !== null && same.rows_revision !== shown.rows) {
+    return;
+  }
+  $("structured-same").hidden = same === null;
+  text($("structured-same-text"), same === null ? "" : same.text);
+  const key = same === null ? "" : `${same.only ? "only" : "hide"}:${same.hidden.join(",")}`;
+  if (key === sameKey) {
+    return;
+  }
+  sameKey = key;
+  sameHidden = new Set(same === null ? [] : same.hidden);
+  sameOnly = same !== null && same.only === true;
+  applyCategory();
+  // フォーカスのある行が隠れたら、選んでいない状態（表の外枠）へ移す
+  const active = document.activeElement;
+  const focused = active instanceof Element ? active.closest("#structured-table tbody tr") : null;
+  if (focused !== null && focused.hidden) {
+    $("structured-wrap").focus();
+  }
 }
 
 // この窓だけの「比べない列」（REQ-367 §3）。単純比較の設定の欄（#rawopt-fields）の外の一覧。名前と「外す」のボタン（aria-label は「外す: UPTIME」）。
@@ -813,41 +873,168 @@ function note(id, value) {
   text($(id), value);
 }
 
-// --- カテゴリのチップ（ADR-0155 決定1）。件数と文字は Python が作り、行を隠すのはここ ---
+// --- カテゴリのチップ（ADR-0155 決定1・ADR-0256 決定2）。件数と文字は Python が作り、行を隠すのは Python が返した番号 ---
 
-// 「すべて N」と、カテゴリごとの「名前 件数」のボタンを描く。値は data- の属性に入れず、ここ（chips）に持つ。
-// 前に選んでいたカテゴリが新しい一覧にあれば同じ絞り込みをかけ、無ければ「すべて」に戻す。一覧が空なら枠を隠す。
+// 「すべて N」と、カテゴリごとの「名前 件数」のボタンを描く。値は data- の属性に入れず、ここ（chips）に持つ。一覧が空なら枠を隠す。
+// チップを押すと Python の filter_category を呼ぶ（チップはカテゴリの列の絞り込みと 1 つの状態。「すべて」は絞り込みを外す）。
+// 絞り込みは新しい結果では消える（Python が消す）ので、前のカテゴリは持ち越さない。選んでいるカテゴリは view.column_filters から入る
 function drawChips(categories, allText) {
   const box = $("structured-chips");
-  if (!categories.some((category) => category.value === structuredCategory)) {
-    structuredCategory = null;
-  }
   box.hidden = categories.length === 0;
   chips = [{ value: null, label: allText }, ...categories].map((category) => {
     const button = make("button", "pilot-chip", category.label);
     button.type = "button";
-    button.addEventListener("click", () => {
-      structuredCategory = category.value;
-      applyCategory();
-    });
+    button.addEventListener("click", () => act("filter_category", category.value));
     return { button, value: category.value };
   });
   box.replaceChildren(...(categories.length === 0 ? [] : chips.map((chip) => chip.button)));
   applyCategory();
 }
 
-// 選んでいるカテゴリで、構造化比較の全部の行の hidden を付け替える（大きさは読まない）。押されたチップは aria-pressed で表す。
+// 構造化比較の全部の行の hidden を付け替える（大きさは読まない）。隠すのは、同じ変更で隠した行（sameHidden。REQ-389）と、
+// 列の絞り込み（カテゴリの列も含む。filterHidden。REQ-391）のどちらかに当たる行。どちらも Python が返した番号で、ここではカテゴリを比べない。
+// 押されたチップは aria-pressed で表す: カテゴリを 1 つに絞っていればそのチップ、「すべて」はカテゴリの列を絞っていないときだけ、
+// 2 つ以上選んでいるときはどのチップも押していない。
 function applyCategory() {
+  const categoryFiltered = structuredCategory !== null || structuredChipsNone;
   for (const chip of chips) {
-    chip.button.setAttribute("aria-pressed", String(chip.value === structuredCategory));
+    const pressed = chip.value === null ? !categoryFiltered : chip.value === structuredCategory;
+    chip.button.setAttribute("aria-pressed", String(pressed));
   }
   const rows = $("structured-table").tBodies[0].rows;
-  // 行は並べ替えで動くので、位置ではなく元の番号（data-index）で structuredRows から引く（REQ-369）
+  // 行は並べ替えで動くので、位置ではなく元の番号（data-index）で引く（REQ-369）
   for (const tr of rows) {
     const index = Number(tr.dataset.index);
-    tr.hidden = structuredCategory !== null && structuredRows[index].category !== structuredCategory;
+    tr.hidden = sameHidden.has(index) || filterHidden.has(index);
   }
   reportShown();
+}
+
+// --- 列の絞り込み（REQ-391 / ADR-0256 決定2〜5。値の一覧の窓は js/column_filter.js） ---
+
+// 絞り込みのボタン（構造化比較の 5 つの列と単純比較の印の列）
+function filterButtons() {
+  return Array.from(document.querySelectorAll(".pilot-filter-button"));
+}
+
+// view.column_filters（何も絞っていなければ null）を描く。表の上の 1 行（文は Python が作る。textContent だけ）・ボタンの塗り・隠す行。
+// rows_revision が今描いている表（shown.rows）と違う値は、新しい表を描くまで使わない（drawResult が新しい表を描いたあとにもう一度呼ぶ）。
+// 前と変わったときだけ、隠す行を付け直す
+function renderFilters(filters) {
+  if (filters !== null && filters.rows_revision !== shown.rows) {
+    return;
+  }
+  const structured = filters === null ? null : filters.structured;
+  const raw = filters === null ? null : filters.raw;
+  $("structured-filter").hidden = structured === null;
+  text($("structured-filter-text"), structured === null ? "" : structured.text);
+  $("raw-filter").hidden = raw === null;
+  text($("raw-filter-text"), raw === null ? "" : raw.text);
+  for (const button of filterButtons()) {
+    const on =
+      button.dataset.filterTable === "raw"
+        ? raw !== null
+        : structured !== null && structured.active.includes(button.dataset.filterColumn);
+    button.setAttribute("aria-pressed", String(on));
+  }
+  if (raw !== null) {
+    $("raw-diff-only").disabled = true; // render が決めた disabled を、絞っている間は押せないに戻す（隠す行を付け直さないときも）
+  }
+  const key = JSON.stringify([structured, raw]);
+  if (key === filterKey) {
+    return;
+  }
+  filterKey = key;
+  filterHidden = new Set(structured === null ? [] : structured.hidden);
+  structuredCategory = structured === null ? null : structured.chip;
+  structuredChipsNone = structured !== null && structured.chips_none === true;
+  applyCategory();
+  // フォーカスのある行が隠れたら、選んでいない状態（表の外枠）へ移す
+  const active = document.activeElement;
+  const focused = active instanceof Element ? active.closest("#structured-table tbody tr") : null;
+  if (focused !== null && focused.hidden) {
+    $("structured-wrap").focus();
+  }
+  applyRawFilter(raw);
+}
+
+// 単純比較の印の列の絞り込み。隠す行は Python が返した番号（rawFilterHidden）。
+// 絞っている間は、差分のみ表示と無視した行…は使えない（外して、押せない理由を title に出す。折りたたみの行は差分のみ表示のときしか出ない）。
+// 表の一番上のプロンプトの行は data-index を持たないので、隠さない。選んでいた行が隠れたら、選んでいない状態にする
+function applyRawFilter(raw) {
+  rawFilterHidden = new Set(raw === null ? [] : raw.hidden);
+  rawEls.forEach((tr, index) => {
+    tr.hidden = rawFilterHidden.has(index);
+  });
+  const on = raw !== null;
+  const reason = on ? raw.blocked_reason : "";
+  if (on) {
+    $("raw-diff-only").checked = false;
+    applyDiffOnly();
+    applySetAside(false);
+  }
+  $("raw-diff-only").title = reason;
+  $("raw-set-aside").setAttribute("aria-disabled", String(on));
+  $("raw-set-aside").title = reason;
+  if (rawSelected >= 0 && rawFilterHidden.has(rawSelected)) {
+    if (rawEls[rawSelected]) {
+      rawEls[rawSelected].setAttribute("aria-selected", "false");
+    }
+    rawSelected = -1;
+    $("raw-before").replaceChildren();
+    $("raw-after").replaceChildren();
+  }
+  const active = document.activeElement;
+  const focused = active instanceof Element ? active.closest("#raw-table tbody tr") : null;
+  if (focused !== null && focused.hidden) {
+    $("raw-wrap").focus();
+  }
+}
+
+// 値の一覧の窓（1 つを使い回す）。値の一覧は Python の column_values、OK は set_column_filter。窓の中の文字は textContent だけで入れる
+const filterWindow = createColumnFilter({
+  load: async (table, column, search) => {
+    if (view === null) {
+      return null;
+    }
+    const answer = await call("column_values", form(), table, column, search);
+    if (!answer.ok) {
+      text(statusMain, answer.message);
+      return null;
+    }
+    return answer.column || null;
+  },
+  apply: (table, column, search, values) => act("set_column_filter", table, column, search, values),
+  label: (columnLabel) => texts["compare.column_filter.label"].replace("{column}", columnLabel),
+});
+
+// ボタンの読み上げの名前（列の名前 + 「絞り込み」）を入れ、押す・Alt+↓ で窓を開く。ボタンの事象は見出しへ伝えない（並べ替えない）。
+// Enter・Space はボタンの click になる（keydown では止めない）。起動時に 1 回だけ付ける（見出しは作り直さない）
+const FILTER_COLUMN_TEXTS = {
+  op: "compare.col.op",
+  category: "compare.col.category",
+  target_item: "compare.col.target_item",
+  before: "compare.col.before",
+  after: "compare.col.after",
+  mark: "compare.raw.col.mark",
+};
+
+function bindFilterButtons() {
+  for (const button of filterButtons()) {
+    const name = texts[FILTER_COLUMN_TEXTS[button.dataset.filterColumn]];
+    button.setAttribute("aria-label", texts["compare.column_filter.label"].replace("{column}", name));
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      filterWindow.open(button);
+    });
+    button.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "ArrowDown" && opensFilter(event)) {
+        event.preventDefault();
+        filterWindow.open(button);
+      }
+    });
+  }
 }
 
 // --- 構造化比較の表の並べ替え（REQ-369。画面の中だけ。Python には渡さない） ---
@@ -923,7 +1110,8 @@ function applyStructuredSort() {
 // 列の境目（.pilot-col-resize）の上の事象では並べ替えない
 function onStructuredHeadActivate(event) {
   const target = event.target instanceof Element ? event.target : null;
-  if (target === null || target.closest(".pilot-col-resize") !== null) {
+  // 絞り込みのボタン（REQ-391）の上の事象でも並べ替えない（ボタン自身も止めるが、ここでも除く）
+  if (target === null || target.closest(".pilot-col-resize") !== null || target.closest(".pilot-filter-button") !== null) {
     return;
   }
   const th = target.closest("th");
@@ -1046,6 +1234,10 @@ function applySetAside(pressed) {
 // 矢印のキーで次に選ぶ行。差分のみがオンなら、隠れた行（data-keep の無い行）を飛ばす
 function nextRaw(step) {
   let index = rawSelected + step;
+  // 印の列の絞り込みで隠れた行（rawFilterHidden。REQ-391）も飛ばす
+  while (index >= 0 && index < rawEls.length && rawFilterHidden.has(index)) {
+    index += step;
+  }
   if ($("raw-diff-only").checked) {
     while (index >= 0 && index < rawEls.length && !rawEls[index].dataset.keep) {
       index += step;
@@ -1126,7 +1318,26 @@ function drawResult(result) {
   hideStructuredNote();
   // 行を作り直したら、同じカテゴリがあれば同じ絞り込みをかける（無ければ「すべて」に戻す。ADR-0155 決定1）
   structuredRows = result.structured_rows;
-  drawChips(result.categories, result.categories_all);
+  structuredSameCounts = result.structured_same_counts || [];
+  // 新しい表では隠していた同じ変更は戻っている（Python が消す）。いったん戻してから、今の view の値があれば隠し直す（REQ-389）
+  sameKey = "";
+  sameHidden = new Set();
+  sameOnly = false;
+  // 列の絞り込みも同じ（REQ-391）。新しい表では Python が消している。いったん戻してから、表を描き終えたあとに今の view の値で付け直す
+  filterKey = "";
+  filterHidden = new Set();
+  structuredCategory = null;
+  structuredChipsNone = false;
+  // 戻している途中の「絞り込み無し」は Python に知らせない（知らせるのは、下で付け直したあと。前後の行数を変えただけの描き直しでは
+  // Python は絞り込みを持ったままなので、途中の値を送ると答えの対象が揺れる）
+  const wasQuiet = quietShown;
+  quietShown = true;
+  try {
+    drawChips(result.categories, result.categories_all);
+    renderSame(view === null ? null : view.same_changes || null);
+  } finally {
+    quietShown = wasQuiet;
+  }
   // 選んだ並べ替えを新しい表にかけ直す（元の順のときも aria-sort を描き直すため呼ぶ。一括の比較が終わったときは、関数の先頭で元の順へ戻してある）
   applyStructuredSort();
   text($("raw-note"), result.raw_note);
@@ -1148,6 +1359,7 @@ function drawResult(result) {
   rawPrompt = result.raw_prompt || null; // fillRaw が表の一番上に入れる（REQ-380）
   fillRaw(rawRows, result.raw_folds);
   applySetAside(false);
+  renderFilters(view === null ? null : view.column_filters || null); // 列の絞り込みを新しい表にかけ直す（REQ-391）
   // 下の2つの欄（読むだけの文字の箱。REQ-226 §4.3）は空にする
   $("raw-before").replaceChildren();
   $("raw-after").replaceChildren();
@@ -1192,6 +1404,9 @@ async function loadResult() {
 // 単純比較の行を選ぶ。下の2つの欄に、その行の変更前と変更後の全文を出す。index は raw_rows の番号で、行の要素は rawEls から引く
 // （折りたたみの行が入っても番号がずれない。ADR-0155 決定4）。差分のみ表示で選んだ行が隠れても、選択は消さない。
 // 変更の行なら、表と同じ印を欄にも付ける（欄は読むだけの文字の箱。REQ-226 §4.3）。
+// scroll は行の動かし方: "center" は表の縦の真ん中に出す（横は最小。飛んだとき: 前の差分・次の差分・元の行を見る）、
+// "nearest" は見える所まで最小に動かす（矢印のキーで1行ずつ動くとき）、false は動かさない（行を押したとき）。ADR-0256 決定1。
+// 固定の見出し（position: sticky）には、真ん中なら重ならない。
 function selectRaw(index, scroll) {
   if (index < 0 || index >= rawRows.length || index >= rawEls.length) {
     return;
@@ -1205,7 +1420,9 @@ function selectRaw(index, scroll) {
   const mark = rawMarks.get(index);
   paintMarks($("raw-before"), rawRows[index].before_text, mark === undefined ? [] : mark.before, "removed");
   paintMarks($("raw-after"), rawRows[index].after_text, mark === undefined ? [] : mark.after, "added");
-  if (scroll) {
+  if (scroll === "center") {
+    tr.scrollIntoView({ block: "center", inline: "nearest" });
+  } else if (scroll === "nearest") {
     tr.scrollIntoView({ block: "nearest" });
   }
 }
@@ -1219,7 +1436,7 @@ async function jump(step) {
   }
   render(answer.view);
   if (answer.row !== null) {
-    selectRaw(answer.row, true);
+    selectRaw(answer.row, "center");
     $("raw-wrap").focus();
   }
 }
@@ -1628,12 +1845,20 @@ function onStructuredContextMenu(event) {
   }
   const index = Number(tr.dataset.index); // 並べ替えた後も元の行の番号（REQ-369）
   const columns = structuredColumns[index] || [];
-  if (!canFindSource && columns.length === 0) {
+  // 「同じ変更を隠す（N 件）」「同じ変更だけ表示（N 件）」: 同じ変更の行が 2 行以上で、だけ表示をしていない間だけ（REQ-389。N は Python が数えた値）
+  const sameCount = structuredSameCounts[index] || 0;
+  const sameChoices = sameCount >= 2 && !sameOnly;
+  if (!canFindSource && columns.length === 0 && !sameChoices) {
     return;
   }
   event.preventDefault();
   hideStructuredNote(); // 次にメニューを開いたときに、前の知らせを隠す
   $("structured-menu-source").hidden = !canFindSource;
+  for (const name of ["hide", "only"]) {
+    const button = $(`structured-menu-${name}-same`);
+    button.hidden = !sameChoices;
+    text(button, $(`structured-menu-${name}-same-template`).textContent.replace("{count}", String(sameCount)));
+  }
   const template = $("structured-menu-skip-template").textContent;
   $("structured-menu-columns").replaceChildren(
     ...columns.map((name) => {
@@ -1649,7 +1874,7 @@ function onStructuredContextMenu(event) {
 }
 
 // 「元の行を単純比較のタブで見る」。Python が単純比較の行から探した番号（structured_source）を受け、見つからなければ知らせる。
-// 見つかったら単純比較のタブを開き、その行が差分のみ表示（か「無視した行」だけの表示）で隠れていれば、その表示を切ってから、選んで見える所まで動かす
+// 見つかったら単純比較のタブを開き、その行が差分のみ表示（か「無視した行」だけの表示）で隠れていれば、その表示を切ってから、選んで表の縦の真ん中に出す
 async function chooseStructuredSource() {
   const index = rightMenu.index;
   closeRightMenu(true);
@@ -1669,6 +1894,10 @@ async function chooseStructuredSource() {
   }
   hideStructuredNote();
   selectTab("raw");
+  if (rawFilterHidden.has(row)) {
+    // 印の列の絞り込みで隠れている行は、絞り込みを外して見えるようにする（REQ-391）
+    await act("clear_column_filters", "raw");
+  }
   if ($("raw-diff-only").checked && !rawEls[row].dataset.keep) {
     $("raw-diff-only").checked = false;
     applyDiffOnly();
@@ -1676,8 +1905,18 @@ async function chooseStructuredSource() {
   if (setAsideOnly() && !rawEls[row].dataset.setAside) {
     applySetAside(false);
   }
-  selectRaw(row, true);
+  selectRaw(row, "center");
   $("raw-wrap").focus();
+}
+
+// 「同じ変更を隠す（N 件）」「同じ変更だけ表示（N 件）」。右クリックした行の番号で hide_same・only_same を呼ぶ（鍵・隠す行は Python が決める。REQ-389）
+async function chooseSame(operation) {
+  const index = rightMenu.index;
+  closeRightMenu(true);
+  if (view === null || index < 0) {
+    return;
+  }
+  await act(operation, index);
 }
 
 // 「この列をこの窓だけ比べない: 列」。skip_column で足す（Python が重複・20 個までを決める）。足せなければ知らせを出す
@@ -2131,14 +2370,81 @@ async function choosePartner() {
 }
 
 // 「HTML・CSV で出力…」（ADR-0156）。本文は伏せる決まりの案内（決定9）、選択肢は Python が渡す。既定のフォーカスは HTML、Esc は「やめる」。
-// 「やめる」でなければ選んだ形を Python に渡す（出すかどうか・保存の場所・伏せることは Python が決める）。
+// 本文の下に「秘密の行を伏せる（おすすめ）」のチェック（開くたびにオン。前の選び方は覚えない。ADR-0257）。外したときだけ注意の文を出す。
+// 「やめる」でなければ選んだ形とチェックの状態を Python に渡す（出すかどうか・保存の場所・伏せ方は Python が決める）。
 async function exportResult() {
   if (view === null) {
     return;
   }
-  const kind = await choose(texts["compare.export.title"], texts["compare.export.body"], view.labels.export_choices, "html", "cancel");
-  if (kind !== "cancel") {
-    await act("export_result", kind);
+  const check = { label: texts["compare.export.mask"], warning: texts["compare.export.unmasked"] };
+  const { value, checked } = await chooseWithCheck(
+    texts["compare.export.title"],
+    texts["compare.export.body"],
+    view.labels.export_choices,
+    "html",
+    "cancel",
+    check,
+  );
+  if (value !== "cancel") {
+    await act("export_result", value, checked);
+  }
+}
+
+// 「クリア」（ADR-0254 / REQ-388）。押せないときは何もしない。結果か AI の会話があるとき（view.clear_confirm。Python が決める）は、
+// dialog.js の confirm で確かめる（既定のフォーカスと Esc は右の「キャンセル」）。キャンセルなら clear を呼ばずに終わる。
+// 戻したあと、画面だけが持つ見た目（resetLook）を起動したときに戻し、表・一覧・AI の欄・絵は Python が進めた番号を見て今の道で描き直す
+async function clearAll() {
+  if (view === null || $("clear").getAttribute("aria-disabled") === "true") {
+    return;
+  }
+  if (view.clear_confirm) {
+    const yes = await confirm(
+      texts["compare.clear.confirm.title"],
+      texts["compare.clear.confirm.body"],
+      texts["compare.button.clear"],
+      texts["compare.dialog.cancel"],
+    );
+    if (!yes) {
+      return;
+    }
+  }
+  const result = await call("clear");
+  if (result.ok) {
+    resetLook();
+  }
+  await handle(result); // 断られたとき（比べている間など）は、ステータスの行に理由の文が出る
+}
+
+// 画面だけが持つ見た目を、起動したときに戻す（列の幅・左右の境目・AI の欄を隠しているか・「変更」の欄の開き具合は利用者の配置なので変えない）
+function resetLook() {
+  $("raw-diff-only").checked = false;
+  applyDiffOnly();
+  applySetAside(false);
+  // 列の絞り込み（REQ-391）も戻す。状態は Python が消している（clear）。続く render が今の view で描き直す
+  filterWindow.close(false);
+  filterKey = "";
+  filterHidden = new Set();
+  structuredCategory = null;
+  structuredChipsNone = false;
+  structuredSortFrom = null;
+  resetStructuredSort();
+  applyStructuredSort();
+  closeRawMenu(false);
+  closeRightMenu(false);
+  rawSelected = -1;
+  $("raw-before").replaceChildren();
+  $("raw-after").replaceChildren();
+  // タブとカテゴリの知らせ（shown_changed）は、この間は送らない（quietShown）。送ると、まだクリア前の欄の値（form()）が Python に届く
+  quietShown = true;
+  try {
+    applyCategory();
+    selectTab("structured"); // 起動したときのタブ
+  } finally {
+    quietShown = false;
+  }
+  for (const wrap of document.querySelectorAll(".pilot-table-wrap")) {
+    wrap.scrollTop = 0;
+    wrap.scrollLeft = 0;
   }
 }
 
@@ -2215,6 +2521,7 @@ const aiView = createAiView({ $, call: aiCall, act, on, afterPreview: handle });
 const { drawPartial } = aiView;
 
 function selectTab(name) {
+  filterWindow.close(false); // 列の絞り込みの窓も閉じる（キャンセルと同じ。REQ-391）
   closeRawMenu(false); // タブを変えたら右クリックのメニューを閉じる（REQ-360）
   closeRightMenu(false); // 構造化比較・一覧のメニューも閉じる（REQ-367）
   for (const tab of TABS) {
@@ -2239,9 +2546,13 @@ function currentShown() {
   return { tab, category: tab === "structured" ? structuredCategory : null };
 }
 
+// 「クリア」の resetLook の間だけ真。画面のタブ・絞り込みを起動したときに戻す途中は、まだクリア前の view と見比べるので、
+// ここで知らせると、クリア前の欄の値が Python に届いて設定が戻ってしまう。戻し終えた後の render が、新しい view と見比べて知らせる
+let quietShown = false;
+
 function reportShown() {
   const now = currentShown();
-  if (view === null || now === null) {
+  if (quietShown || view === null || now === null) {
     return;
   }
   const known = view.ai.shown;
@@ -2322,7 +2633,7 @@ $("raw-table").tBodies[0].addEventListener("click", (event) => {
 $("raw-wrap").addEventListener("keydown", (event) => {
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
-    selectRaw(nextRaw(event.key === "ArrowDown" ? 1 : -1), true);
+    selectRaw(nextRaw(event.key === "ArrowDown" ? 1 : -1), "nearest");
   }
 });
 // 文字を選んだ右クリック（キーボードのメニューのキーも contextmenu）で、窓の中のメニューを出す（REQ-360 / ADR-0240 決定3）。
@@ -2382,6 +2693,9 @@ for (const th of $("structured-table").tHead.rows[0].cells) {
 }
 $("multi-wrap").addEventListener("contextmenu", onMultiContextMenu);
 $("structured-menu-source").addEventListener("click", chooseStructuredSource);
+$("structured-menu-hide-same").addEventListener("click", () => chooseSame("hide_same"));
+$("structured-menu-only-same").addEventListener("click", () => chooseSame("only_same"));
+$("structured-same-reset").addEventListener("click", () => act("show_all_same"));
 $("multi-menu-exclude").addEventListener("click", chooseMultiExclude);
 for (const id of ["structured-menu", "multi-menu"]) {
   $(id).addEventListener("keydown", (event) => {
@@ -2422,6 +2736,9 @@ $("raw-diff-only").addEventListener("change", () => {
   }
 });
 bind("raw-set-aside", () => {
+  if ($("raw-set-aside").getAttribute("aria-disabled") === "true") {
+    return; // 印の列で絞っている間は使えない（理由は title。REQ-391 §4）
+  }
   const pressed = !setAsideOnly();
   if (pressed && $("raw-diff-only").checked) {
     $("raw-diff-only").checked = false;
@@ -2502,6 +2819,7 @@ bind("ai-front", async () => handle(await call("open_ai_pane")));
 bind("ai-hide", () => act("set_ai_hidden", true));
 bind("ai-show", () => act("set_ai_hidden", false));
 bind("cancel", async () => handle(await call("cancel")));
+bind("clear", () => clearAll());
 bind("open-log-view", async () => handle(await call("open_log_view")));
 bind("open-batch", async () => handle(await call("open_batch")));
 bind("open-settings", async () => handle(await call("open_settings")));
@@ -2517,7 +2835,13 @@ window.addEventListener("focus", () => {
   }
 });
 
+// 表の上の「すべて解除」（REQ-391 §5）。そのタブの表の列の絞り込みとカテゴリのチップを外す（同じ変更を隠すは「戻す」で戻す）
+$("structured-filter-clear").addEventListener("click", () => act("clear_column_filters", "structured"));
+$("raw-filter-clear").addEventListener("click", () => act("clear_column_filters", "raw"));
+// 表のスクロールは列の絞り込みの窓を閉じる（column_filter.js が document の scroll で閉じる）。ここではタブの切り替えとクリアでも閉じる
+
 if (await fillTexts()) {
   bindTableColumns();
+  bindFilterButtons();
   await reload();
 }

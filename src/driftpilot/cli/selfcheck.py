@@ -95,6 +95,7 @@ GUI_WEB_FILES = (
     "static/js/pair_drag.js",
     "static/js/row_menu.js",  # 一括比較の窓の組の行の右クリックのメニューの開け閉め(REQ-368)
     "static/js/table_sort.js",  # 構造化比較の表の見出しの並べ替えの比べ方(REQ-369)
+    "static/js/column_filter.js",  # 結果の表の列の絞り込みの値の一覧の窓(REQ-391)
     "static/js/marks.js",
     "static/js/raw_options.js",
     "static/js/raw_rule_text.js",

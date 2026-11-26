@@ -1312,6 +1312,118 @@ body {
   margin: 0 0 var(--pilot-space-2);
 }
 
+/*
+ * 隠している「同じ変更」の 1 行（REQ-389 / ADR-0255 決定3）。チップの行のすぐ下。文と「戻す」を横に並べる（今の .pilot-row。折り返しもその決まり）。
+ * 色・新しい変数は足さない
+ */
+.pilot-same-row {
+  flex: none;
+  flex-wrap: nowrap;
+  margin: 0 0 var(--pilot-space-2);
+}
+
+.pilot-same-row > .pilot-button {
+  flex: none;
+}
+
+.pilot-same-row > .pilot-note {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 表の見出しの列の絞り込みのボタン（REQ-391 / ADR-0256 決定2。js/column_filter.js）。見出しの文字の右に小さく置く。
+ * 絞っている列（aria-pressed が真）は今の強調色で塗る。押しても並べ替えない（js/compare.js が事象を見出しへ伝えない）。
+ */
+.pilot-filter-button {
+  margin-left: var(--pilot-space-1);
+  padding: 0 var(--pilot-space-1);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-button);
+  color: var(--pilot-color-text-muted);
+  font: inherit;
+  font-size: var(--pilot-font-size-small);
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+/* ボタンの文字（▼）は HTML に書かない決まりなので、ここで出す。並べ替えの降順の印（th の ::after の ▼）とは、枠のある小さなボタンであることで見分ける */
+.pilot-filter-button::after {
+  content: "\25BC";
+}
+
+.pilot-filter-button:hover {
+  background: var(--pilot-color-button-hover);
+}
+
+.pilot-filter-button[aria-pressed="true"],
+.pilot-filter-button[aria-pressed="true"]:hover {
+  border-color: var(--pilot-color-accent);
+  background: var(--pilot-color-selection);
+  color: var(--pilot-color-selection-text);
+}
+
+/* 印の列で絞っている間の「無視した行…」のボタン（REQ-391 §4。disabled 属性は使わず aria-disabled と理由の title）。.pilot-button の押せない見た目と同じ考え */
+.pilot-chip[aria-disabled="true"],
+.pilot-chip[aria-disabled="true"]:hover {
+  border-color: var(--pilot-color-border);
+  background: var(--pilot-color-disabled);
+  color: var(--pilot-color-disabled-text);
+  font-weight: normal;
+  cursor: default;
+}
+
+/* 値の一覧の小さな窓（右クリックのメニュー .pilot-menu と同じ背景・枠・影。位置は js/column_filter.js が left・top に書く）。一覧は高さを決めてスクロールさせる */
+.pilot-column-filter {
+  position: fixed;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--pilot-space-2);
+  min-width: 22ch;
+  max-width: 40ch;
+  padding: var(--pilot-space-2);
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-surface);
+  color: var(--pilot-color-text);
+  box-shadow: 0 2px 6px var(--pilot-color-border);
+}
+
+.pilot-column-filter[hidden] {
+  display: none;
+}
+
+.pilot-column-filter-list {
+  max-height: 16em;
+  overflow: auto;
+  border: 1px solid var(--pilot-color-border);
+  border-radius: var(--pilot-radius);
+}
+
+.pilot-column-filter-item {
+  display: flex;
+  align-items: center;
+  gap: var(--pilot-space-2);
+  padding: 1px var(--pilot-space-2);
+  white-space: nowrap;
+}
+
+.pilot-column-filter-item > span:first-of-type {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pilot-column-filter-count {
+  margin-left: auto;
+  color: var(--pilot-color-text-muted);
+}
+
 .pilot-chip {
   padding: 1px var(--pilot-space-2);
   border: 1px solid var(--pilot-color-border);
@@ -2432,6 +2544,30 @@ mark.pilot-mark {
   padding: var(--pilot-space-2) var(--pilot-space-4);
   border-top: 1px solid var(--pilot-color-border);
   background: var(--pilot-color-surface);
+}
+
+/*
+ * チェックつきの選び方（static/js/dialog.js の chooseWithCheck。「HTML・CSV で出力…」の「秘密の行を伏せる」。ADR-0257）。
+ * 本文の段落・チェック・注意の文を縦に並べる。注意の文は今の警告の色の変数で、チェックを外したときだけ出す（[hidden] の決まり）
+ */
+
+.pilot-dialog-text {
+  margin: 0 0 var(--pilot-space-3);
+}
+
+.pilot-dialog-check {
+  display: flex;
+  align-items: center;
+  gap: var(--pilot-space-2);
+}
+
+.pilot-dialog-warning {
+  margin: var(--pilot-space-2) 0 0;
+  padding: var(--pilot-space-2) var(--pilot-space-3);
+  border: 1px solid var(--pilot-color-warning-border);
+  border-radius: var(--pilot-radius);
+  background: var(--pilot-color-warning-bg);
+  color: var(--pilot-color-warning-text);
 }
 
 /*

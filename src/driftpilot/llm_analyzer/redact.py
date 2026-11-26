@@ -15,7 +15,8 @@ _mask_tree・show の masker.gated)をそのまま呼ぶ。伏せる表(mask_pat
 - 行の形(unsent_shape)は出さない。省いた行の数だけを omitted_lines に数える
 - 区間の行が取れないのに差分があるとき(PEM のかたまりを判定できない)は RedactError。出力は失敗にする
 
-伏せずに出す口は作らない(ADR-0156 決定2)。
+既定は伏せる。伏せずに出すのは、利用者が出力のたびに選んだときだけ(ADR-0257)。そのときは判定を通さない plain_result を使う
+(redact_result・redact_text を通らない)。
 """
 
 import json
@@ -251,3 +252,59 @@ def redact_result(
             )
         )
     return RedactedResult(diffs, rows, rec.lines + rec.context_lines)
+
+
+def plain_result(
+    *,
+    structured: CompareResult | None,
+    raw: RawCompareResult | None,
+    show: ShowCompareResult | None,
+    raw_rows: Sequence[_RawRowLike],
+) -> RedactedResult:
+    """伏せずに出す 1 組の結果(ADR-0257 決定2)。伏せる判定(Masker・ゲート)を一度も通さず、画面と同じ値をそのまま出す。
+
+    形は redact_result の出力とそろえる(構造化比較の行・show の行・単純比較の差分の行と前後 CONTEXT_LINES 行)。
+    単純比較の文字は画面の表と同じ元の行(raw_rows の before_text・after_text)。区間の行が無くても RedactError は出さず、
+    省いた行は無いので omitted_lines は 0。raw は redact_result と引数の形をそろえるために受け取る(差分の行は raw_rows が持つ)。
+    """
+    diffs: list[RedactedDiff] = []
+    if structured is not None:
+        diffs += [_plain_structured_row(diff) for diff in structured.diffs]
+    if show is not None and show.method in ("structured", "both"):
+        diffs += [_plain_show_row(diff) for diff in show.diffs]
+    rows = [
+        RedactedRawRow(
+            raw_rows[k].mark,
+            raw_rows[k].before_no,
+            raw_rows[k].before_text if raw_rows[k].before_no is not None else "",
+            raw_rows[k].after_no,
+            raw_rows[k].after_text if raw_rows[k].after_no is not None else "",
+            raw_rows[k].is_diff,
+        )
+        for k in _shown_rows(raw_rows)
+    ]
+    return RedactedResult(diffs, rows, 0)
+
+
+def _plain_structured_row(diff: Diff) -> RedactedDiff:
+    op, category = diff["op"], diff["category"]
+    if category == "unparsed":
+        line_path = diff["before"] if op == "removed" else diff["after"]
+        *parents, text = line_path
+        line = str(text).strip()
+        before, after = (line, "") if op == "removed" else ("", line)
+        return RedactedDiff(op, category, "", _PARENT_JOIN.join(p.strip() for p in parents), before, after, False)
+    return RedactedDiff(
+        op, category, diff["name"] or "", _PARENT_JOIN.join(diff["path"]), _dump(diff["before"]), _dump(diff["after"]), False
+    )
+
+
+def _plain_show_row(diff: dict[str, Any]) -> RedactedDiff:
+    op = diff["op"]
+    target = diff.get("key") if diff.get("key") is not None else _WHOLE_ROW
+    if op == "changed":
+        fields = diff["fields"]
+        before = _dump({column: pair[0] for column, pair in fields.items()})
+        after = _dump({column: pair[1] for column, pair in fields.items()})
+        return RedactedDiff(op, _SHOW_CATEGORY, str(target), ", ".join(fields), before, after, False)
+    return RedactedDiff(op, _SHOW_CATEGORY, str(target), "", _dump(diff.get("before")), _dump(diff.get("after")), False)

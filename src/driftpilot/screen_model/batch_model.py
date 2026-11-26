@@ -670,7 +670,7 @@ def save_results(results: Iterable[JobResult], target: str | Path) -> Path:
     return write_job_lines(results, target)
 
 
-def batch_report(results: Sequence[JobResult], words: Sequence[str]) -> Report:
+def batch_report(results: Sequence[JobResult], words: Sequence[str], *, masked: bool = True) -> Report:
     """一括比較の出力(ADR-0156 / REQ-216)。results は組の順(「結果を保存」と同じ。外した組は入れない)。
 
     組の名前は job_name、ファイル名は組ごとの変更前と変更後のファイル名だけ(どちらも判定に通す)。比較が失敗した組は状態だけ。
@@ -678,29 +678,30 @@ def batch_report(results: Sequence[JobResult], words: Sequence[str]) -> Report:
 
     まとめて比べた組は、コマンドの組ごとに 1 組(名前は `<組の名前>: <コマンド>`、group は判定に通した組の名前。ADR-0178 決定3)。
     並びと AI の答えは保存と同じ(job_pair_results。全体の答えは最初のコマンドの組、ほかは「全体の答えに含む」)。相手なしの区間は入れない。
+    masked が偽(ADR-0257)なら、ファイル名・組の名前・コマンドを判定に通さず、差分の行も伏せずに出す(既定は伏せる)。
     """
     pairs: list[ReportPair] = []
     for result in results:
         job = result.job
         names = {
-            "before_name": file_label(str(job.before.path), words),
-            "after_name": file_label(str(job.after.path), words),
+            "before_name": file_label(str(job.before.path), words, masked=masked),
+            "after_name": file_label(str(job.after.path), words, masked=masked),
         }
         if result.multi is None:
             platform = config_platform_used(result.request.platform, result.outcome.kind, result.outcome.auto_platform)
-            pairs.append(pair_report(job_name(job), result.outcome, words, platform=platform, **names))
+            pairs.append(pair_report(job_name(job), result.outcome, words, platform=platform, masked=masked, **names))
             continue
-        group = redact_text(job_name(job), words)
+        group = redact_text(job_name(job), words) if masked else job_name(job)
         for pair in job_pair_results(result.multi):
             platform = config_platform_used(pair.request.platform, pair.outcome.kind, pair.outcome.auto_platform)
-            shown = pair_report(multi_pair_name(job_name(job), pair.command), pair.outcome, words, platform=platform, **names)
+            shown = pair_report(multi_pair_name(job_name(job), pair.command), pair.outcome, words, platform=platform, masked=masked, **names)
             # コマンドは組の名前の形に頼らず別に持つ(出力の小見出しに出す。ADR-0190)
-            command = redact_text(pair.command, words) if pair.command is not None else ""
+            command = (redact_text(pair.command, words) if masked else pair.command) if pair.command is not None else ""
             pairs.append(replace(shown, group=group, command=command))
     counts = {status: sum(1 for r in results if r.outcome.status == status) for status in STATUS_LABEL}
     # 件数の箱(REQ-243)は状態の文と同じ数から作る(STATUS_LABEL の順)。(鍵, 文, 数)。箱の色は鍵で選ぶ(ADR-0190)
     boxes = tuple((status, label, counts[status]) for status, label in STATUS_LABEL.items())
-    return Report(EXPORT_TITLE_BATCH, status_counts_text(counts), "", tuple(pairs), True, status_counts=boxes)
+    return Report(EXPORT_TITLE_BATCH, status_counts_text(counts), "", tuple(pairs), True, status_counts=boxes, masked=masked)
 
 
 # --- 選択待ちの理由(ADR-0178 決定5) ---

@@ -218,6 +218,7 @@ from driftpilot.messages import (
     batch_saved_notice,
     batch_settings_rejected,
     export_saved,
+    export_saved_unmasked,
     export_settings_unreadable,
     batch_handoff_note,
     LLM_PREVIEW_INSTRUCTIONS,
@@ -714,12 +715,13 @@ class BatchApi(Api):
         """「結果を保存…」。"""
         return self._call(self._save_results, form)
 
-    def export_result(self, form: Any, kind: Any) -> dict[str, Any]:
+    def export_result(self, form: Any, kind: Any, masked: Any = True) -> dict[str, Any]:
         """「HTML・CSV で出力…」(ADR-0156)。kind は "html"・"csv"・"csv_pairs"。組の順は「結果を保存…」と同じ。
 
-        秘密の行は AI に送るときと同じ判定で必ず伏せる(伏せずに出す口は無い)。上書きしない。
+        秘密の行は AI に送るときと同じ判定で伏せる。masked を偽にしたときだけ、判定に通さず画面と同じ値で出す(ADR-0257。
+        省いたときは伏せる。真偽値でなければ形の誤り)。上書きしない。
         """
-        return self._call(self._export_result, form, kind)
+        return self._call(self._export_result, form, kind, masked)
 
     def open_settings(self, tab: Any = None) -> dict[str, Any]:
         """「設定…」(ADR-0176 決定4)。設定の窓を開く(開いていれば前に出す)。比較の窓の「設定…」と同じ口。
@@ -2264,13 +2266,15 @@ class BatchApi(Api):
             self._status = batch_saved_notice(written, len(ordered))
             return self._ok()
 
-    # --- HTML と CSV の出力(ADR-0156 / REQ-216。上書きしない。秘密の行は必ず伏せる) ---
+    # --- HTML と CSV の出力(ADR-0156 / REQ-216。上書きしない。既定は伏せる。masked が偽のときだけ伏せない。ADR-0257) ---
 
-    def _export_result(self, form: Any, kind: Any) -> dict[str, Any]:
+    def _export_result(self, form: Any, kind: Any, masked: Any = True) -> dict[str, Any]:
         with self._lock:
             self._take(form)
             if not isinstance(kind, str) or kind not in EXPORT_KINDS:
                 raise _BadRequest
+            if type(masked) is not bool:
+                raise _BadRequest  # 伏せるかは真偽値だけ(ADR-0257)
             results = self._results
             if not results or not self._idle() or self._closing:
                 return self._ok()
@@ -2278,22 +2282,29 @@ class BatchApi(Api):
             ordered = [results[job.id] for job in self._included_jobs() if job.id in results]
             if not ordered:
                 return self._ok()
-        # 秘密の語は今の設定の語と送った AI 解析の語。設定が読めなければ、語が足りないまま出さない(ADR-0156 決定2)
-        try:
-            settings = load_settings(**self._where, read_prompt=False)
-        except SettingsError as exc:
-            with self._lock:
-                return self._ok(self._notice(export_settings_unreadable(str(exc)), COMPARE_SAVE_FAILED_TITLE))
+        # 秘密の語は今の設定の語と送った AI 解析の語。設定が読めなければ、語が足りないまま出さない(ADR-0156 決定2)。
+        # 伏せずに出すときは語を使わないので、設定を読まない(読めなくても出せる。ADR-0257 決定2)
+        settings = None
+        if masked:
+            try:
+                settings = load_settings(**self._where, read_prompt=False)
+            except SettingsError as exc:
+                with self._lock:
+                    return self._ok(self._notice(export_settings_unreadable(str(exc)), COMPARE_SAVE_FAILED_TITLE))
         saved_at = datetime.now(timezone.utc).astimezone()
-        filename = export_filename("batch", kind, saved_at)  # ホスト名は入れない
+        filename = export_filename("batch", kind, saved_at, masked=masked)  # ホスト名は入れない
         target = self._choose(DIALOG_SAVE, filename, EXPORT_FILE_TYPES[kind])  # 開いている間はロックを持たない
         with self._lock:
             if target is None or self._results is not results or not self._idle() or self._closing:
                 return self._ok()  # 取り消した・選んでいる間に結果が変わった
-        words = export_words(settings.extra_secret_words, (result.outcome.llm for result in ordered))
+        words = (
+            export_words(settings.extra_secret_words, (result.outcome.llm for result in ordered))
+            if settings is not None
+            else []
+        )
         try:
             # 大きいときも画面を止めないよう、組み立てと書き出しはロックの外で行う
-            data = export_bytes(batch_report(ordered, words), kind, saved_at)
+            data = export_bytes(batch_report(ordered, words, masked=masked), kind, saved_at)
         except RedactError:
             with self._lock:
                 return self._ok(self._notice(EXPORT_REDACT_FAILED, COMPARE_SAVE_FAILED_TITLE))  # 行の中身は入れない
@@ -2303,7 +2314,7 @@ class BatchApi(Api):
             with self._lock:
                 return self._ok(self._notice(str(exc), COMPARE_SAVE_FAILED_TITLE))
         with self._lock:
-            self._status = export_saved(written)
+            self._status = export_saved(written) if masked else export_saved_unmasked(written)
             return self._ok()
 
     # --- 組を直す(REQ-212 / ADR-0153 決定4〜8) ---

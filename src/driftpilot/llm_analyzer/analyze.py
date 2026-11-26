@@ -95,10 +95,29 @@ def _analyze(
         # 表示中の差分への質問(REQ-312)。使用中のプロンプトと「状態の確認」への入れ替えは使わず、質問のひな形で送る
         template = QUESTION_PROMPT_TEMPLATE
         version = PROMPT_VERSION + QUESTION_VERSION_SUFFIX
-        if request.category is not None and structured is not None:
-            # 構造化差分をそのカテゴリだけにする(diff_total も絞った後の数になる。正規化した行は呼ぶ側が今と同じ入力で渡す)
-            kept = [d for d in structured.diffs if d["category"] == request.category]
+        skip = frozenset(request.skip_structured or ())
+        if (request.category is not None or skip) and structured is not None:
+            # 構造化差分をそのカテゴリだけにし、隠した行(skip。REQ-389)を除く(diff_total も絞った後の数になる。
+            # 位置は元の diffs の番号。正規化した行は呼ぶ側が今と同じ入力で渡す)
+            kept = [
+                d
+                for i, d in enumerate(structured.diffs)
+                if (request.category is None or d["category"] == request.category) and i not in skip
+            ]
             structured = dataclasses.replace(structured, diffs=kept)
+        elif skip and show is not None and show.method in ("structured", "both"):
+            # show を表で比べた結果の行(構造化比較のタブの行)も同じ決まりで除く
+            kept = [d for i, d in enumerate(show.diffs) if i not in skip]
+            show = dataclasses.replace(show, diffs=kept)
+        if request.skip_raw:
+            # 単純比較の表で隠した行(REQ-391)の差分を除く。位置は送る行の差分(raw、無ければ show.raw)の番号で、1 行だけにする前の番号
+            skip_raw = frozenset(request.skip_raw)
+            if raw is not None:
+                raw = dataclasses.replace(raw, diffs=[d for i, d in enumerate(raw.diffs) if i not in skip_raw])
+            elif show is not None and show.raw is not None:
+                lines = show.raw
+                kept_lines = dataclasses.replace(lines, diffs=[d for i, d in enumerate(lines.diffs) if i not in skip_raw])
+                show = dataclasses.replace(show, raw=kept_lines)
         if request.raw_lines is not None:
             # 行の差分をその 1 行だけにする(REQ-366 §6)。伏せる判定と前後の文脈は、この後の build_payload が今と同じに付ける
             raw = _only_line(raw, request.raw_lines)

@@ -70,6 +70,7 @@ from driftpilot.messages import (
     EXPORT_SAVED_AT,
     EXPORT_STATUS,
     EXPORT_STRUCTURED,
+    EXPORT_UNMASKED_MARK,
     FOLLOW_UP_ANSWER_LABEL,
     FOLLOW_UP_QUESTION_LABEL,
     HTML_LANG,
@@ -80,6 +81,11 @@ from driftpilot.messages import (
     export_omitted,
     raw_rule_hits_text,
 )
+
+# 伏せずに出したファイルの題の下の 1 行の形(ADR-0257 決定3)。今ある変数だけを使う(アプリの警告の帯と同じ色の値)。伏せないときだけ足す
+_UNMASKED_STYLE = """
+.unmasked { margin: 12px 0 0; padding: 8px 12px; border-left: 4px solid var(--chg-bar); background: var(--chg-bg); border-radius: 0 6px 6px 0; font-weight: 700; }
+"""
 
 # CSV で式の頭とみなす文字(ADR-0156 決定6)
 _FORMULA_HEADS = ("=", "+", "-", "@", "\t", "\r", "\n", "＝", "＋", "－", "＠")
@@ -322,6 +328,8 @@ class Report:
     after_name: str = ""
     status_counts: tuple[tuple[str, str, int], ...] = ()
     status_key: str | None = None
+    # 秘密の行を伏せて出すか(ADR-0257)。既定は伏せる。偽のときだけ HTML に印の 1 行を出し、「伏せます」の案内を出さない
+    masked: bool = True
 
     @property
     def omitted_lines(self) -> int:
@@ -748,7 +756,8 @@ def _card_html(report: Report) -> list[str]:
             + "</dl>"
         )
     out.append("</div>")
-    out.append(_el("p", EXPORT_GUIDE, "note"))
+    if report.masked:
+        out.append(_el("p", EXPORT_GUIDE, "note"))
     if report.omitted_lines:
         out.append(_el("p", export_omitted(report.omitted_lines), "note"))
     out.append("</section>")
@@ -767,7 +776,7 @@ def render_html(report: Report, *, saved_at: datetime) -> str:
         "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">",
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         _el("title", report.title),
-        f"<style>{_STYLE}</style>",
+        f"<style>{_STYLE if report.masked else _STYLE + _UNMASKED_STYLE}</style>",
         "</head>",
         "<body>",
         '<div class="page">',
@@ -775,6 +784,7 @@ def render_html(report: Report, *, saved_at: datetime) -> str:
         _title_html(report.title),
         _el("span", f"{EXPORT_SAVED_AT}: {saved_at.isoformat(timespec='seconds')}", "when"),
         "</header>",
+        *([] if report.masked else [_el("p", EXPORT_UNMASKED_MARK, "unmasked")]),
         *_card_html(report),
     ]
     if report.multiple:

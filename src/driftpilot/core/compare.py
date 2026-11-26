@@ -35,10 +35,15 @@ input_form の直後に同じ経路で置く。構造化比較に失敗したと
 単純比較の設定(ADR-0166。REQ-227): 要求の raw_options を単純比較(compare_raw と、show のテンプレートが無くて単純比較に
 回ったとき)にだけ渡す。構造化比較は変えない。誤りのある設定は status=error・code=raw_options_error。
 設定で側の行の半分を超えて無視したとき(その側が 10 行以上)は、raw_ignored_many の警告を pager_marks と同じ経路の最後に足す。
+
+ログ全体の切り分けと入力の案内を作り置いて渡す(ADR-0258。REQ-393): run_compare の省ける引数 prepared に、側ごとの
+PreparedSide(切り分けの結果と入力の案内)を渡すと、split の工程で split_log を呼ばず、safety_checks の工程で diagnose_input を
+呼ばずに、渡された値を使う。まとめての比較(compare_all)が組の数だけ同じログを切り分け直さないための引数で、
+結果・警告・工程の名前と順は変えない。省けば今までどおり自分で作る。
 """
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from driftpilot import i18n
 from driftpilot.config_parser import UnsupportedConfigPlatform
@@ -84,6 +89,7 @@ from driftpilot.llm_analyzer.payload import LlmInputs
 from driftpilot.raw_keys import RawOptionsError
 from driftpilot.segmentation import (
     Candidates,
+    InputHint,
     Segment,
     SelectionError,
     SplitResult,
@@ -122,16 +128,40 @@ _T = i18n.choose(_TEXTS_JA, _TEXTS_EN)
 _LABEL = {"before": _T["side_before"], "after": _T["side_after"]}
 
 
+@dataclasses.dataclass(frozen=True)
+class PreparedSide:
+    """片側のログ全体から作った値(ADR-0258。REQ-393)。split は split_log の結果、hints は diagnose_input の結果。"""
+
+    split: SplitResult
+    hints: tuple[InputHint, ...]
+
+
+def prepare_sides(request: CompareRequest, splits: Mapping[SideName, SplitResult]) -> dict[SideName, PreparedSide] | None:
+    """両側の切り分けの結果に入力の案内を足して、run_compare の prepared に渡す値を作る(compare_all が 1 回だけ呼ぶ)。
+
+    splits は request の両側の文を request.prompt で切り分けた結果。diagnose_input が例外を出したときは None を返す
+    (呼ぶ側は値を渡さず、各組の run_compare が今までと同じ工程で例外を出す。1組の失敗で全体を止めない)。
+    """
+    try:
+        return {side: PreparedSide(splits[side], diagnose_input(getattr(request, side).text)) for side in SIDES}
+    except Exception:  # noqa: BLE001 - 値を作れなくても、各組が今までどおり自分で作って失敗する
+        return None
+
+
 def run_compare(
     request: CompareRequest,
     *,
     llm: LlmRequest | None = None,
     on_progress: Callable[[str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    prepared: Mapping[SideName, PreparedSide] | None = None,
 ) -> CompareOutcome:
     """1件の比較を実行する。should_cancel が真なら CompareCancelled を送出する。
 
     llm は入口が組み立てた LLM 解析の要求。None なら解析しない(結果の llm は disabled)。
+    prepared は要求の両側の文を要求のプロンプトで切り分けた値と入力の案内(prepare_sides)。渡すと split_log と
+    diagnose_input を呼ばずに使う(ADR-0258)。要求と同じ文・同じプロンプトから作った値だけを渡す(確かめない)。
+    呼ぶのは compare_all の中だけ。省けば今までどおり自分で作る。
     """
 
     def enter(stage: str) -> None:
@@ -149,7 +179,11 @@ def run_compare(
     selections: dict[SideName, SideSelection] = {"before": request.before_selection, "after": request.after_selection}
 
     enter("split")
-    splits: dict[SideName, SplitResult] = {side: split_log(inputs[side].text, prompt=request.prompt) for side in SIDES}
+    splits: dict[SideName, SplitResult] = (
+        {side: prepared[side].split for side in SIDES}
+        if prepared is not None
+        else {side: split_log(inputs[side].text, prompt=request.prompt) for side in SIDES}
+    )
 
     enter("select")
     chosen: dict[SideName, Segment | Candidates] = {}
@@ -288,7 +322,7 @@ def run_compare(
         mismatch = _platform_auto(auto_platform)
     elif kind == "config" and run_structured:
         mismatch = _platform_mismatch(config_platform, {"before": before, "after": after})
-    hints = _input_hints(request)
+    hints = _input_hints(request, prepared)
     extra = [
         *_input_forms(request),
         *hints,
@@ -650,11 +684,17 @@ def _input_forms(request: CompareRequest) -> list[SafetyWarning]:
     ]
 
 
-def _input_hints(request: CompareRequest) -> list[SafetyWarning]:
-    """入力の様子から当てた案内ごとの警告(ADR-0138 決定7。REQ-189)。detail は種類と数(と幅・付け足しの形)だけ。"""
+def _input_hints(
+    request: CompareRequest, prepared: Mapping[SideName, PreparedSide] | None = None
+) -> list[SafetyWarning]:
+    """入力の様子から当てた案内ごとの警告(ADR-0138 決定7。REQ-189)。detail は種類と数(と幅・付け足しの形)だけ。
+
+    prepared があれば、その側の案内(prepare_sides が作ったもの)を使い、無ければ diagnose_input を当てる(ADR-0258)。
+    """
     warnings: list[SafetyWarning] = []
     for side in SIDES:
-        for hint in diagnose_input(getattr(request, side).text):
+        side_hints = prepared[side].hints if prepared is not None else diagnose_input(getattr(request, side).text)
+        for hint in side_hints:
             detail: dict = {"kind": hint.kind, "count": hint.count}
             if hint.width is not None:
                 detail["width"] = hint.width

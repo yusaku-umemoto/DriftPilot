@@ -354,6 +354,17 @@
           </details>
           <!-- カテゴリのチップ（ADR-0155 決定1）。「すべて N」とカテゴリごとの「名前 件数」。文字は Python が作る。カテゴリが 1 種類以下なら隠す -->
           <div class="pilot-chips" id="structured-chips" role="group" data-label="compare.filter.title" hidden></div>
+          <!-- 右クリックで隠している「同じ変更」の 1 行と「戻す」（REQ-389 / ADR-0255 決定3）。隠しているときだけ出す。文は Python が作り、textContent だけで入れる -->
+          <div class="pilot-row pilot-same-row" id="structured-same" hidden>
+            <p class="pilot-note" id="structured-same-text" role="status"></p>
+            <button type="button" class="pilot-button pilot-button--secondary" id="structured-same-reset" data-text="compare.structured.same.reset"></button>
+          </div>
+          <!-- 列の絞り込みの 1 行と「すべて解除」（REQ-391 §5 / ADR-0256 決定5）。絞っているときだけ出す。同じ変更の 1 行の下に、別の行として並べる
+               （2 つの文と 2 つのボタンを 1 行に入れると幅が足りないため）。文は Python が作り、textContent だけで入れる -->
+          <div class="pilot-row pilot-same-row" id="structured-filter" hidden>
+            <p class="pilot-note" id="structured-filter-text" role="status"></p>
+            <button type="button" class="pilot-button pilot-button--secondary" id="structured-filter-clear" data-text="compare.column_filter.clear"></button>
+          </div>
           <!-- 右クリックの「元の行を単純比較のタブで見る」「この列をこの窓だけ比べない」の知らせ（REQ-367 §2・§3）。最初は隠す。文は textContent だけで入れる -->
           <p class="pilot-note" id="structured-menu-note" role="status" hidden></p>
           <div class="pilot-table-wrap" id="structured-wrap" tabindex="0">
@@ -370,11 +381,13 @@
                      列の境目（.pilot-col-resize）の上では並べ替えない。ボタンを入れ子にせず th 自体を押せるようにして、
                      見出しのセルの意味と aria-sort をそのまま保つ -->
                 <tr>
-                  <th scope="col" data-text="compare.col.op" aria-sort="none" tabindex="0"></th>
-                  <th scope="col" data-text="compare.col.category" aria-sort="none" tabindex="0"></th>
-                  <th scope="col" data-text="compare.col.target_item" aria-sort="none" tabindex="0"></th>
-                  <th scope="col" data-text="compare.col.before" aria-sort="none" tabindex="0"></th>
-                  <th scope="col" data-text="compare.col.after" aria-sort="none" tabindex="0"></th>
+                  <!-- 見出しの右の ▼ は列の絞り込み（REQ-391）。押すと値の一覧の窓（#column-filter）。並べ替えにはならない。
+                       見出しの文は span に入れる（ボタンを消さないように）。ボタンの読み上げの名前（aria-label）は js/compare.js が入れる -->
+                  <th scope="col" aria-sort="none" tabindex="0"><span data-text="compare.col.op"></span><button type="button" class="pilot-filter-button" data-filter-table="structured" data-filter-column="op" aria-haspopup="dialog" aria-pressed="false"></button></th>
+                  <th scope="col" aria-sort="none" tabindex="0"><span data-text="compare.col.category"></span><button type="button" class="pilot-filter-button" data-filter-table="structured" data-filter-column="category" aria-haspopup="dialog" aria-pressed="false"></button></th>
+                  <th scope="col" aria-sort="none" tabindex="0"><span data-text="compare.col.target_item"></span><button type="button" class="pilot-filter-button" data-filter-table="structured" data-filter-column="target_item" aria-haspopup="dialog" aria-pressed="false"></button></th>
+                  <th scope="col" aria-sort="none" tabindex="0"><span data-text="compare.col.before"></span><button type="button" class="pilot-filter-button" data-filter-table="structured" data-filter-column="before" aria-haspopup="dialog" aria-pressed="false"></button></th>
+                  <th scope="col" aria-sort="none" tabindex="0"><span data-text="compare.col.after"></span><button type="button" class="pilot-filter-button" data-filter-table="structured" data-filter-column="after" aria-haspopup="dialog" aria-pressed="false"></button></th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -397,6 +410,11 @@
             </span>
             <button type="button" class="pilot-button pilot-button--secondary" id="prev-diff" data-text="compare.button.prev"></button>
             <button type="button" class="pilot-button pilot-button--secondary" id="next-diff" data-text="compare.button.next"></button>
+          </div>
+          <!-- 印の列の絞り込みの 1 行と「すべて解除」（REQ-391 §5）。絞っているときだけ出す。文は Python が作り、textContent だけで入れる -->
+          <div class="pilot-row pilot-same-row" id="raw-filter" hidden>
+            <p class="pilot-note" id="raw-filter-text" role="status"></p>
+            <button type="button" class="pilot-button pilot-button--secondary" id="raw-filter-clear" data-text="compare.column_filter.clear"></button>
           </div>
           <!-- 右クリックから足したルールが、同じで足せなかった・欄が満ちていて足せなかったときの知らせ（REQ-366 §2〜§4）。
                比較の設定の欄が閉じていても分かるよう、ここに出す。文は js/compare.js が #rawopt-duplicate・#rawopt-ai-full の文を写す -->
@@ -435,7 +453,8 @@
               </colgroup>
               <thead>
                 <tr>
-                  <th scope="col"></th>
+                  <!-- 印の列の見出し。文字は無く、右の ▼ が印の列の絞り込み（REQ-391）。読み上げの名前は js/compare.js が入れる -->
+                  <th scope="col"><button type="button" class="pilot-filter-button" data-filter-table="raw" data-filter-column="mark" aria-haspopup="dialog" aria-pressed="false"></button></th>
                   <th scope="col" data-text="compare.col.before_no"></th>
                   <th scope="col" data-text="compare.col.before"></th>
                   <th scope="col" data-text="compare.col.after_no"></th>
@@ -595,11 +614,13 @@
   <footer class="pilot-footer">
     <button type="button" class="pilot-button pilot-button--primary" id="run" data-text="compare.button.run"></button>
     <button type="button" class="pilot-button pilot-button--secondary" id="cancel" data-text="compare.button.cancel"></button>
+    <!-- 選んだファイル・比較の結果・AI の会話を消して、起動したときの画面に戻す（ADR-0254 / REQ-388）。押せるか・理由・確かめが要るかは Python が決める -->
+    <button type="button" class="pilot-button pilot-button--secondary" id="clear" data-text="compare.button.clear"></button>
     <span class="pilot-footer-gap"></span>
     <button type="button" class="pilot-button pilot-button--secondary" id="save" data-text="compare.button.save"></button>
     <!-- 保存した結果を読むだけで開く（REQ-120）。ファイルは Python が窓のダイアログで選ぶ -->
     <button type="button" class="pilot-button pilot-button--secondary" id="open-result" data-text="compare.button.open_result"></button>
-    <!-- 人に渡す形の出力（ADR-0156）。形は選ぶダイアログで、秘密の行は必ず伏せる -->
+    <!-- 人に渡す形の出力（ADR-0156）。形は選ぶダイアログで、秘密の行は既定で伏せる（ダイアログのチェックで選ぶ。ADR-0257） -->
     <button type="button" class="pilot-button pilot-button--secondary" id="export" data-text="compare.button.export"></button>
     <span class="pilot-note pilot-grow" id="save-note"></span>
     <!-- 一括の窓とログビューアーの窓を開くボタンは、上の右へ移した（ADR-0252 決定2 / REQ-384） -->
@@ -623,13 +644,34 @@
     <button type="button" class="pilot-menu-item" role="menuitem" id="raw-menu-ask" data-text="compare.raw.menu.ask" hidden></button>
   </div>
   <span id="raw-menu-description" data-text="compare.raw.menu.description" hidden></span>
+  <!-- 列の絞り込みの値の一覧の小さな窓（REQ-391 §3 / ADR-0256 決定2）。1 つを 2 つの表の見出しのボタンで使い回す。
+       検索の欄・すべて選択・値ごとのチェック（値と件数）・OK・キャンセル。値の文字は textContent だけで入れる（js/column_filter.js）。
+       Esc・外を押す・スクロール・タブの切り替えで閉じる（キャンセルと同じ）。読み上げの名前（aria-label）は列ごとに js/column_filter.js が入れる -->
+  <div class="pilot-column-filter" id="column-filter" role="dialog" hidden>
+    <input id="column-filter-search" class="pilot-input" type="search" autocomplete="off" spellcheck="false" data-placeholder="compare.column_filter.search" data-label="compare.column_filter.search">
+    <span class="pilot-radio">
+      <input id="column-filter-all" class="pilot-check" type="checkbox">
+      <label for="column-filter-all" data-text="compare.column_filter.select_all"></label>
+    </span>
+    <div class="pilot-column-filter-list" id="column-filter-list" role="group"></div>
+    <p class="pilot-note" id="column-filter-over" role="status" hidden></p>
+    <div class="pilot-row pilot-column-filter-buttons">
+      <button type="button" class="pilot-button" id="column-filter-ok" data-text="compare.column_filter.ok"></button>
+      <button type="button" class="pilot-button pilot-button--secondary" id="column-filter-cancel" data-text="compare.column_filter.cancel"></button>
+    </div>
+  </div>
   <!-- 構造化比較のタブの行の右クリックしたときのメニュー（REQ-367 §2・§3）。項目は「元の行を単純比較のタブで見る」と、
        show の表の変更の行で変わった列ごとの「この列をこの窓だけ比べない: 列」（列の項目は #structured-menu-columns に textContent だけで作る）。
        どれも最初は隠し、右クリックした行で出すものだけ見せる。動きは js/compare.js -->
   <div class="pilot-menu" id="structured-menu" role="menu" data-label="compare.structured.menu.source" hidden>
     <button type="button" class="pilot-menu-item" role="menuitem" id="structured-menu-source" data-text="compare.structured.menu.source" hidden></button>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="structured-menu-hide-same" hidden></button>
+    <button type="button" class="pilot-menu-item" role="menuitem" id="structured-menu-only-same" hidden></button>
     <div id="structured-menu-columns"></div>
   </div>
+  <!-- 「同じ変更を隠す（N 件）」「同じ変更だけ表示（N 件）」の文のひな形（REQ-389。{count} を行の数に直す） -->
+  <span id="structured-menu-hide-same-template" data-text="compare.structured.menu.hide_same" hidden></span>
+  <span id="structured-menu-only-same-template" data-text="compare.structured.menu.only_same" hidden></span>
   <span id="structured-menu-skip-template" data-text="compare.structured.menu.skip_column" hidden></span>
   <span id="structured-menu-not-found" data-text="compare.structured.menu.not_found" hidden></span>
   <span id="structured-menu-skip-duplicate" data-text="compare.structured.menu.skip_duplicate" hidden></span>

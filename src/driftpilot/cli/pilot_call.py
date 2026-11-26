@@ -66,7 +66,8 @@ EXIT_CANCELLED = 130  # 標準入力が閉じられて止めた・Ctrl+C で止�
 REQUEST_LIMIT = 1_048_576  # 依頼のファイルの大きさの上限(ADR-0232 決定1)
 BOM = b"\xef\xbb\xbf"
 CORRELATION_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}")  # ADR-0232 決定2(ASCII だけ。fullmatch で使う)
-OPERATIONS = ("capabilities", "compare", "config-facts")
+RECORDS_OPERATIONS = ("records-list", "records-export", "records-delete", "records-import")  # ADR-0253。REQ-386
+OPERATIONS = ("capabilities", "compare", "config-facts", *RECORDS_OPERATIONS)
 
 SCHEMA = "pilot.call-request"
 SCHEMA_VERSION = "1"
@@ -96,6 +97,10 @@ def add_parser(sub: Any) -> None:
     cmp.add_argument("--request", required=True, metavar="PATH", help=_H["pilot_call.request"])
     facts = inner.add_parser("config-facts", help=_H["pilot_call.config_facts"], description=_H["pilot_call.config_facts"])
     facts.add_argument("--request", required=True, metavar="PATH", help=_H["pilot_call.request"])
+    for operation in RECORDS_OPERATIONS:  # 作業の記録の退避(ADR-0253。REQ-386)
+        text = _H["pilot_call." + operation.replace("-", "_")]
+        records = inner.add_parser(operation, help=text, description=text)
+        records.add_argument("--request", required=True, metavar="PATH", help=_H["pilot_call.request"])
 
 
 def emit(obj: dict[str, Any]) -> None:
@@ -114,6 +119,11 @@ def capabilities() -> dict[str, Any]:
         "operations": {
             "compare": {"protocol_versions": [1], "kind": "task", "llm": ["off"]},
             "config-facts": {"protocol_versions": [1], "kind": "task", "llm": ["off"]},
+            # ADR-0253。REQ-386: 作業の記録の退避。扱うのは更新に失敗したときの記録(app_logs)だけ
+            **{
+                operation: {"protocol_versions": [1], "kind": "task", "llm": ["off"], "categories": ["app_logs"]}
+                for operation in RECORDS_OPERATIONS
+            },
         },
     }
 
@@ -708,4 +718,8 @@ def run(args: argparse.Namespace, *, stdin_reader: StdinReader | None = None) ->
         return 0
     if args.pilot_call_command == "config-facts":
         return run_config_facts_call(args, stdin_reader)
+    if args.pilot_call_command in RECORDS_OPERATIONS:
+        from driftpilot.cli import pilot_records  # 互いに読み込み合わないよう、使うときに読む
+
+        return pilot_records.run_records_call(args, stdin_reader)
     return run_compare_call(args, stdin_reader)

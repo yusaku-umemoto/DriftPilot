@@ -2114,6 +2114,17 @@ COMPARE_BUTTON_RUN = "比較実行"
 HANDOFF_NOT_STARTED = f"一括比較が動いているため、まだ比べていません。終わったら「{COMPARE_BUTTON_RUN}」を押してください"
 COMPARE_BUTTON_SAVE = "結果を保存…"
 COMPARE_BUTTON_CANCEL = "中止"
+# 比較の窓の「クリア」(ADR-0254 / REQ-388)。選んだファイル・結果・AI の会話を消して、起動したときの画面に戻す
+COMPARE_BUTTON_CLEAR = "クリア"
+COMPARE_CLEAR_TITLE = "選んだファイル・比較の結果・AI の会話を消して、起動したときの画面に戻します"
+# 押せない理由(state の clear_reason。ボタンの title に出す)
+COMPARE_CLEAR_NOTHING = "消すものがありません"
+COMPARE_CLEAR_BUSY = f"比べている間・AI が答えている間はクリアできません。先に「{COMPARE_BUTTON_CANCEL}」を押してください"
+# 確かめのダイアログ(結果か AI の会話があるとき)
+COMPARE_CLEAR_CONFIRM_TITLE = "クリア"
+COMPARE_CLEAR_CONFIRM_BODY = (
+    "選んだファイル・比較の結果・AI の会話を消して、起動したときの画面に戻しますか？保存していない結果は元に戻せません。"
+)
 COMPARE_BUTTON_BATCH = "一括比較…"
 COMPARE_BUTTON_SETTINGS = "設定…"
 COMPARE_BUTTON_SWAP = "入れ替え"  # pywebview の比較の画面だけ(ADR-0078 決定2。wx の画面には無い)
@@ -2482,6 +2493,37 @@ def compare_send_pairs(on: int, total: int) -> str:
     return f"送る組: {on} / {total}"
 
 
+def compare_same_hidden(count: int, kinds: int) -> str:
+    """構造化比較の表の上の 1 行(同じ変更を隠しているとき。REQ-389 §4)。"""
+    return f"同じ変更 {count} 件を隠しています（{kinds} 種類）"
+
+
+def compare_same_only(count: int) -> str:
+    """構造化比較の表の上の 1 行(同じ変更だけを表示しているとき。REQ-389 §4)。"""
+    return f"同じ変更 {count} 件だけを表示しています"
+
+
+# 列の絞り込み(REQ-391 / ADR-0256 決定2〜5)。値の一覧の窓・単純比較の印の列の 7 つの値・表の上の 1 行
+COMPARE_FILTER_BLANK = "（空白）"
+COMPARE_FILTER_OVER = "1,000 種類を超えています。検索で絞ってください"
+COMPARE_FILTER_RAW_BLOCKED = "印の列で絞っている間は使えません"
+# 単純比較の印の列の値(鍵は screen_model.column_filters.RAW_MARK_VALUES)
+COMPARE_FILTER_RAW_VALUES = {
+    "changed": "変更（~）",
+    "added": "追加（+）",
+    "removed": "削除（-）",
+    "ignored": "無視（x）",
+    "equated": "同じとみなした（=）",
+    "moved": "移動（< と >）",
+    "same": "同じ行（印なし）",
+}
+
+
+def compare_filtered(columns: Sequence[str]) -> str:
+    """表の上の 1 行(列を絞っているとき。REQ-391 §5)。columns は絞っている列の名前。"""
+    return f"絞り込み中: {'・'.join(columns)}（{len(columns)} 列）"
+
+
 # キャラクターがオンのときの答えの吹き出しの名前と顔の title、ボタンと空の面の案内(ADR-0181 決定1・2)。
 # 窓に出すだけ。保存・HTML・CSV・コピー・送る文には入れない(決定3)
 CHARACTER_NAME = "Mirarin"
@@ -2655,6 +2697,10 @@ GUI_WEB_TEXTS.update(
         "compare.button.open_result": COMPARE_BUTTON_OPEN_RESULT,
         "compare.button.close_result": COMPARE_BUTTON_CLOSE_RESULT,
         "compare.button.cancel": COMPARE_BUTTON_CANCEL,
+        "compare.button.clear": COMPARE_BUTTON_CLEAR,
+        "compare.clear.title": COMPARE_CLEAR_TITLE,
+        "compare.clear.confirm.title": COMPARE_CLEAR_CONFIRM_TITLE,
+        "compare.clear.confirm.body": COMPARE_CLEAR_CONFIRM_BODY,
         "compare.button.batch": COMPARE_BUTTON_BATCH,
         "compare.button.settings": COMPARE_BUTTON_SETTINGS,
         "compare.multi.title": COMPARE_MULTI_TITLE,
@@ -3271,6 +3317,10 @@ EXPORT_GUIDE = (
     "秘密の行は AI に送るときと同じ判定で伏せます。語の無い秘密や IP アドレス、ホスト名、説明文は伏せません。"
     "渡す前に中身を確かめてください"
 )
+# 形を選ぶダイアログのチェックと注意の文、伏せずに出したファイルの印(ADR-0257)
+EXPORT_MASK_CHECK = "秘密の行を伏せる（おすすめ）"
+EXPORT_UNMASKED_WARNING = "秘密の行（パスワード・鍵・コミュニティ名など）もそのまま出します。社外の人や AI に渡さないでください"
+EXPORT_UNMASKED_MARK = "このファイルは秘密の行を伏せていません。社外の人や AI に渡さないでください"
 # 形の選択肢(ADR-0156 決定1)。組の一覧はまとめて比較と一括比較のときだけ出す
 EXPORT_CHOICE_HTML = "HTML"
 EXPORT_CHOICE_DIFFS = "CSV（差分の行）"
@@ -3327,14 +3377,23 @@ def export_saved(path: Path) -> str:
     return f"{path} に出力しました。秘密の行は伏せましたが、渡す前に中身を確かめてください"
 
 
+def export_saved_unmasked(path: Path) -> str:
+    """伏せずに出した後の窓の下の文(ADR-0257 決定3)。"""
+    return f"{path} に出力しました。秘密の行を伏せていません。社外の人や AI に渡さないでください"
+
+
 GUI_WEB_TEXTS.update(
     {
         "compare.button.export": EXPORT_BUTTON,
         "compare.export.title": EXPORT_DIALOG_TITLE,
         "compare.export.body": EXPORT_GUIDE,
+        "compare.export.mask": EXPORT_MASK_CHECK,
+        "compare.export.unmasked": EXPORT_UNMASKED_WARNING,
         "batch.button.export": EXPORT_BUTTON,
         "batch.export.title": EXPORT_DIALOG_TITLE,
         "batch.export.body": EXPORT_GUIDE,
+        "batch.export.mask": EXPORT_MASK_CHECK,
+        "batch.export.unmasked": EXPORT_UNMASKED_WARNING,
     }
 )
 
@@ -3939,6 +3998,18 @@ GUI_WEB_TEXTS.update(
         "compare.structured.menu.source": "元の行を単純比較のタブで見る",
         "compare.structured.menu.skip_column": "この列をこの窓だけ比べない: {column}",
         "compare.structured.menu.not_found": "元の行が見つかりません",
+        # 同じ変更を隠す・だけ表示(REQ-389 / ADR-0255 決定2・3)。{count} は画面が行の数に直す
+        "compare.structured.menu.hide_same": "同じ変更を隠す（{count} 件）",
+        "compare.structured.menu.only_same": "同じ変更だけ表示（{count} 件）",
+        "compare.structured.same.reset": "戻す",
+        # 列の絞り込み(REQ-391 / ADR-0256)。{column} は画面が列の名前に直す
+        "compare.column_filter.label": "{column} の絞り込み",
+        "compare.column_filter.search": "検索",
+        "compare.column_filter.select_all": "すべて選択",
+        "compare.column_filter.ok": "OK",
+        "compare.column_filter.cancel": "キャンセル",
+        "compare.column_filter.clear": "すべて解除",
+        "compare.raw.col.mark": "印",
         "compare.structured.menu.skip_duplicate": "その列はもう比べない列に入っています",
         "compare.structured.menu.skip_full": "比べない列は 20 個までです",
         "compare.skip_columns.title": "比べない列",
@@ -4451,6 +4522,23 @@ CLI_HELP = {
         "(標準入力が閉じたら止める。終了コード: 成功 0・エラー 2・止めた 130)"
     ),
     "pilot_call.request": "依頼の JSON のファイル(UTF-8)",
+    # 作業の記録の退避(ADR-0253。REQ-386)。扱うのは更新に失敗したときの記録(app_logs)だけ
+    "pilot_call.records_list": (
+        "依頼のファイルを読んで、更新に失敗したときの記録の件数と大きさを数える(何も変えない。"
+        "終了コード: 成功 0・エラー 2・止めた 130)"
+    ),
+    "pilot_call.records_export": (
+        "依頼のファイルを読んで、更新に失敗したときの記録を output_dir の DriftPilot.zip に書き出す(元は消さない。"
+        "終了コード: 成功 0・エラー 2・止めた 130)"
+    ),
+    "pilot_call.records_delete": (
+        "依頼のファイルを読んで、更新に失敗したときの記録を消す(method は delete か trash。"
+        "終了コード: 全部消せた 0・残したものがある 1・エラー 2・止めた 130)"
+    ),
+    "pilot_call.records_import": (
+        "依頼のファイルを読んで、書き出した ZIP から更新に失敗したときの記録を戻す(今ある記録は消さない・上書きしない。"
+        "終了コード: 全部戻せた 0・戻さなかったものがある 1・エラー 2・止めた 130)"
+    ),
 }
 
 # --- ほかの Pilot から呼ぶ入口 pilot-call の error の文(ADR-0203。REQ-286)。`{…}` は使う側が .format で埋める。
@@ -4483,9 +4571,20 @@ PILOT_CALL_MESSAGES = {
     "request_too_large": "依頼のファイルが {limit} バイトを超えています",
     "request_bom": "依頼のファイルが BOM で始まっています。BOM の無い UTF-8 にしてください",
     "invalid_correlation_id": "caller.correlation_id は、英数字と . _ : - だけの 1〜128 文字の文字列にしてください",
-    "unknown_operation": "操作は capabilities・compare・config-facts のどれかにしてください",
+    "unknown_operation": (
+        "操作は capabilities・compare・config-facts・records-list・records-export・records-delete・records-import のどれかにしてください"
+    ),
     "invalid_arguments": "pilot-call の引数が正しくありません",
     "interrupted": "中断の合図(Ctrl+C)を受けたため、止めました",
+    # 作業の記録の退避(ADR-0253。REQ-386)の文。記録の名前・準備の場所のパスは入れない(件数だけ)
+    "unsupported_operation_records": "operation は {operation} だけ受けます",
+    "invalid_inputs_records": "inputs は、role が part のものを 1 つだけ持つ配列にし、path は絶対パスの ZIP のファイルにしてください",
+    "records_target_missing": "params に manifest か categories のどちらかが要ります",
+    "records_manifest_invalid": "manifest を読めないか、形が合いません(schema は pilot.records-part、schema_version は \"1\"、product は DriftPilot)",
+    "records_part_invalid": "ZIP を戻せません(開けない・大きすぎる・ファイルが多すぎる・manifest.json が合わない)",
+    "records_unreadable": "記録のファイル {count} 件を読めませんでした",
+    "cancelled_records": "標準入力が閉じられたため、記録の操作を止めました",
+    "where_app_logs": "更新に失敗したときの記録(DriftPilot の更新の準備の場所)",
 }
 
 # --- コマンドの誤りの文(「エラー: 」の後ろ。REQ-258) ---

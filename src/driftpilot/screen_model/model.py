@@ -84,7 +84,13 @@ from driftpilot.llm_analyzer import (
 # 答えの読み取りは画面の側からはここ(と batch_model)を通して使う(gui の境界。REQ-204)
 from driftpilot.llm_analyzer.answer_format import format_answer, plain_answer
 # 人に渡す出力の伏せる判定(ADR-0156 決定2。AI に送るときと同じ判定の道)
-from driftpilot.llm_analyzer.redact import RedactedResult, RedactError, redact_result, redact_text  # noqa: F401 - RedactError は窓が読む
+from driftpilot.llm_analyzer.redact import (  # noqa: F401 - RedactError は窓が読む
+    RedactedResult,
+    RedactError,
+    plain_result,
+    redact_result,
+    redact_text,
+)
 from driftpilot.llm_settings import LlmSettings, SettingsError, current_premise, load_settings, premise_text_problem
 from driftpilot.llm_settings import build_request as build_llm_request
 from driftpilot.messages import (
@@ -1822,12 +1828,16 @@ def with_question(
     category: str | None,
     target: str,
     raw_lines: tuple[int | None, int | None] | None = None,
+    skip_structured: tuple[int, ...] | None = None,
+    skip_raw: tuple[int, ...] | None = None,
 ) -> LlmPlan:
     """表示中の差分への質問(確かめた後の文)と、送る差分の種類・カテゴリ・対象を、送らない1回目と送る2回目の両方に入れた計画
     (REQ-312 / ADR-0218 決定2〜4)。
 
     両方に同じ値を入れるので、送信前の確認の全文と、承認した内容の照合(approve)が一致する。
     raw_lines は単純比較の 1 行だけを聞くときの (変更前の行番号, 変更後の行番号。REQ-366 §6)。
+    skip_structured は構造化比較の表で隠している行の位置(送らない構造化差分。REQ-389 §5)。None なら今と同じ。
+    skip_raw は単純比較の表で、印の列の絞り込みで隠している行の差分の位置(REQ-391 §6)。None なら今と同じ。
     """
     fields: dict[str, Any] = {
         "question": question,
@@ -1837,6 +1847,10 @@ def with_question(
     }
     if raw_lines is not None:
         fields["raw_lines"] = raw_lines
+    if skip_structured is not None:
+        fields["skip_structured"] = skip_structured
+    if skip_raw is not None:
+        fields["skip_raw"] = skip_raw
     send = None if plan.send is None else replace(plan.send, **fields)
     return LlmPlan(first=replace(plan.first, **fields), send=send)
 
@@ -2936,7 +2950,8 @@ def resaved_lines(
 
 # --- 人に渡す形の出力(HTML と CSV。ADR-0156 / REQ-216。pywebview の窓だけ) ---
 # 結果から Report を作る。差分の行・組の名前・ファイル名は llm_analyzer/redact.py の判定に通す(AI に送るときと同じ判定の道)。
-# 伏せずに出す口は作らない(ADR-0156 決定2)。保存した結果を開いているときは出さない(決定7。窓の側で止める)。
+# 既定は伏せる(ADR-0156 決定2)。出力のたびに利用者がチェックを外したときだけ、判定に通さず画面と同じ値で出す(ADR-0257。masked=False)。
+# 保存した結果を開いているときは出さない(決定7。窓の側で止める)。
 
 EXPORT_HTML, EXPORT_DIFFS, EXPORT_PAIRS = "html", "csv", "csv_pairs"
 EXPORT_KINDS = (EXPORT_HTML, EXPORT_DIFFS, EXPORT_PAIRS)
@@ -2991,13 +3006,22 @@ def export_words(settings_words: Sequence[str], analyses: Iterable[LlmAnalysis |
     return words
 
 
-def export_filename(prefix: str, kind: str, now: datetime) -> str:
-    """保存のダイアログの既定の名前。`driftpilot-<prefix>-<YYYYMMDD-HHMMSS>.html` など(ホスト名は入れない)。"""
-    return f"driftpilot-{prefix}-{now:%Y%m%d-%H%M%S}{_EXPORT_SUFFIX[kind]}"
+def export_filename(prefix: str, kind: str, now: datetime, *, masked: bool = True) -> str:
+    """保存のダイアログの既定の名前。`driftpilot-<prefix>-<YYYYMMDD-HHMMSS>.html` など(ホスト名は入れない)。
+
+    伏せずに出すとき(masked が偽)は、拡張子の前に `-unmasked` を付ける(ADR-0257 決定3)。
+    """
+    stem, dot, ext = _EXPORT_SUFFIX[kind].rpartition(".")
+    return f"driftpilot-{prefix}-{now:%Y%m%d-%H%M%S}{stem}{'' if masked else '-unmasked'}{dot}{ext}"
 
 
-def file_label(name: str, words: Sequence[str]) -> str:
-    """要約に出す入力の名前。ファイル名だけにして判定に通す(ADR-0156 決定3)。貼り付けは今の名前のまま。"""
+def file_label(name: str, words: Sequence[str], *, masked: bool = True) -> str:
+    """要約に出す入力の名前。ファイル名だけにして判定に通す(ADR-0156 決定3)。貼り付けは今の名前のまま。
+
+    伏せずに出すとき(masked が偽)は、ファイル名だけを判定に通さず出す(フルパスは出さない。ADR-0257 決定2)。
+    """
+    if not masked:
+        return Path(name).name
     return redact_text(Path(name).name, words)
 
 
@@ -3039,14 +3063,16 @@ def pair_report(
     after_name: str = "",
     first_request: str | None = None,
     platform: str | None = None,
+    masked: bool = True,
 ) -> ReportPair:
     """1 組の出力。比較が失敗した組と選択待ちの組は状態だけ(差分の行・件数の文・答えを出さない)。
 
     状態は STATUS_LABEL の名前だけで、エラーの文・帯の文・警告・診断は入れない(ADR-0156 決定3)。
     名前は判定に通す(空はそのまま)。区間の行が取れないのに差分があれば RedactError(出力は失敗にする)。
     first_request は最初の依頼の文(ADR-0179 決定1)。答えがあるときだけ持つ(追加の質問の文と同じく、送る前に確かめた文)。
+    masked が偽(ADR-0257)なら、名前・差分の行・単純比較の設定の式を判定に通さず画面と同じ値で出す(RedactError は起きない)。
     """
-    shown_name = redact_text(name, words) if name else ""
+    shown_name = (redact_text(name, words) if masked else name) if name else ""
     status = STATUS_LABEL[outcome.status]
     structured, raw, unparsed, ai = pair_columns(outcome)
     if outcome.status in _STATUS_ONLY:
@@ -3068,16 +3094,19 @@ def pair_report(
         side: (seg[side].selected.body if seg is not None and seg[side].selected is not None else None) for side in SIDES
     }
     table = _raw_rows(outcome)
-    redacted = redact_result(
-        structured=outcome.structured,
-        raw=outcome.raw,
-        show=outcome.show,
-        before_body=bodies["before"],
-        after_body=bodies["after"],
-        raw_rows=table,
-        secret_words=words,
-        platform=platform,
-    )
+    if masked:
+        redacted = redact_result(
+            structured=outcome.structured,
+            raw=outcome.raw,
+            show=outcome.show,
+            before_body=bodies["before"],
+            after_body=bodies["after"],
+            raw_rows=table,
+            secret_words=words,
+            platform=platform,
+        )
+    else:
+        redacted = plain_result(structured=outcome.structured, raw=outcome.raw, show=outcome.show, raw_rows=table)
     llm = outcome.llm
     answer = llm.answer if llm is not None and llm.status == "done" and isinstance(llm.answer, str) else None
     return ReportPair(
@@ -3096,12 +3125,12 @@ def pair_report(
         _raw_report_lines(outcome),
         first_request=first_request if answer is not None else None,
         status_key=outcome.status,
-        raw_rules=_raw_report_rules(outcome, words),
+        raw_rules=_raw_report_rules(outcome, words, masked=masked),
         raw_compared=outcome.raw is not None or (outcome.show is not None and outcome.show.raw is not None),
     )
 
 
-def _raw_report_rules(outcome: CompareOutcome, words: Sequence[str]) -> ReportRawRules | None:
+def _raw_report_rules(outcome: CompareOutcome, words: Sequence[str], *, masked: bool = True) -> ReportRawRules | None:
     """報告書に出す、その組を比べた単純比較の設定(REQ-363)。既定の設定(記録が無い)なら None。
 
     式と置き換える文字は、追加の質問と同じ判定(premise_text_problem。語は初期の語を足したもの)に通し、断られた欄は EXPORT_RAW_WITHHELD にする
@@ -3114,7 +3143,8 @@ def _raw_report_rules(outcome: CompareOutcome, words: Sequence[str]) -> ReportRa
     options = dict(record.options)
 
     def shown(text: str) -> str:
-        if not text.strip():
+        # 伏せずに出すときは式と置き換える文字をそのまま出す(判定に通さない。ADR-0257 決定2)
+        if not masked or not text.strip():
             return text
         # premise_text_problem は check_question に normalize_words(words) を渡す(長さの上限は質問の 4000 字。式は 200 字までに確かめ済み)
         return EXPORT_RAW_WITHHELD if premise_text_problem(text, words) is not None else text
@@ -3168,12 +3198,17 @@ def compare_report(
     turns: Sequence[tuple[str, str]] = (),
     *,
     first_request: str | None = None,
+    masked: bool = True,
 ) -> Report:
-    """比較の窓の 1 組の出力。turns は追加の質問のやり取り (質問, 回答)、first_request は最初の依頼の文(ADR-0179 決定1)。"""
+    """比較の窓の 1 組の出力。turns は追加の質問のやり取り (質問, 回答)、first_request は最初の依頼の文(ADR-0179 決定1)。
+
+    masked が偽なら秘密の行を伏せずに出す(ADR-0257。既定は伏せる)。
+    """
     pair = pair_report(
         "", outcome, words, turns=turns, first_request=first_request,
         # inp は ScreenInput(platform を持つ)。機種を持たない簡単な入力でも動くよう、無ければ機種なしとして扱う
         platform=config_platform_used(getattr(inp, "platform", None), outcome.kind, outcome.auto_platform),
+        masked=masked,
     )
     return Report(
         EXPORT_TITLE_COMPARE,
@@ -3181,9 +3216,10 @@ def compare_report(
         pair.counts,
         (pair,),
         False,
-        file_label(inp.before.name, words),
-        file_label(inp.after.name, words),
+        file_label(inp.before.name, words, masked=masked),
+        file_label(inp.after.name, words, masked=masked),
         status_key=pair.status_key,
+        masked=masked,
     )
 
 
@@ -3194,6 +3230,7 @@ def multi_report(
     turns: Mapping[int, Sequence[tuple[str, str]]] | None = None,
     *,
     first_requests: Mapping[int, str | None] | None = None,
+    masked: bool = True,
 ) -> Report:
     """まとめて比べた結果の出力。組の名前は一覧の行の名前(コマンド名)。相手なしの区間は入れない(保存と同じ)。
 
@@ -3212,6 +3249,7 @@ def multi_report(
             turns=turns.get(k, ()),
             first_request=first_requests.get(k),
             platform=config_platform_used(pair.request.platform, pair.outcome.kind, pair.outcome.auto_platform),
+            masked=masked,
         )
         for k, pair in enumerate(whole_pair_results(outcome))
     )
@@ -3221,9 +3259,10 @@ def multi_report(
         "",
         pairs,
         True,
-        file_label(inp.before.name, words),
-        file_label(inp.after.name, words),
+        file_label(inp.before.name, words, masked=masked),
+        file_label(inp.after.name, words, masked=masked),
         status_key=view.status,
+        masked=masked,
     )
 
 

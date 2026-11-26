@@ -159,7 +159,7 @@ AI in the batch window:
 |---|---|
 | **Save result…** | Saves the result as JSON. It contains the original config values (including secrets), so treat it like the configs. |
 | **Open saved result…** | Shows a saved result (read only). Results saved by the command line (`--save`) open too. |
-| **Export HTML/CSV…** | Writes an HTML report or CSV. Secret lines are always masked in these files. |
+| **Export HTML/CSV…** | Writes an HTML report or CSV. Secret lines are masked by default. If you clear **Mask secret lines** in the dialog, they are written as they are and the file name ends with `-unmasked` (do not give such a file to people outside your organization or to an AI). |
 | **Save these pairs…** (batch) | Saves the pairs as a pair file (YAML) that you can open again or run with `driftpilot batch`. |
 | **Save results…** (batch) | Saves the results of all pairs (JSON Lines). |
 

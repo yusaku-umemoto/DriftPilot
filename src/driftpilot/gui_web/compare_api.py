@@ -107,8 +107,9 @@ JavaScript(static/js/compare.js)は返した JSON を描くことと、操作を
 - キャラクターの設定(ADR-0245 決定2): 設定の窓で保存したら _on_settings_change が _forget_characters を呼び、覚えた値を捨てて
   次の state() で今の設定を読み直す(送っている途中でも絵の出し方だけが変わる)
 - 「HTML・CSV で出力…」(export_result。ADR-0156 / REQ-216): 押せるのは保存と同じ条件で、保存した結果を開いていないとき(can_export)。
-  設定の秘密の語を読めなければ出さない。差分の行・組の名前・ファイル名は AI に送るときと同じ判定で伏せ(model の compare_report・
-  multi_report)、新しいファイルに書く(上書きしない)。伏せずに出す口は無い
+  既定は伏せる: 設定の秘密の語を読めなければ出さない。差分の行・組の名前・ファイル名は AI に送るときと同じ判定で伏せ(model の
+  compare_report・multi_report)、新しいファイルに書く(上書きしない)。チェックを外したとき(masked が偽)だけ、判定に通さず画面と
+  同じ値で出す。そのときは設定を読まない(ADR-0257)
 
 - 届いたところから答えを出す(ADR-0157 決定5〜8 / REQ-217 §5): 承認して送る2回目(_answer_preview)・1組の自動送信(_auto_send)・
   追加の質問(_ask_in_thread)だけ、要求に on_delta(_AnswerStream)を付ける。届いた文字は 0.15 秒に1回まで
@@ -283,6 +284,8 @@ from driftpilot.messages import (
     COMPARE_API_ERROR_NOTE,
     COMPARE_API_ERROR_TITLE,
     COMPARE_AUTO_SENDING,
+    COMPARE_CLEAR_BUSY,
+    COMPARE_CLEAR_NOTHING,
     COMPARE_DROP_FOLDER,
     COMPARE_DROP_NO_PATH,
     COMPARE_DROP_TITLE,
@@ -351,6 +354,7 @@ from driftpilot.messages import (
     compare_send_pairs,
     compare_warning_line,
     export_saved,
+    export_saved_unmasked,
     export_settings_unreadable,
     follow_up_destination_changed,
     follow_up_failed,
@@ -496,7 +500,43 @@ from driftpilot.screen_model.model import (
     read_raw_form,
     saved_raw_settings_line,
 )
-from driftpilot.messages import CAPI_INPUT_FILE_TYPES, CAPI_OPEN_RESULT_FILE_TYPES, RAW_OPTIONS_INVALID_TITLE
+from driftpilot.messages import (
+    CAPI_INPUT_FILE_TYPES,
+    CAPI_OPEN_RESULT_FILE_TYPES,
+    RAW_OPTIONS_INVALID_TITLE,
+    COMPARE_COL_AFTER,
+    COMPARE_COL_BEFORE,
+    COMPARE_COL_CATEGORY,
+    COMPARE_COL_OP,
+    COMPARE_COL_TARGET_ITEM,
+    COMPARE_FILTER_OVER,
+    COMPARE_FILTER_RAW_BLOCKED,
+    COMPARE_FILTER_RAW_VALUES,
+    GUI_WEB_TEXTS,
+    compare_filtered,
+    compare_same_hidden,
+    compare_same_only,
+)
+from driftpilot.screen_model.column_filters import (
+    OP_FIXED,
+    RAW_MARK_VALUES,
+    STRUCTURED_COLUMNS,
+    find_visible_diff,
+    next_selection,
+    raw_hidden,
+    raw_mark_value,
+    raw_skip_positions,
+    structured_cell,
+    structured_hidden,
+    value_list,
+)
+from driftpilot.screen_model.same_changes import (
+    SameKey,
+    same_change_counts,
+    same_change_keys,
+    same_counts_of,
+    same_hidden_rows,
+)
 from driftpilot.screen_model.settings_model import (
     ProfileChoices,
     destination_of,
@@ -736,6 +776,37 @@ class _ShownInfo:
     whole: bool = False
     text: str | None = None
     raw_lines: _Row | None = None  # 単純比較の 1 行だけを聞くときの対象の行(REQ-366 §6)
+    # 構造化比較のタブで隠している行のうち、送らない構造化差分の位置(REQ-389 §5。隠していなければ None)
+    skip: tuple[int, ...] | None = None
+    # 単純比較のタブで、印の列の絞り込みで隠している行の差分の位置(REQ-391 §6。隠していなければ None)
+    skip_raw: tuple[int, ...] | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _FilterSource:
+    """列の絞り込みの窓の材料(_filter_source が作る。REQ-391)。
+
+    cells は列の値(行ごと)、fixed は件数が 0 でも出す値、labels は値の表示の文字(無ければ値そのまま)、ordered は決まった並び
+    (無ければ件数の多い順)、current は今選んでいる値の集まり(絞っていなければ None)、label は列の名前。
+    """
+
+    cells: list[str]
+    fixed: tuple[str, ...]
+    labels: Mapping[str, str] | None
+    ordered: tuple[str, ...] | None
+    current: frozenset[str] | None
+    label: str
+
+
+def _structured_labels() -> dict[str, str]:
+    """構造化比較の表の列の鍵 → 見出しの名前(表の上の 1 行と窓の題に使う)。"""
+    return {
+        "op": COMPARE_COL_OP,
+        "category": COMPARE_COL_CATEGORY,
+        "target_item": COMPARE_COL_TARGET_ITEM,
+        "before": COMPARE_COL_BEFORE,
+        "after": COMPARE_COL_AFTER,
+    }
 
 
 def _prompt_name(settings: LlmSettings) -> str:
@@ -938,6 +1009,59 @@ class CompareApi(Api):
         # 状態はここだけに持つ。js_api の呼び出しとワーカーのコールバックは別々のスレッドで動くので、触るのはロックの中だけ。
         # ロックの順は、このロック → session.lock だけ(session からこの窓を呼ぶのはロックの外)
         self._lock = threading.RLock()
+        # --- クリアしても変えないもの(番号・ui-state.json から読んだ値・窓の持ち物。_set_start_state は触らない) ---
+        self._raw_fill = 0
+        self._worker: CompareWorker | None = None
+        self._closing = False
+        self._asking: _Asking | None = None
+        self._follow_up_epoch = 0
+        self._follow_up_revision = 0
+        self._partial_revision = 0
+        self._thinking_revision = 0
+        self._api_error_revision = 0
+        # 解析の前に打った文の欄を空にする番号(承認して送った答えが届いたときだけ増やす。REQ-206 §6)
+        self._instruction_clear = 0
+        # 開いたときの左の面の割合(null は初めの幅)と AI の欄を隠すか(REQ-370。窓の配置のファイル ui-state.json から 1 回だけ読む。REQ-374)。
+        # _ai_hidden は自動送信が始まる・一括比較の答えが付くと偽に戻す(ファイルには書かない)。
+        # _remembered_* は最後に読んだ・書いた値(同じ値なら書かないために持つ)
+        self._split_left, self._ai_hidden = load_compare_layout(ui_state_path(**self._where_user()))
+        self._remembered_split: float | None = self._split_left
+        self._remembered_hidden: bool = self._ai_hidden
+        self._row_prefill = 0
+        self._all_revision = 0
+        self._tab_revision = 0
+        # 番号(画面は変わったときだけ描き直す・入れ直す)
+        self._revision = 0
+        self._result_revision = 0
+        # 表の中身の番号(REQ-264 §2)。表も変わるときは _result_changed で result_revision と一緒に進める。
+        # AI の答えだけが変わったとき(送る前の確認・答え)は result_revision だけ進め、画面は表・選んでいる行・位置を描き直さない
+        self._rows_revision = 0
+        # 開くタブの番号(REQ-282)。新しい結果を出したとき(_show・_show_opened)だけ進める。前後の行数・単純比較の既定の変更など、
+        # 比べ直さず表だけ描き直すときは進めない(画面は変わったときだけ open_tab のタブを選ぶ)
+        self._open_tab_revision = 0
+        self._fill = 0  # 変わったら、画面は欄に form を入れ直す
+        self._focus_revision = 0
+        self._multi_revision = 0  # 変わったら、画面は一覧の行を作り直す
+        self._serial = 0  # プレビュー・確認・知らせの番号
+        # AI の窓(ADR-0160)。開いている間だけ窓を持つ。どの窓からの呼び出しかはスレッドごとの値で持つ(_call_as)
+        self._ai_window: Any = None
+        self._pane = threading.local()
+        # キャラクターの絵(ADR-0174 決定1)。窓ごとに、描いたときの [gui] character を覚える。
+        # 設定の窓で保存したら捨てて読み直す(ADR-0245 決定2。_forget_characters)。
+        # 鍵は窓("compare"・"ai")。AI の窓を開き直したら、その窓の分だけ読み直す
+        self._characters: dict[str, bool] = {}
+        # 起動したときの状態(クリアも同じ処理で戻す。REQ-388)
+        self._set_start_state()
+        session.watch(self, self._changed)
+
+    def _set_start_state(self) -> None:
+        """窓を起動したときの状態を作る(__init__ とクリア(REQ-388)の両方が通る。ロックの中、または作る途中で呼ぶ)。
+
+        入力・比較の設定の行・結果・AI の会話・この窓だけの一時の設定・知らせの文を、設定のファイルと ui-state.json の値に合わせて作り直す。
+        番号(revision など)・ui-state.json から読んだ値・呼び出しの道具・動いている処理の持ち物には触らない
+        (番号は進め続ける。画面は前より小さい番号の知らせを古いとして捨てるため)。
+        """
+        env, platform, home = self._where["env"], self._where["platform"], self._where["home"]
         self._sources: dict[Side, SideSource | None] = {"before": None, "after": None}
         self._side_views: dict[Side, SideView | None] = {"before": None, "after": None}
         self._summaries: dict[Side, str] = {side: input_summary(None) for side in SIDES}
@@ -953,7 +1077,6 @@ class CompareApi(Api):
         self._raw_values: dict[str, Any] = raw_form_values(
             raw_settings.options, self._raw_context, raw_settings.disabled
         )
-        self._raw_fill = 0
         # REQ-361: 最後に既定を読んだときの値(全部のルール, 無効のルール)。窓を開いたとき・「いつも効く設定に戻す」・保存の知らせで
         # 入れ替えたとき・「いつも効く設定に足す」で更新する。欄の値がこれと違えば「直接書いた値あり」(raw_typed_differs)。
         # _raw_follow は欄の下の帯 {text, load}(load が真ならボタン「いつも効く設定を読み込む」も出す)。
@@ -967,15 +1090,22 @@ class CompareApi(Api):
         self._kind_shown = self._form["kind"]  # 機種の欄を合わせた種類(show から変わったときだけ系統の選択を戻す)
         self._last: tuple[ScreenInput, CompareRequest, CompareOutcome] | None = None
         self._outcome: OutcomeView | None = None  # 表示中の結果
+        # 構造化比較の表で隠している「同じ変更」(REQ-389 / ADR-0255)。隠した鍵の集まりと、だけ表示の鍵(隠すとだけ表示は同時に持たない)。
+        # メモリだけに持ち、設定・ui-state.json・保存・報告書・出力には書かない。新しい結果・クリアで消える(_reset_same)
+        self._same_hidden: frozenset[SameKey] = frozenset()
+        self._same_only: SameKey | None = None
+        # 結果の表の列の絞り込み(REQ-391 / ADR-0256)。構造化比較は列の鍵 → 選んだ表示の文字の集まり(絞っていない列は入れない。
+        # カテゴリのチップもカテゴリの列の絞り込み)、単純比較は印の列で選んだ値の鍵の集まり(絞っていなければ None)。
+        # メモリだけに持ち、設定・ui-state.json・保存・報告書・出力には書かない。新しい結果・クリアで消える(_reset_filters)
+        self._column_filters: dict[str, frozenset[str]] = {}
+        self._raw_mark_filter: frozenset[str] | None = None
         self._llm_text: str | None = None  # LLM 解析の欄の文(作業フォルダの無視の注記を前に足したもの。頭の行は除く)
         self._llm_copy: str | None = None  # 最初の答えのコピーの文(<red> を外した答え。答えが無ければ None)
         self._result_status = ""  # 表示中の結果の状態の文(入力を元に戻したときにステータスへ戻す)
         self._stale = False  # ステータスに「前の入力の結果」と出している
         self._can_save = False
-        self._worker: CompareWorker | None = None
         self._run_kind = RUN_COMPARE  # 走っている(最後に始めた)比較の理由
         self._llm_notes: list[str] = []
-        self._closing = False
         self._status = ["", ""]  # ステータスの左(状態の文)と右(件数の文)
         self._banner: list[str] = []
         self._segment_title = COMPARE_SEGMENTS
@@ -987,9 +1117,6 @@ class CompareApi(Api):
         self._late_notice: dict[str, Any] | None = None  # ワーカーから戻った知らせ(画面は番号で1回だけ出す)
         # 追加の質問(ADR-0081): 答えが届いたやり取り (質問, 回答) の並び・送っている間のワーカー・やり取りの番号(消すと変わる)
         self._turns: list[tuple[str, str]] = []
-        self._asking: _Asking | None = None
-        self._follow_up_epoch = 0
-        self._follow_up_revision = 0
         # 送り先(ADR-0148 決定7): 答えが届いた送信の AI の接続のプロファイル (id, 名前)。組の番号(1組の比較は 0)ごと。
         # 追加の質問の前に今の使用中と比べ、違えば確かめる。待っている確かめは (番号, 今の id, 組の番号)。質問の文は持たない
         self._sent_profiles: dict[int, tuple[str, str]] = {}
@@ -997,29 +1124,18 @@ class CompareApi(Api):
         # 届いたところまでの答え(ADR-0157 決定5〜7): 今読んでいる流れ・画面に出す途中の答え・知らせの番号(増え続ける)
         self._stream: _AnswerStream | None = None
         self._partial: dict[str, Any] | None = None
-        self._partial_revision = 0
         # 全部の答えが届いた後に残す考え(ADR-0169 決定4): {"text", "cut", "cut_note", "target", "revision"}。保存しない。
         # 番号は移すたびに進む(画面は同じ番号なら開き具合を変えない)
         self._thinking: dict[str, Any] | None = None
-        self._thinking_revision = 0
         # API が返したエラーの文(ADR-0168 決定5): {"text", "retry_after", "target"}(掃除した後の文。保存しない)・
         # 今の送信の受け取り口(これ以外から届いたものは捨てる)・折りたたみを閉じ直す番号(入れるたびに進む)
         self._api_error: dict[str, Any] | None = None
         self._api_error_sink: _ApiErrorSink | None = None
-        self._api_error_revision = 0
-        # 解析の前に打った文の欄を空にする番号(承認して送った答えが届いたときだけ増やす。REQ-206 §6)
-        self._instruction_clear = 0
         # 「差分＋全文を送る」(ADR-0158): チェックの状態(窓の間だけ。新しく比較を始める・入力を変えると偽)・
         # 最初の解析で全文を送ったか(組の番号ごと)・追加の質問で作った全文(組の番号ごと)・送信前の確認で確かめた組の番号・
         # 待っている追加の質問の確認 (番号, 送る文, 質問, client, 結果, 組の番号, やり取りの番号, 秘密の語)。
         # 質問の文は確認を待っている間だけ持ち、答えたら・やり取りを消したら・窓を閉じたら消す(ログ・例外・知らせに入れない)
         self._full_text = False
-        # 開いたときの左の面の割合(null は初めの幅)と AI の欄を隠すか(REQ-370。窓の配置のファイル ui-state.json から 1 回だけ読む。REQ-374)。
-        # _ai_hidden は自動送信が始まる・一括比較の答えが付くと偽に戻す(ファイルには書かない)。
-        # _remembered_* は最後に読んだ・書いた値(同じ値なら書かないために持つ)
-        self._split_left, self._ai_hidden = load_compare_layout(ui_state_path(**self._where_user()))
-        self._remembered_split: float | None = self._split_left
-        self._remembered_hidden: bool = self._ai_hidden
         self._first_full_text: dict[int, bool] = {}
         self._after_sections: dict[int, AfterText] = {}
         self._full_text_confirmed: set[int] = set()
@@ -1067,7 +1183,6 @@ class CompareApi(Api):
         # _row_prefill は AI の欄に決まった質問を入れる合図の番号(行を覚えるたびに進む。画面は変わったときだけ入れる)
         self._shown_row: _Row | None = None
         self._answer_row: _Row | None = None
-        self._row_prefill = 0
         self._answer_target: _Target | None = None
         self._llm_holder: tuple[int, LlmAnalysis | None] | None = None
         self._preview_ask: _AskMeta | None = None
@@ -1085,39 +1200,16 @@ class CompareApi(Api):
         self._pair_views: dict[int, OutcomeView] = {}
         self._unpaired_note: str | None = None
         # 「全部」のタブ(ADR-0152 決定7)の行の番号と、作った行(番号ごとに1回だけ作る)。行に合うタブ(決定8)とその番号
-        self._all_revision = 0
         self._all_rows: tuple[int, list[AllRow]] | None = None
         # 違う文字の印(ADR-0165 / REQ-226)。求めた元(表示中の結果の view か「全部」のタブの行の並び)と印の組。
         # 元が同じもの(is)の間は使い回し、変わったときだけ求め直す
         self._view_marks: tuple[OutcomeView, list[dict[str, Any]], list[dict[str, Any]]] | None = None
         self._all_marks: tuple[list[AllRow], list[dict[str, Any]]] | None = None
         self._tab = TAB_ALL
-        self._tab_revision = 0
-        # 番号(画面は変わったときだけ描き直す・入れ直す)
-        self._revision = 0
-        self._result_revision = 0
-        # 表の中身の番号(REQ-264 §2)。表も変わるときは _result_changed で result_revision と一緒に進める。
-        # AI の答えだけが変わったとき(送る前の確認・答え)は result_revision だけ進め、画面は表・選んでいる行・位置を描き直さない
-        self._rows_revision = 0
-        # 開くタブの番号(REQ-282)。新しい結果を出したとき(_show・_show_opened)だけ進める。前後の行数・単純比較の既定の変更など、
-        # 比べ直さず表だけ描き直すときは進めない(画面は変わったときだけ open_tab のタブを選ぶ)
-        self._open_tab_revision = 0
-        self._fill = 0  # 変わったら、画面は欄に form を入れ直す
-        self._focus_revision = 0
-        self._multi_revision = 0  # 変わったら、画面は一覧の行を作り直す
-        self._serial = 0  # プレビュー・確認・知らせの番号
-        # AI の窓(ADR-0160)。開いている間だけ窓を持つ。どの窓からの呼び出しかはスレッドごとの値で持つ(_call_as)
-        self._ai_window: Any = None
-        self._pane = threading.local()
-        # キャラクターの絵(ADR-0174 決定1)。窓ごとに、描いたときの [gui] character を覚える。
-        # 設定の窓で保存したら捨てて読み直す(ADR-0245 決定2。_forget_characters)。
-        # 鍵は窓("compare"・"ai")。AI の窓を開き直したら、その窓の分だけ読み直す
-        self._characters: dict[str, bool] = {}
         # この窓で一度でも比べたか(始めた・保存した結果を開いた・一括比較から受け取った)。空の窓の絵に使う(ADR-0174 決定2)
         self._compared_once = False
         # 複数の機器の知らせ(REQ-267): 比べたときの入力ごとに 1 回だけ求める (入力, 知らせか None)。入力が変わったときだけ作り直す
         self._devices_cache: tuple[ScreenInput, DeviceNotice | None] | None = None
-        session.watch(self, self._changed)
 
     def _attach(self, window: Any) -> None:
         """pywebview の窓(知らせ・閉じる・ファイルのダイアログに使う)。WebSession.attach_compare が渡す。"""
@@ -1153,6 +1245,14 @@ class CompareApi(Api):
         """「中止」。工程の境目で止まる。"""
         return self._call(self._cancel)
 
+    def clear(self) -> dict[str, Any]:
+        """「クリア」(ADR-0254 / REQ-388)。選んだファイル・比較の結果・AI の会話を消し、窓を起動したときの状態に戻す。
+
+        比較の設定の行は設定の窓で決めた既定の値に戻る。ui-state.json の値(境目・AI の欄を隠しているか)と設定のファイルは変えない。
+        比較中・AI の答え待ち・閉じている途中は、何も変えずに ok: false と理由の文を返す。確かめ(結果か AI の会話があるとき)は画面が出す。
+        """
+        return self._call(self._clear)
+
     def send_llm(self, form: Any, instruction: Any = "") -> dict[str, Any]:
         """「定型の質問で解析」。持っている結果から AI の解析だけを行い、送信前のプレビューで止まる(確認なしに送らない。ADR-0080 決定1)。
 
@@ -1172,6 +1272,57 @@ class CompareApi(Api):
         行は覚えない。覚えたら入力欄に決まった質問を入れる合図(view.ai.prefill)を進める。
         """
         return self._call(self._shown_changed, form, tab, category, row)
+
+    def hide_same(self, form: Any, index: Any) -> dict[str, Any]:
+        """構造化比較の表の行の右クリック「同じ変更を隠す」(REQ-389 §3 / ADR-0255 決定2)。
+
+        index は構造化比較の行(result の structured_rows)の番号。その行と同じ鍵の行を、隠す鍵の集まりに足す(何回でも重ねられる)。
+        結果が無い・番号が範囲の外・同じ鍵の行が 1 行だけ・だけ表示をしている間は、何も変えずに今の view を返す。番号の型が違えば形の誤り。
+        見せ方だけを変える(行・保存・報告書・設定・ui-state.json は変えない)。隠した行は view.same_changes で返す。
+        """
+        return self._call(self._hide_same, form, index)
+
+    def only_same(self, form: Any, index: Any) -> dict[str, Any]:
+        """構造化比較の表の行の右クリック「同じ変更だけ表示」(REQ-389 §3)。index の行の鍵の行だけを残す(隠す鍵の集まりは空になる)。
+
+        何も変えない場面と形の誤りは hide_same と同じ。
+        """
+        return self._call(self._only_same, form, index)
+
+    def show_all_same(self, form: Any) -> dict[str, Any]:
+        """表の上の「戻す」(REQ-389 §4)。隠している同じ変更を全部戻す。"""
+        return self._call(self._show_all_same, form)
+
+    def column_values(self, form: Any, table: Any, column: Any, search: Any = "") -> dict[str, Any]:
+        """見出しの絞り込みの窓に出す、列の値の一覧(REQ-391 §3・§4 / ADR-0256 決定2・3)。状態は変えない。
+
+        table は "structured"(列は op・category・target_item・before・after)か "raw"(列は mark だけ)。search は検索の欄の文字
+        (大文字小文字を区別せず、表示の文字を含む値だけを残す)。返すのは `column`:
+        {items: [{value, label, count, checked}](件数の多い順、同じ件数は名前の順。1,000 種類まで)、over(超えたか)、over_text、column_label}。
+        検索があるときの checked は全部真。結果が無い・列の名前を知らないときは、今の view だけを返す。型が違えば形の誤り。
+        """
+        return self._call(self._column_values, form, table, column, search)
+
+    def set_column_filter(self, form: Any, table: Any, column: Any, search: Any, values: Any) -> dict[str, Any]:
+        """窓の「OK」(REQ-391 §3)。values は窓でチェックした値(column_values の items の value)の一覧。
+
+        検索が空なら一覧に出した値はチェックのとおりに、出なかった値は今の選択のまま。検索があれば当たってチェックした値だけを残す。
+        全部の値が選ばれていれば、その列は絞っていない扱い。1 つも選ばれていなければ何も変えない。
+        結果が無い・列の名前を知らないときも何も変えない。型が違えば形の誤り。見せ方だけを変える(設定・ui-state.json・保存・報告書は変えない)。
+        """
+        return self._call(self._set_column_filter, form, table, column, search, values)
+
+    def filter_category(self, form: Any, value: Any) -> dict[str, Any]:
+        """カテゴリのチップ(REQ-391 §3)。value が None(「すべて」)ならカテゴリの列の絞り込みを外し、今の表にあるカテゴリなら
+        カテゴリの列をその 1 つにする(ほかは何も変えない)。型が違えば形の誤り。
+        """
+        return self._call(self._filter_category, form, value)
+
+    def clear_column_filters(self, form: Any, table: Any) -> dict[str, Any]:
+        """表の上の「すべて解除」(REQ-391 §5)。structured なら全部の列とカテゴリのチップの絞り込みを、raw なら印の列の絞り込みを外す。
+        同じ変更を隠す(REQ-389)には触らない。
+        """
+        return self._call(self._clear_column_filters, form, table)
 
     def ask_shown(self, form: Any, question: Any) -> dict[str, Any]:
         """「表示中の差分に質問」。今表示している差分だけに質問を送る(REQ-312 §4 / ADR-0218 決定2〜5)。
@@ -1321,12 +1472,13 @@ class CompareApi(Api):
         """「結果を保存…」。"""
         return self._call(self._save, form)
 
-    def export_result(self, form: Any, kind: Any) -> dict[str, Any]:
+    def export_result(self, form: Any, kind: Any, masked: Any = True) -> dict[str, Any]:
         """「HTML・CSV で出力…」(ADR-0156)。kind は "html"・"csv"・"csv_pairs"(組の一覧はまとめて比べたときだけ)。
 
-        秘密の行は AI に送るときと同じ判定で必ず伏せる(伏せずに出す口は無い)。上書きしない。
+        秘密の行は AI に送るときと同じ判定で伏せる。masked を偽にしたときだけ、判定に通さず画面と同じ値で出す(ADR-0257。
+        省いたときは伏せる。真偽値でなければ形の誤り)。上書きしない。
         """
-        return self._call(self._export_result, form, kind)
+        return self._call(self._export_result, form, kind, masked)
 
     def open_result(self, form: Any) -> dict[str, Any]:
         """「結果を開く…」。窓のファイルのダイアログで選んだ保存した結果を、読むだけで表示する(REQ-120)。"""
@@ -1556,6 +1708,51 @@ class CompareApi(Api):
         """比較中か、追加の質問を送っている間(どちらも門を持っている)。"""
         return self._worker is not None or self._asking is not None
 
+    def _has_result(self) -> bool:
+        """ロックの中で呼ぶ。消せる比較の結果があるか(1 組・まとめての比較・開いた保存の結果)。"""
+        return (
+            self._last is not None
+            or self._multi is not None
+            or self._mview is not None
+            or self._outcome is not None
+            or self._opened is not None
+            or self._opened_saved is not None
+        )
+
+    def _has_conversation(self) -> bool:
+        """ロックの中で呼ぶ。消せる AI の会話があるか(届いた答え・追加の質問のやり取り・途中の答え・考え・API のエラーの文・送る前の確認)。"""
+        return (
+            self._first_answer() is not None
+            or bool(self._turns)
+            or self._partial is not None
+            or self._stream is not None
+            or self._thinking is not None
+            or self._api_error is not None
+            or self._preview is not None
+            or self._follow_up_preview is not None
+        )
+
+    def _clear_reason(self) -> str | None:
+        """ロックの中で呼ぶ。「クリア」を押せない理由の文(押せるときは None。ADR-0254 決定1・4 / REQ-388 §5)。
+
+        動いている間(比較・追加の質問・AI の答え待ち。「中止」を頼んだ後でまだ止まっていない間も)と、閉じている途中は押せない。
+        消すもの(入力・結果・AI の会話のどれか)が無ければ押せない。比較の設定の行だけを変えた状態は「消すもの無し」(入力ではない)。
+        """
+        if self._busy() or self._closing:
+            return COMPARE_CLEAR_BUSY
+        if not any(self._sources.values()) and not self._has_result() and not self._has_conversation():
+            return COMPARE_CLEAR_NOTHING
+        return None
+
+    def _clear_view(self) -> dict[str, Any]:
+        """ロックの中で呼ぶ。view の can_clear・clear_reason・clear_confirm(確かめが要るのは、結果か AI の会話があるとき。入力だけなら要らない)。"""
+        reason = self._clear_reason()
+        return {
+            "can_clear": reason is None,
+            "clear_reason": reason,
+            "clear_confirm": reason is None and (self._has_result() or self._has_conversation()),
+        }
+
     def _busy_place(self) -> str | None:
         """ロックの中で呼ぶ。動いている処理の表示の場所(ADR-0164 決定5)。結果の面 "result"・AI の面 "ai"・無し None。
 
@@ -1650,6 +1847,272 @@ class CompareApi(Api):
             for k, p in enumerate(outcome.pairs)
         ]
         return dataclasses.replace(outcome, pairs=pairs)
+
+    def _reset_same(self) -> None:
+        """ロックの中で呼ぶ。隠している「同じ変更」を全部戻す(新しい結果・クリア。REQ-389 §5)。"""
+        self._same_hidden = frozenset()
+        self._same_only = None
+
+    def _same_hiding(self) -> bool:
+        return bool(self._same_hidden) or self._same_only is not None
+
+    def _same_view(self) -> dict[str, Any] | None:
+        """ロックの中で呼ぶ。view の same_changes。隠していなければ None。
+
+        {rows_revision(どの表に対する値か), hidden(隠す行の番号の一覧。structured_rows の番号), only(だけ表示か), text(表の上の文)}。
+        件数は今の結果の中の数で、カテゴリの絞り込みにはかかわらない。
+        """
+        view = self._outcome
+        if view is None or not self._same_hiding():
+            return None
+        rows = view.structured_rows
+        count, kinds = same_counts_of(rows, self._same_hidden, self._same_only)
+        if count == 0:
+            return None
+        only = self._same_only is not None
+        return {
+            "rows_revision": self._rows_revision,
+            "hidden": same_hidden_rows(rows, self._same_hidden, self._same_only),
+            "only": only,
+            "text": compare_same_only(count) if only else compare_same_hidden(count, kinds),
+        }
+
+    def _same_skip(self) -> tuple[int, ...] | None:
+        """ロックの中で呼ぶ。表示中の差分への質問で送らない構造化差分の位置(隠している行。隠していなければ None)。"""
+        view = self._outcome
+        if view is None or not self._same_hiding():
+            return None
+        rows = same_hidden_rows(view.structured_rows, self._same_hidden, self._same_only)
+        return tuple(rows) if rows else None
+
+    def _same_target(self, index: Any) -> tuple[SameKey, int] | None:
+        """ロックの中で呼ぶ。index の行の鍵と、同じ鍵の行の数 N。結果が無い・番号が範囲の外・N が 1 なら None。形が違えば _BadRequest。"""
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise _BadRequest
+        view = self._outcome
+        if view is None or not 0 <= index < len(view.structured_rows):
+            return None
+        keys = same_change_keys(view.structured_rows)
+        count = sum(1 for key in keys if key == keys[index])
+        return (keys[index], count) if count >= 2 else None
+
+    def _hide_same(self, form: Any, index: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            target = self._same_target(index)
+            if target is not None and self._same_only is None:
+                self._same_hidden = self._same_hidden | {target[0]}
+            return self._ok()
+
+    def _only_same(self, form: Any, index: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            target = self._same_target(index)
+            if target is not None and self._same_only is None:
+                self._same_hidden = frozenset()
+                self._same_only = target[0]
+            return self._ok()
+
+    def _show_all_same(self, form: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            self._reset_same()
+            return self._ok()
+
+    # --- 結果の表の列の絞り込み(REQ-391 / ADR-0256) ---
+
+    def _reset_filters(self) -> None:
+        """ロックの中で呼ぶ。列の絞り込みを全部外す(新しい結果・保存した結果を開く・別の組・結果を消す。REQ-391 §2)。
+
+        カテゴリのチップも外れるので、構造化比較のタブを表示中なら、答えの対象のカテゴリも「絞っていない」に合わせる。
+        """
+        self._column_filters = {}
+        self._raw_mark_filter = None
+        self._sync_shown_category()
+
+    def _chip(self) -> str | None:
+        """ロックの中で呼ぶ。カテゴリの列を 1 つだけに絞っているときのそのカテゴリ(チップ)。絞っていない・2 つ以上なら None。"""
+        selected = self._column_filters.get("category")
+        if selected is not None and len(selected) == 1:
+            return next(iter(selected))
+        return None
+
+    def _sync_shown_category(self) -> None:
+        """ロックの中で呼ぶ。構造化比較のタブを表示中なら、答えの対象のカテゴリ(_shown の 2 つ目)をカテゴリの列の絞り込みに合わせる。
+        1 つだけ選んでいればその値、それ以外は None。画面の知らせ(shown_changed)を待たずに、対象が 1 回で決まる。
+        """
+        tab, _category = self._shown
+        if tab == "structured":
+            self._shown = (tab, self._chip())
+
+    def _drop_hidden_shown_row(self) -> None:
+        """ロックの中で呼ぶ。印の列の絞り込みで、1 行だけを聞く対象の行(_shown_row)が隠れたら、選んでいない状態にする。"""
+        view = self._outcome
+        if self._shown_row is None or view is None or self._raw_mark_filter is None:
+            return
+        hidden = set(raw_hidden(view.raw_rows, self._raw_mark_filter))
+        for k, row in enumerate(view.raw_rows):
+            if (row.before_no, row.after_no) == self._shown_row and k in hidden:
+                self._shown_row = None
+                return
+
+    def _filter_source(self, table: Any, column: Any, search: Any) -> _FilterSource | None:
+        """ロックの中で呼ぶ。絞り込みの窓の材料(列の値・今の選択・名前)。結果が無い・列を知らなければ None。型が違えば _BadRequest。"""
+        if not isinstance(table, str) or not isinstance(column, str) or not isinstance(search, str):
+            raise _BadRequest
+        view = self._outcome
+        if view is None:
+            return None
+        if table == "structured" and column in STRUCTURED_COLUMNS:
+            cells = [structured_cell(row, column) for row in view.structured_rows]
+            return _FilterSource(
+                cells,
+                OP_FIXED if column == "op" else (),
+                None,
+                None,
+                self._column_filters.get(column),
+                _structured_labels()[column],
+            )
+        if table == "raw" and column == "mark":
+            cells = [raw_mark_value(row) for row in view.raw_rows]
+            return _FilterSource(
+                cells,
+                RAW_MARK_VALUES,
+                COMPARE_FILTER_RAW_VALUES,
+                RAW_MARK_VALUES,
+                self._raw_mark_filter,
+                GUI_WEB_TEXTS["compare.raw.col.mark"],
+            )
+        return None
+
+    def _column_values(self, form: Any, table: Any, column: Any, search: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            source = self._filter_source(table, column, search)
+            if source is None:
+                return self._ok()
+            listing = value_list(
+                source.cells,
+                None if search != "" else source.current,
+                search,
+                source.fixed,
+                source.labels,
+                source.ordered,
+            )
+            return self._ok(
+                column={
+                    **listing,
+                    "over_text": COMPARE_FILTER_OVER if listing["over"] else None,
+                    "column_label": source.label,
+                }
+            )
+
+    def _set_column_filter(self, form: Any, table: Any, column: Any, search: Any, values: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            source = self._filter_source(table, column, search)
+            if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+                raise _BadRequest
+            if source is None:
+                return self._ok()
+            everything = frozenset(source.cells) | frozenset(source.fixed)
+            shown = [
+                item["value"]
+                for item in value_list(source.cells, None, search, source.fixed, source.labels, source.ordered)["items"]
+            ]
+            chosen = next_selection(everything, shown, values, source.current, search)
+            if table == "structured":
+                if chosen is None:
+                    self._column_filters.pop(column, None)
+                else:
+                    self._column_filters[column] = chosen
+                if column == "category":
+                    self._sync_shown_category()
+            else:
+                self._raw_mark_filter = chosen
+                self._drop_hidden_shown_row()
+            return self._ok()
+
+    def _filter_category(self, form: Any, value: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            if value is not None and not isinstance(value, str):
+                raise _BadRequest
+            view = self._outcome
+            if view is None:
+                return self._ok()
+            if value is None:
+                self._column_filters.pop("category", None)
+            elif value in {name for name, _count in category_counts(view.structured_rows)}:
+                self._column_filters["category"] = frozenset({value})
+            else:
+                return self._ok()
+            self._sync_shown_category()
+            return self._ok()
+
+    def _clear_column_filters(self, form: Any, table: Any) -> dict[str, Any]:
+        with self._lock:
+            self._take(form)
+            if table == "structured":
+                self._column_filters = {}
+                self._sync_shown_category()
+            elif table == "raw":
+                self._raw_mark_filter = None
+            else:
+                raise _BadRequest
+            return self._ok()
+
+    def _filters_view(self) -> dict[str, Any] | None:
+        """ロックの中で呼ぶ。view の column_filters。何も絞っていなければ None。
+
+        {rows_revision(どの表に対する値か), structured, raw}。structured は絞っていなければ None:
+        {hidden(列の絞り込みで隠す行の番号。カテゴリの列も含む), active(絞っている列の鍵), chip(カテゴリを 1 つだけ選んでいるときのその値),
+        chips_none(カテゴリを 2 つ以上選んでいるか), text(表の上の文)}。raw は絞っていなければ None:
+        {hidden(隠す行の番号), text, blocked_reason(差分のみ表示・無視した行…が使えない理由)}。
+        """
+        view = self._outcome
+        if view is None:
+            return None
+        structured = None
+        if self._column_filters:
+            chip = self._chip()
+            active = [column for column in STRUCTURED_COLUMNS if column in self._column_filters]
+            labels = _structured_labels()
+            structured = {
+                "hidden": structured_hidden(view.structured_rows, self._column_filters),
+                "active": active,
+                "chip": chip,
+                "chips_none": "category" in self._column_filters and chip is None,
+                "text": compare_filtered([labels[column] for column in active]),
+            }
+        raw = None
+        if self._raw_mark_filter is not None:
+            raw = {
+                "hidden": raw_hidden(view.raw_rows, self._raw_mark_filter),
+                "text": compare_filtered([GUI_WEB_TEXTS["compare.raw.col.mark"]]),
+                "blocked_reason": COMPARE_FILTER_RAW_BLOCKED,
+            }
+        if structured is None and raw is None:
+            return None
+        return {"rows_revision": self._rows_revision, "structured": structured, "raw": raw}
+
+    def _structured_skip_rows(self) -> set[int]:
+        """ロックの中で呼ぶ。表示中の差分への質問で送らない構造化比較の行の番号。同じ変更で隠した行と、列の絞り込み(カテゴリの列を含む)で隠した行。"""
+        view = self._outcome
+        if view is None:
+            return set()
+        skipped = set(self._same_skip() or ())
+        skipped.update(structured_hidden(view.structured_rows, self._column_filters))
+        return skipped
+
+    def _raw_skip(self, raw: Any) -> tuple[int, ...] | None:
+        """ロックの中で呼ぶ。表示中の差分への質問で送らない行の差分の位置(印の列の絞り込みで隠した行の差分。無ければ None)。"""
+        view = self._outcome
+        if view is None or self._raw_mark_filter is None:
+            return None
+        hidden = set(raw_hidden(view.raw_rows, self._raw_mark_filter))
+        skip = raw_skip_positions(view.raw_rows, hidden, raw.diffs)
+        return skip or None
 
     def _reset_shown(self) -> None:
         """ロックの中で呼ぶ。画面が知らせた表示中の差分(タブ・カテゴリ・1 行だけの対象)を、既定の「構造化比較のタブ・絞り込み無し」に戻す。"""
@@ -1912,18 +2375,38 @@ class CompareApi(Api):
             command = self._mview.entries[position].row.name if position < len(self._mview.entries) else None
         assert outcome is not None
         if tab == "structured":
+            # 構造化比較の表で隠している行は送らない(REQ-389 §5・REQ-391 §6。構造化差分の番号は表の行の番号と同じ)。
+            # 同じ変更で隠した行と、列の絞り込み(カテゴリの列を含む)で隠した行を合わせる。カテゴリを 1 つに絞ったときは、
+            # カテゴリの送り方(category)でもともと除かれる別のカテゴリの行を引くので、skip は付かず今と同じ送り方になる
+            skipped_rows = self._structured_skip_rows()
+            if outcome.structured is not None and category is not None:
+                skipped_rows -= {i for i, d in enumerate(outcome.structured.diffs) if d["category"] != category}
+            skip = tuple(sorted(skipped_rows)) if skipped_rows else None
+            skipped = frozenset(skipped_rows)
             if outcome.structured is not None:
-                count = sum(1 for d in outcome.structured.diffs if category is None or d["category"] == category)
+                count = sum(
+                    1
+                    for i, d in enumerate(outcome.structured.diffs)
+                    if (category is None or d["category"] == category) and i not in skipped
+                )
                 kind, sent_category = "structured", category
             elif outcome.show is not None and outcome.show.method in ("structured", "both"):
-                count, kind, sent_category = len(outcome.show.diffs), "show", None
+                count = sum(1 for i, _d in enumerate(outcome.show.diffs) if i not in skipped)
+                kind, sent_category = "show", None
             else:
                 count, kind, sent_category = 0, "structured", None
             text = compare_ai_target("structured", category, command)
             if count == 0:
                 return _ShownInfo(False, COMPARE_AI_SHOWN_NO_DIFF, target=target, text=text)
             return _ShownInfo(
-                True, prefer="structured", category=sent_category, kind=kind, target=target, position=position, text=text
+                True,
+                prefer="structured",
+                category=sent_category,
+                kind=kind,
+                target=target,
+                position=position,
+                text=text,
+                skip=skip,
             )
         raw = outcome.raw if outcome.raw is not None else (outcome.show.raw if outcome.show is not None else None)
         row = self._shown_row if tab == "raw" and category is None else None
@@ -1944,9 +2427,13 @@ class CompareApi(Api):
             return _ShownInfo(
                 True, prefer="raw", kind="raw", target=target, position=position, text=text, raw_lines=row
             )
-        if not raw.diffs:
+        # 印の列の絞り込みで隠した行の差分は送らない(REQ-391 §6)。0 件なら今の「表示している差分がありません」と同じ
+        skip_raw = self._raw_skip(raw)
+        if len(raw.diffs) - len(skip_raw or ()) <= 0:
             return _ShownInfo(False, COMPARE_AI_SHOWN_NO_DIFF, target=target, text=text)
-        return _ShownInfo(True, prefer="raw", kind="raw", target=target, position=position, text=text)
+        return _ShownInfo(
+            True, prefer="raw", kind="raw", target=target, position=position, text=text, skip_raw=skip_raw
+        )
 
     def _current_input(self) -> ScreenInput | None:
         """いまの画面の入力。両側の入力がそろっていなければ None。
@@ -2124,6 +2611,8 @@ class CompareApi(Api):
             "can_send_llm": self._can_send_llm(),
             "can_cancel": (worker is not None and not worker.cancel_requested)
             or (self._asking is not None and not self._asking.cancelled),
+            # 「クリア」(ADR-0254 / REQ-388)。押せるか・押せない理由(押せるときは null)・押したとき確かめが要るか(結果か AI の会話があるとき)
+            **self._clear_view(),
             "command_enabled": is_show and not busy,
             "can_jump": self._outcome is not None and any(row.is_diff for row in self._outcome.raw_rows),
             # 単純比較の既定のファイルを読めないときの帯(RAW_DEFAULTS_UNREADABLE)は、結果の帯の後ろにつなぐ
@@ -2176,6 +2665,13 @@ class CompareApi(Api):
             },
             # この窓だけの「比べない列」(REQ-367 §3。大文字の名前の並び)。単純比較の設定の欄(raw_options)の値には入れない
             "skip_columns": list(self._skip_columns),
+            # 構造化比較の表で隠している同じ変更(REQ-389 §3・§4)。隠していなければ null。
+            # {rows_revision, hidden(隠す行の番号), only(だけ表示か), text(表の上の文)}。ui-state.json・設定・保存には入れない
+            "same_changes": self._same_view(),
+            # 結果の表の列の絞り込み(REQ-391 §2・§3・§4・§5)。何も絞っていなければ null。
+            # {rows_revision, structured: {hidden, active, chip, chips_none, text} | null, raw: {hidden, text, blocked_reason} | null}。
+            # ui-state.json・設定・保存には入れない
+            "column_filters": self._filters_view(),
             # 設定の窓で保存した設定を受けたとき・「いつも効く設定に足す」で足したときの帯 {text, load}(REQ-361)。無ければ null
             "raw_follow": dict(self._raw_follow) if self._raw_follow is not None else None,
             # 窓の下の行に出す、使っている単純比較の設定の要約(ADR-0166 決定11-1)。既定なら null
@@ -2550,6 +3046,8 @@ class CompareApi(Api):
         llm は view の元の AI 解析(429 の待つ秒を AI の面の行に出すときだけ使う。ADR-0168 決定4)。
         """
         self._outcome = view
+        self._reset_same()  # 新しい結果では、隠していた同じ変更を戻す(REQ-389 §5)
+        self._reset_filters()  # 列の絞り込みも外す(REQ-391 §2)
         self._open_tab_revision += 1
         self._result_changed()
         # 窓の下の文は、差分ありの内訳を添えた pywebview の文(REQ-113 §3。wx は status_text のまま)
@@ -2629,6 +3127,8 @@ class CompareApi(Api):
         """
         self._opened = band
         self._outcome = view
+        self._reset_same()  # 保存した結果を開くと、隠していた同じ変更を戻す(REQ-389 §5)
+        self._reset_filters()  # 列の絞り込みも外す(REQ-391 §2)
         self._open_tab_revision += 1
         self._result_changed()
         self._result_status = view.status_text_web
@@ -2684,8 +3184,11 @@ class CompareApi(Api):
         self._result_changed()
         main = self._status[0] if self._busy() else mv.overall
         notes = self._llm_notes if self._opened is None else []
+        previous = self._outcome
         if entry.outcome is None:
             self._outcome = None
+            self._reset_same()
+            self._reset_filters()
             self._unpaired_note = entry.note
             self._status = [main, entry.row.status]
             self._banner = []
@@ -2695,6 +3198,9 @@ class CompareApi(Api):
         if view is None:
             view = self._pair_views[self._pair] = view_outcome(entry.outcome)
         self._outcome = view
+        if view is not previous:
+            self._reset_same()  # 表示する組の結果が前と別のとき(同じ組を押し直しただけでは消さない。REQ-389 §5)
+            self._reset_filters()  # 列の絞り込みも同じ(REQ-391 §2)
         self._unpaired_note = None
         self._status = [main, view.status_text_web]
         banner = list(view.banner)
@@ -2946,6 +3452,8 @@ class CompareApi(Api):
     def _clear_result(self) -> None:
         """ロックの中で呼ぶ。表示中の結果を消して「結果なし」に戻す(表・タブの題・AI の文・保存の可否)。区間の選択肢は残す。"""
         self._outcome = None
+        self._reset_same()
+        self._reset_filters()
         self._last = None
         self._drop_multi()
         self._llm_text = None
@@ -3280,7 +3788,14 @@ class CompareApi(Api):
                 return self._follow_up_notice(follow_up_refused(refused, MAX_QUESTION_CHARS))
             assert info.kind is not None and info.target is not None
             plan = with_question(
-                plan, question, info.prefer, info.category, info.kind, info.raw_lines  # type: ignore[arg-type]
+                plan,
+                question,
+                info.prefer,  # type: ignore[arg-type]
+                info.category,
+                info.kind,
+                info.raw_lines,
+                info.skip,
+                info.skip_raw,
             )
             # 差分＋全文は付けない(表示中の差分だけを聞く。ADR-0218 決定2)。自動送信の設定は読まず、いつも確認を出す(決定5)
             sink = _PartsSink()
@@ -3485,6 +4000,30 @@ class CompareApi(Api):
             if self._asking is not None:
                 # 送った要求は止められない。答えが届くまで門を持ち、届いた答えは捨てる(比較の「中止」が工程の境目まで待つのと同じ)
                 self._asking.cancelled = True
+            return self._ok()
+
+    def _clear(self) -> dict[str, Any]:
+        with self._lock:
+            if self._busy() or self._closing:
+                return _failure(COMPARE_CLEAR_BUSY)  # 動いている間は何も変えない(先に「中止」)
+            self._set_start_state()
+            # 配置は ui-state.json の値(最後に読んだ・書いた値)に合わせる。ファイルは読まず、書かない。
+            # 自動送信や一括比較の答えでひとりでに出した AI の欄(ファイルには書かない値)は、利用者の好みではないので隠し直す
+            self._ai_hidden = self._remembered_hidden
+            self._split_left = self._remembered_split
+            # 番号は進める(戻さない)。画面は前より小さい番号を古いとして捨てるので、進めたものを見て描き直す
+            self._fill += 1  # 比較方式・種類・機種・コマンド・区間の欄の入れ直し
+            self._raw_fill += 1  # 単純比較の設定の欄の入れ直し
+            self._result_changed()  # 結果の表と空の窓の絵(never_compared)の描き直し
+            self._open_tab_revision += 1  # 構造化比較の並べ替えを元の順へ
+            self._multi_revision += 1  # まとめての比較の一覧
+            self._all_revision += 1  # 「全部」のタブ
+            self._tab_revision += 1
+            self._partial_revision += 1  # 途中の答え・考え(後から届く古い知らせは捨てる)
+            self._api_error_revision += 1
+            self._follow_up_epoch += 1  # 追加の質問のやり取り(後から届く古い答えは捨てる)
+            self._follow_up_revision += 1
+            self._instruction_clear += 1  # AI の質問の欄を空にする(比較の窓も別の窓の AI の欄も)
             return self._ok()
 
     # --- ワーカーのスレッドから(状態はロックの中だけ。知らせはロックの外) ---
@@ -4868,6 +5407,7 @@ class CompareApi(Api):
                     "structured_detail": None,
                     "structured_rows": [],
                     "structured_op_keys": [],
+                    "structured_same_counts": [],
                     "structured_columns": [],
                     "can_find_source": False,
                     "raw_note": None,
@@ -4916,6 +5456,8 @@ class CompareApi(Api):
                     ],
                     # 操作の列の印の鍵(REQ-276)。structured_rows と同じ数・同じ順。行の形は変えず、別のキーで渡す
                     "structured_op_keys": [row.op_key for row in view.structured_rows],
+                    # 行ごとの「同じ変更」の行の数 N(REQ-389。structured_rows と同じ数・同じ順。鍵は Python が決め、窓は N だけを使う)
+                    "structured_same_counts": same_change_counts(view.structured_rows),
                     # 右クリックの項目(REQ-367)。structured_columns は構造化比較の行ごとの、show の表の変更の行の変わった列の名前
                     # (ほかの行は空。structured_rows と同じ数・同じ順)、can_find_source は単純比較の結果があって元の行を探せるか
                     "structured_columns": view.structured_columns,
@@ -5008,6 +5550,9 @@ class CompareApi(Api):
                 raise _BadRequest
             if isinstance(step, bool) or step not in (1, -1):
                 raise _BadRequest
+            if self._raw_mark_filter is not None:
+                # 印の列で絞っている間は、見えている差分の行の間だけで動く(REQ-391 §4)
+                return self._ok(row=find_visible_diff(rows, set(raw_hidden(rows, self._raw_mark_filter)), current, step))
             return self._ok(row=find_diff(rows, current, step))
 
     # --- 保存(ADR-0017。自動保存はしない) ---
@@ -5131,30 +5676,35 @@ class CompareApi(Api):
             self._status[0] = saved
             return self._ok()
 
-    # --- HTML と CSV の出力(ADR-0156 / REQ-216。上書きしない。秘密の行は必ず伏せる) ---
+    # --- HTML と CSV の出力(ADR-0156 / REQ-216。上書きしない。既定は伏せる。masked が偽のときだけ伏せない。ADR-0257) ---
 
     def _export_ready(self, inp: ScreenInput | None) -> bool:
         """ロックの中で呼ぶ。出力してよいか(押せる状態で、閉じている途中でなく、入力が比較したときと同じ)。"""
         return self._can_export() and not self._closing and inp is not None and is_current(inp, self._current_input())
 
-    def _export_result(self, form: Any, kind: Any) -> dict[str, Any]:
+    def _export_result(self, form: Any, kind: Any, masked: Any = True) -> dict[str, Any]:
         with self._lock:
             self._take(form)
             if not isinstance(kind, str) or kind not in EXPORT_KINDS:
                 raise _BadRequest
+            if type(masked) is not bool:
+                raise _BadRequest  # 伏せるかは真偽値だけ(ADR-0257)
             if kind == EXPORT_PAIRS and self._multi is None:
                 raise _BadRequest  # 組の一覧はまとめて比べたときだけ(ADR-0156 決定1)
             key, inp = self._result_key(), self._last_input()
             if key is None or not self._export_ready(inp):
                 return self._ok()
-        # 秘密の語は今の設定の語と送った AI 解析の語。設定が読めなければ、語が足りないまま出さない(ADR-0156 決定2)
-        try:
-            settings = load_settings(**self._where, read_prompt=False)
-        except SettingsError as exc:
-            with self._lock:
-                return self._ok(notice=self._notice(export_settings_unreadable(str(exc)), COMPARE_SAVE_FAILED_TITLE))
+        # 秘密の語は今の設定の語と送った AI 解析の語。設定が読めなければ、語が足りないまま出さない(ADR-0156 決定2)。
+        # 伏せずに出すときは語を使わないので、設定を読まない(読めなくても出せる。ADR-0257 決定2)
+        settings = None
+        if masked:
+            try:
+                settings = load_settings(**self._where, read_prompt=False)
+            except SettingsError as exc:
+                with self._lock:
+                    return self._ok(notice=self._notice(export_settings_unreadable(str(exc)), COMPARE_SAVE_FAILED_TITLE))
         saved_at = datetime.now(timezone.utc).astimezone()
-        filename = export_filename("compare", kind, saved_at)  # ホスト名は入れない
+        filename = export_filename("compare", kind, saved_at, masked=masked)  # ホスト名は入れない
         # 上書きの確認は付けない。書き出しが既存のファイルを拒否する(ADR-0017 決定3)
         target = self._choose_file(DIALOG_SAVE, filename, EXPORT_FILE_TYPES[kind])  # 開いている間はロックを持たない
         with self._lock:
@@ -5168,7 +5718,12 @@ class CompareApi(Api):
                 analyses = [self._last[2].llm]
                 # 最初の依頼の文も AI の答えの前に出す(ADR-0179 決定1)
                 build = partial(
-                    compare_report, inp, self._last[2], turns=list(self._turns), first_request=self._first_request
+                    compare_report,
+                    inp,
+                    self._last[2],
+                    turns=list(self._turns),
+                    first_request=self._first_request,
+                    masked=masked,
                 )
             else:
                 assert self._multi is not None
@@ -5180,8 +5735,8 @@ class CompareApi(Api):
                     holder = self._llm_holder[0]  # 組を選んで聞いた答えの組(REQ-312 §4.3)
                 turns = {holder: list(self._turns)} if holder is not None else {}
                 first_requests = {holder: self._first_request} if holder is not None else {}
-                build = partial(multi_report, inp, multi, turns=turns, first_requests=first_requests)
-        words = export_words(settings.extra_secret_words, analyses)
+                build = partial(multi_report, inp, multi, turns=turns, first_requests=first_requests, masked=masked)
+        words = export_words(settings.extra_secret_words, analyses) if settings is not None else []
         try:
             # 大きいときも画面を止めないよう、組み立てと書き出しはロックの外で行う
             data = export_bytes(build(words=words), kind, saved_at)
@@ -5194,7 +5749,7 @@ class CompareApi(Api):
             with self._lock:
                 return self._ok(notice=self._notice(str(exc), COMPARE_SAVE_FAILED_TITLE))
         with self._lock:
-            self._status[0] = export_saved(written)
+            self._status[0] = export_saved(written) if masked else export_saved_unmasked(written)
             return self._ok()
 
     # --- 保存した結果を開く(REQ-120 / ADR-0083。読むだけ) ---

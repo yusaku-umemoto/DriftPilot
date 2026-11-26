@@ -2136,6 +2136,18 @@ COMPARE_BUTTON_RUN = "Compare"
 HANDOFF_NOT_STARTED = f'Not compared yet because Batch compare is running. Press "{COMPARE_BUTTON_RUN}" when it finishes.'
 COMPARE_BUTTON_SAVE = "Save result…"
 COMPARE_BUTTON_CANCEL = "Cancel"
+# "Clear" of the compare window (ADR-0254 / REQ-388). Removes the selected files, results and AI conversation, and returns to the start screen
+COMPARE_BUTTON_CLEAR = "Clear"
+COMPARE_CLEAR_TITLE = "Clears the selected files, the comparison results, and the AI conversation, and returns to the start screen"
+# Reasons it cannot be pressed (clear_reason in the state; shown as the button title)
+COMPARE_CLEAR_NOTHING = "There is nothing to clear"
+COMPARE_CLEAR_BUSY = f'Cannot clear while comparing or while the AI is answering. Press "{COMPARE_BUTTON_CANCEL}" first.'
+# Confirmation dialog (when there is a result or an AI conversation)
+COMPARE_CLEAR_CONFIRM_TITLE = "Clear"
+COMPARE_CLEAR_CONFIRM_BODY = (
+    "Clear the selected files, the comparison results, and the AI conversation, and return to the start screen? "
+    "Results that have not been saved cannot be restored."
+)
 COMPARE_BUTTON_BATCH = "Batch compare…"
 COMPARE_BUTTON_SETTINGS = "Settings…"
 COMPARE_BUTTON_SWAP = "Swap"  # pywebview compare window only (not in the wx window)
@@ -2511,6 +2523,37 @@ def compare_send_pairs(on: int, total: int) -> str:
     return f"Pairs to send: {on} / {total}"
 
 
+def compare_same_hidden(count: int, kinds: int) -> str:
+    """The line above the structured table while the same changes are hidden (REQ-389 section 4)."""
+    return f"{count} rows of the same changes are hidden ({kinds} {'kind' if kinds == 1 else 'kinds'})"
+
+
+def compare_same_only(count: int) -> str:
+    """The line above the structured table while showing only the same change (REQ-389 section 4)."""
+    return f"Showing only {count} rows of the same change"
+
+
+# Column filters (REQ-391 / ADR-0256 decisions 2-5). The value list window, the 7 values of the Mark column of the raw table, and the line above the table
+COMPARE_FILTER_BLANK = "(Blanks)"
+COMPARE_FILTER_OVER = "More than 1,000 values. Narrow them down with the search."
+COMPARE_FILTER_RAW_BLOCKED = "Not available while the Mark column is filtered"
+# Values of the Mark column of the raw table (keys are screen_model.column_filters.RAW_MARK_VALUES)
+COMPARE_FILTER_RAW_VALUES = {
+    "changed": "Changed (~)",
+    "added": "Added (+)",
+    "removed": "Removed (-)",
+    "ignored": "Ignored (x)",
+    "equated": "Treated as same (=)",
+    "moved": "Moved (< and >)",
+    "same": "Same line (no mark)",
+}
+
+
+def compare_filtered(columns: Sequence[str]) -> str:
+    """The line above the table while columns are filtered (REQ-391 section 5). columns are the names of the filtered columns."""
+    return f"Filtered: {', '.join(columns)} ({len(columns)} {'column' if len(columns) == 1 else 'columns'})"
+
+
 # Name and face title of the answer bubble when the character is on, plus the button and empty-area hint (ADR-0181 decisions 1, 2).
 # Shown in the window only. Not included in saves, HTML, CSV, copies or sent text (decision 3)
 CHARACTER_NAME = "Mirarin"
@@ -2683,6 +2726,10 @@ GUI_WEB_TEXTS.update(
         "compare.button.open_result": COMPARE_BUTTON_OPEN_RESULT,
         "compare.button.close_result": COMPARE_BUTTON_CLOSE_RESULT,
         "compare.button.cancel": COMPARE_BUTTON_CANCEL,
+        "compare.button.clear": COMPARE_BUTTON_CLEAR,
+        "compare.clear.title": COMPARE_CLEAR_TITLE,
+        "compare.clear.confirm.title": COMPARE_CLEAR_CONFIRM_TITLE,
+        "compare.clear.confirm.body": COMPARE_CLEAR_CONFIRM_BODY,
         "compare.button.batch": COMPARE_BUTTON_BATCH,
         "compare.button.settings": COMPARE_BUTTON_SETTINGS,
         "compare.multi.title": COMPARE_MULTI_TITLE,
@@ -3298,6 +3345,15 @@ EXPORT_GUIDE = (
     "Secret lines are masked by the same rule used when sending to the AI. Secrets without a keyword, IP addresses, host names, and descriptions are not masked. "
     "Check the contents before you hand it over."
 )
+# Checkbox and warning in the format-choice dialog, and the mark on a file written without masking (ADR-0257)
+EXPORT_MASK_CHECK = "Mask secret lines (recommended)"
+EXPORT_UNMASKED_WARNING = (
+    "Secret lines (passwords, keys, community strings and so on) are written as they are. "
+    "Do not give the file to people outside your organization or to an AI."
+)
+EXPORT_UNMASKED_MARK = (
+    "This file does not mask secret lines. Do not give it to people outside your organization or to an AI."
+)
 # Format choices (ADR-0156 decision 1). The pair list is offered only for grouped compare and batch compare
 EXPORT_CHOICE_HTML = "HTML"
 EXPORT_CHOICE_DIFFS = "CSV (difference lines)"
@@ -3354,14 +3410,23 @@ def export_saved(path: Path) -> str:
     return f"Exported to {path}. Secret lines were masked, but check the contents before you hand it over."
 
 
+def export_saved_unmasked(path: Path) -> str:
+    """Text at the bottom of the window after exporting without masking (ADR-0257 decision 3)."""
+    return f"Exported to {path}. Secret lines are not masked. Do not give the file to people outside your organization or to an AI."
+
+
 GUI_WEB_TEXTS.update(
     {
         "compare.button.export": EXPORT_BUTTON,
         "compare.export.title": EXPORT_DIALOG_TITLE,
         "compare.export.body": EXPORT_GUIDE,
+        "compare.export.mask": EXPORT_MASK_CHECK,
+        "compare.export.unmasked": EXPORT_UNMASKED_WARNING,
         "batch.button.export": EXPORT_BUTTON,
         "batch.export.title": EXPORT_DIALOG_TITLE,
         "batch.export.body": EXPORT_GUIDE,
+        "batch.export.mask": EXPORT_MASK_CHECK,
+        "batch.export.unmasked": EXPORT_UNMASKED_WARNING,
     }
 )
 
@@ -3991,6 +4056,18 @@ GUI_WEB_TEXTS.update(
         "compare.structured.menu.source": "Show the original line in the Simple compare tab",
         "compare.structured.menu.skip_column": "Do not compare this column in this window: {column}",
         "compare.structured.menu.not_found": "The original line was not found",
+        # Hide the same change / show only the same change (REQ-389 / ADR-0255 decisions 2, 3). The window replaces {count} with the number of rows
+        "compare.structured.menu.hide_same": "Hide the same change ({count} rows)",
+        "compare.structured.menu.only_same": "Show only the same change ({count} rows)",
+        "compare.structured.same.reset": "Show all",
+        # Column filters (REQ-391 / ADR-0256). The window replaces {column} with the column name
+        "compare.column_filter.label": "Filter {column}",
+        "compare.column_filter.search": "Search",
+        "compare.column_filter.select_all": "Select all",
+        "compare.column_filter.ok": "OK",
+        "compare.column_filter.cancel": "Cancel",
+        "compare.column_filter.clear": "Clear filters",
+        "compare.raw.col.mark": "Mark",
         "compare.structured.menu.skip_duplicate": "That column is already in the columns not compared",
         "compare.structured.menu.skip_full": "You can set up to 20 columns not to compare",
         "compare.skip_columns.title": "Columns not compared",
@@ -4516,6 +4593,24 @@ CLI_HELP = {
         "(stops when standard input is closed. Exit codes: success 0, error 2, stopped 130)"
     ),
     "pilot_call.request": "The request JSON file (UTF-8)",
+    # Moving work records out (ADR-0253. REQ-386). Only the update failure records (app_logs) are handled
+    "pilot_call.records_list": (
+        "Read a request file and count the update failure records and their size (changes nothing. "
+        "Exit codes: success 0, error 2, stopped 130)"
+    ),
+    "pilot_call.records_export": (
+        "Read a request file and write the update failure records to DriftPilot.zip in output_dir (the originals stay. "
+        "Exit codes: success 0, error 2, stopped 130)"
+    ),
+    "pilot_call.records_delete": (
+        "Read a request file and delete the update failure records (method is delete or trash. "
+        "Exit codes: all deleted 0, something kept 1, error 2, stopped 130)"
+    ),
+    "pilot_call.records_import": (
+        "Read a request file and restore the update failure records from an exported ZIP "
+        "(existing records are never deleted or overwritten. "
+        "Exit codes: all restored 0, something not restored 1, error 2, stopped 130)"
+    ),
 }
 
 # --- Error texts of the pilot-call entry for other Pilots (ADR-0203. REQ-286). `{...}` is filled in with .format by the caller.
@@ -4548,9 +4643,27 @@ PILOT_CALL_MESSAGES = {
     "request_too_large": "The request file is larger than {limit} bytes",
     "request_bom": "The request file starts with a BOM. Use UTF-8 without a BOM",
     "invalid_correlation_id": "caller.correlation_id must be a string of 1 to 128 characters made only of letters, digits and . _ : -",
-    "unknown_operation": "The operation must be one of capabilities, compare or config-facts",
+    "unknown_operation": (
+        "The operation must be one of capabilities, compare, config-facts, records-list, records-export, "
+        "records-delete or records-import"
+    ),
     "invalid_arguments": "The arguments of pilot-call are not valid",
     "interrupted": "Stopped because an interrupt signal (Ctrl+C) was received",
+    # Moving work records out (ADR-0253. REQ-386). Never includes record names or the staging folder path (counts only)
+    "unsupported_operation_records": "Only the {operation} operation is accepted",
+    "invalid_inputs_records": (
+        "inputs must be an array with exactly one item whose role is part, and path must be the absolute path of a ZIP file"
+    ),
+    "records_target_missing": "params needs either manifest or categories",
+    "records_manifest_invalid": (
+        "The manifest cannot be read or does not fit (schema must be pilot.records-part, schema_version \"1\", product DriftPilot)"
+    ),
+    "records_part_invalid": (
+        "The ZIP cannot be restored (it cannot be opened, is too large, has too many files, or its manifest.json does not fit)"
+    ),
+    "records_unreadable": "{count} record files could not be read",
+    "cancelled_records": "Standard input was closed, so the records operation was stopped",
+    "where_app_logs": "Update failure records (DriftPilot's update staging folder)",
 }
 
 # --- Error texts of the commands (after "Error: ". REQ-258) ---
