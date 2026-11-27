@@ -91,6 +91,7 @@ from driftpilot.llm_analyzer.redact import (  # noqa: F401 - RedactError は窓�
     redact_result,
     redact_text,
 )
+from driftpilot.llm_constants import DEFAULT_MAX_PROMPT_CHARS
 from driftpilot.llm_settings import LlmSettings, SettingsError, current_premise, load_settings, premise_text_problem
 from driftpilot.llm_settings import build_request as build_llm_request
 from driftpilot.messages import (
@@ -1943,6 +1944,8 @@ class SendBasis:
     model: str | None
     max_diffs: int
     max_total_diffs: int
+    # 送る文全体の上限(ADR-0259 決定7)。basis_change では比べない(上げただけなら承認した文のまま送る)。下がったかは prompt_limit_lowered で見る
+    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
 
 
 def send_basis(settings: LlmSettings) -> SendBasis:
@@ -1953,6 +1956,7 @@ def send_basis(settings: LlmSettings) -> SendBasis:
         model=settings.model,
         max_diffs=settings.max_diffs,
         max_total_diffs=settings.max_total_diffs,
+        max_prompt_chars=settings.max_prompt_chars,
     )
 
 
@@ -1983,6 +1987,14 @@ def basis_change(confirmed: SendBasis, now: SendBasis) -> str | None:
     if set(confirmed.secret_words) != set(now.secret_words):
         return "secret_words"
     return None
+
+
+def prompt_limit_lowered(confirmed: SendBasis, now: SendBasis, length: int) -> bool:
+    """送る文全体の上限が確認のときより下がり、しかも承認した文の長さ(length)が今の上限を超えるときだけ真(ADR-0259 決定7)。
+
+    basis_change はこの上限を比べない。上限を上げただけ・下げても承認した文が収まるときは、承認した文のまま送る。
+    """
+    return now.max_prompt_chars < confirmed.max_prompt_chars and length > now.max_prompt_chars
 
 
 # --- 保存(ADR-0017。自動保存はしない) ---

@@ -28,7 +28,6 @@ from driftpilot.gui_web.bridge import _failure
 from driftpilot.llm_analyzer import LLMClient, LLMConnectionError, LLMResponseError
 from driftpilot.llm_analyzer.follow_up import (
     ANSWER,
-    MAX_PROMPT_CHARS,
     MAX_QUESTION_CHARS,
     MAX_TURNS,
     QUESTION,
@@ -39,8 +38,9 @@ from driftpilot.llm_analyzer.follow_up import (
 )
 from driftpilot.llm_analyzer.mask_patterns import secret_show_command
 from driftpilot.llm_analyzer.masking import Masker, normalize_words
-from driftpilot.llm_analyzer.payload import MAX_FULL_TEXT_CHARS, WHOLE_NAME_OMITTED, build_after_text
+from driftpilot.llm_analyzer.payload import WHOLE_NAME_OMITTED, build_after_text
 from driftpilot.llm_analyzer.prompt import with_premise
+from driftpilot.llm_constants import DEFAULT_MAX_PROMPT_CHARS, MAX_MAX_PROMPT_CHARS, full_text_limit
 from driftpilot.llm_settings import SettingsError, current_premise, display_model, load_settings, premise_text_problem
 from driftpilot.messages import (
     FOLLOW_UP_ANSWER_LABEL,
@@ -74,6 +74,7 @@ from driftpilot.messages import (
     log_ask_over_limit,
     log_ask_sections,
     premise_refused_text,
+    with_prompt_limit_hint,
 )
 from driftpilot.screen_model.batch_model import effective_base_url
 from driftpilot.screen_model.log_view_model import LoadedLog, Position, device_name
@@ -84,6 +85,7 @@ from driftpilot.screen_model.model import (
     basis_change,
     current_send_basis,
     plan_llm,
+    prompt_limit_lowered,
     send_basis,
 )
 from driftpilot.screen_model.settings_model import destination_of
@@ -117,6 +119,7 @@ def build_log_prompt(
     *,
     words: Sequence[str],
     premise: str | None,
+    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
 ) -> BuiltPrompt | str:
     """送る文を作る。作れないとき(送る行が無い・上限を超える)は知らせの文。
 
@@ -125,7 +128,8 @@ def build_log_prompt(
     2. 機器の名前を判定する(通らなければ WHOLE_NAME_OMITTED。数える)
     3. 見出しの元の行(prompt_line。無ければコマンドの文。どちらも無ければ「区切りなし」)を判定する(同じ)
     4. 本文を build_after_text(before_lines=[], after_lines=本文, show_command=その区間のコマンド)に通す
-    上限は比較の窓の全文と同じ値で、文字の数で数える(塊が MAX_FULL_TEXT_CHARS・送る文全体が MAX_PROMPT_CHARS)。超えたら一部だけ送らない。
+    上限は比較の窓の全文と同じ値で、文字の数で数える(送る文全体が設定の max_prompt_chars、塊がそこから余白を引いた値。ADR-0259)。
+    超えたら一部だけ送らない。知らせには上限を変えられる場所の 1 文を添える。
     words は normalize_words を通した秘密の語(設定の語)。
     """
     masker = Masker(secret_words=words)
@@ -163,11 +167,12 @@ def build_log_prompt(
     if sent_lines == 0:
         return LOG_ASK_NO_LINES
     body = "\n\n".join(parts)
-    if len(body) > MAX_FULL_TEXT_CHARS:
-        return log_ask_over_limit(len(body), MAX_FULL_TEXT_CHARS)
+    full_limit = full_text_limit(max_prompt_chars)
+    if len(body) > full_limit:
+        return with_prompt_limit_hint(log_ask_over_limit(len(body), full_limit))
     prompt = f"{with_premise(LOG_ASK_INSTRUCTION, premise)}\n\n{body}\n\n{LOG_ASK_QUESTION_LABEL}{question}"
-    if prompt_too_long(prompt):
-        return log_ask_over_limit(len(prompt), MAX_PROMPT_CHARS)
+    if prompt_too_long(prompt, max_prompt_chars):
+        return with_prompt_limit_hint(log_ask_over_limit(len(prompt), max_prompt_chars))
     return BuiltPrompt(prompt, body, len(parts), len(device_set), omitted_lines, omitted_sections)
 
 
@@ -381,7 +386,9 @@ class LogAsk:
             refusal = check_question(question, settings_words)
             if refusal is not None:
                 return follow_up_refused(refusal, MAX_QUESTION_CHARS), None, None
-            built = build_log_prompt(log, positions, question, words=settings_words, premise=premise)
+            built = build_log_prompt(
+                log, positions, question, words=settings_words, premise=premise, max_prompt_chars=settings.max_prompt_chars
+            )
             if isinstance(built, str):
                 return built, None, None
             prompt, words, summary = built.prompt, settings_words, built
@@ -392,7 +399,7 @@ class LogAsk:
             refusal = check_question(question, words)
             if refusal is not None:
                 return follow_up_refused(refusal, MAX_QUESTION_CHARS), None, None
-            composed = self._compose_follow_up(log, first, question, words)
+            composed = self._compose_follow_up(log, first, question, words, settings.max_prompt_chars)
             if composed is None:
                 return LOG_ASK_WORDS_CHANGED, None, None
             if composed[0] is not None:
@@ -435,21 +442,31 @@ class LogAsk:
         return None, pending, view
 
     def _compose_follow_up(
-        self, log: LoadedLog, first: _First, question: str, words: Sequence[str]
+        self,
+        log: LoadedLog,
+        first: _First,
+        question: str,
+        words: Sequence[str],
+        max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
     ) -> tuple[str | None, str] | None:
         """続けての質問の送る文。最初の中身を words(最初の語と今の語)で作り直して、最初に送った文と同じか確かめてから作る。
 
         (None, 送る文) = 作れた。(理由の文, "") = 作れない(長すぎる)。None = 語が変わって最初の文と違う。ロックの中で呼ぶ。
+        max_prompt_chars はそのとき読んだ設定の送る文全体の上限(ADR-0259)。
         """
-        rebuilt = build_log_prompt(log, first.positions, first.question, words=words, premise=first.premise)
+        # 最初の文の作り直しは、同じ文になるかを見るだけ(最初に送ったときの上限より今の上限が下がっていても、ここでは断らない)。
+        # 長さは、続けての文全体を今の上限で見る(下)
+        rebuilt = build_log_prompt(
+            log, first.positions, first.question, words=words, premise=first.premise, max_prompt_chars=MAX_MAX_PROMPT_CHARS
+        )
         if isinstance(rebuilt, str) or rebuilt.prompt != first.prompt:
             return None
         try:
             prompt = build_follow_up(first.prompt, self._turns, question, closing=LOG_ASK_CLOSING)
         except ValueError:
             return follow_up_limit(MAX_TURNS), ""
-        if prompt_too_long(prompt):
-            return follow_up_too_long(MAX_PROMPT_CHARS), ""
+        if prompt_too_long(prompt, max_prompt_chars):
+            return with_prompt_limit_hint(follow_up_too_long(max_prompt_chars)), ""
         return None, prompt
 
     def _reread(self, pending: _Pending, log: LoadedLog | None) -> tuple[str | None, tuple[str, ...]]:
@@ -474,6 +491,9 @@ class LogAsk:
         kind = basis_change(pending.basis, now)
         if kind in ("profile", "limits"):
             return REREAD_NOT_SENT[kind], pending.words
+        if prompt_limit_lowered(pending.basis, now, len(pending.prompt)):
+            # 上限が確認のときより下がり、承認した文がその値を超える。送らない(ADR-0259 決定7。上げただけなら承認した文のまま送る)
+            return REREAD_NOT_SENT["prompt_chars"], pending.words
         if not pending.follow and premise_now != pending.premise:
             return LOG_ASK_PREMISE_CHANGED, pending.words
         if kind != "secret_words":
@@ -487,7 +507,7 @@ class LogAsk:
                 words = normalize_words([*first.words, *now.secret_words, *pending.words])
                 if check_question(pending.question, words) is not None:
                     return refused, pending.words
-                composed = self._compose_follow_up(log, first, pending.question, words)
+                composed = self._compose_follow_up(log, first, pending.question, words, now.max_prompt_chars)
                 if composed is None or composed[0] is not None or composed[1] != pending.prompt:
                     return refused, pending.words
             else:
@@ -496,7 +516,14 @@ class LogAsk:
                     return refused, pending.words
                 if check_question(pending.question, words) is not None:
                     return refused, pending.words
-                built = build_log_prompt(log, pending.positions, pending.question, words=words, premise=pending.premise)
+                built = build_log_prompt(
+                    log,
+                    pending.positions,
+                    pending.question,
+                    words=words,
+                    premise=pending.premise,
+                    max_prompt_chars=MAX_MAX_PROMPT_CHARS,  # 同じ文になるかを見るだけ(長さは上で今の上限と比べ済み)
+                )
                 if isinstance(built, str) or built.prompt != pending.prompt:
                     return refused, pending.words
         except Exception:  # noqa: BLE001 - 作り直せないときも、送らない

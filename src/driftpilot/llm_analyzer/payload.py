@@ -44,6 +44,7 @@ from driftpilot.llm_analyzer.masking import (
     scope_label,
 )
 from driftpilot.llm_analyzer.types import LlmSource, Unsent, UnsentKind, UnsentShape
+from driftpilot.llm_constants import DEFAULT_MAX_FULL_TEXT_CHARS
 
 # 送る前の確かめ(送らなかった形の一覧)にだけ出る文。AI に送る本文には入らない(日本語・英語。REQ-258)
 _TEXTS_JA = {"show_gate_shape": "[show] 列 {column} の値が秘密語を含む …"}
@@ -92,8 +93,9 @@ CONTEXT_LINES = 2
 FULL_TEXT_OMITTED_JA = _MARKS_JA["omitted"]
 FULL_TEXT_OMITTED_EN = _MARKS_EN["omitted"]
 FULL_TEXT_OMITTED = _M["omitted"]
-# 変更後の全文の文字数の上限(ADR-0158 決定5)。超えたら全文も差分も送らない(切り詰めない)
-MAX_FULL_TEXT_CHARS = 150_000
+# 変更後の全文の文字数の上限の既定の値(ADR-0158 決定5。ADR-0259 で設定の max_prompt_chars − 余白になった)。
+# 超えたら全文も差分も送らない(切り詰めない)
+MAX_FULL_TEXT_CHARS = DEFAULT_MAX_FULL_TEXT_CHARS
 _SIDE_LABEL = {"before": _M["side_before"], "after": _M["side_after"]}
 # リストの項目(要素の総称のパスは `<項目>[]`)
 _LIST_FIELDS = frozenset(p[:-2] for p in fields.ir_field_paths() if p.endswith("[]"))

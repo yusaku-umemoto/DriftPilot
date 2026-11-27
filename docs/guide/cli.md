@@ -496,6 +496,7 @@ base_url = "https://api.openai.com/v1"      # any OpenAI-compatible endpoint
 # extra_secret_words = ["site-token"]       # more words whose lines are masked
 # max_diffs = 100                           # per pair
 # max_total_diffs = 1000                    # across all pairs
+# max_prompt_chars = 600000                 # limit on the text sent to the AI (characters, 100,000 to 2,000,000)
 ```
 
 - API key: `DRIFTPILOT_LLM_API_KEY` (or the key store through the app). Writing `api_key` in the file also works but is less safe.

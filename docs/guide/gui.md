@@ -130,6 +130,7 @@ Other options:
 - **Send to the AI automatically after comparing** (Settings → Compare and automation) skips the confirmation. It is off by default.
 - **↗** opens the AI area in a separate window, so the result can use the whole width.
 - The number of differences sent is limited (100 per pair and 1,000 in total by default; Settings → Compare and automation).
+- The length of the text sent is also limited (600,000 characters by default; the full text of **Send differences + full text** can be up to this value minus 50,000 characters; Settings → Compare and automation). If the text is longer, DriftPilot does not send part of it and tells you nothing was sent.
 
 ## 6. Batch compare
 
@@ -194,7 +195,9 @@ Where AI requests are sent. You can keep several profiles (for example one for a
 
 ### Compare and automation
 
-Automatic compare when both files are set, automatic sending to the AI after comparing (off by default), the character (Mirarin) in the window, and the limits on how many differences are sent (per pair and in total).
+Automatic compare when both files are set, automatic sending to the AI after comparing (off by default), the character (Mirarin) in the window, the limits on how many differences are sent (per pair and in total), and the limit on the length of the text sent to the AI.
+
+**Maximum characters sent to the AI** is counted in characters. The default is 600,000 (an integer from 100,000 to 2,000,000). The full text of **Send differences + full text** can be up to this value minus 50,000 characters. Longer text costs more and takes longer per request; lower this if the AI refuses because the text is too long. After you click **Save**, the new value applies from the next text sent.
 
 ### Simple comparison
 

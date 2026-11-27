@@ -472,6 +472,7 @@ base_url = "https://api.openai.com/v1"      # OpenAI 互換の接続先
 # extra_secret_words = ["site-token"]       # 伏せる語を足す（この語を含む行を伏せる）
 # max_diffs = 100                           # 1 組あたりの上限
 # max_total_diffs = 1000                    # 全部の組の合計の上限
+# max_prompt_chars = 600000                 # AI に送る文の上限（文字。100,000〜2,000,000）
 ```
 
 - API キー: 環境変数 `DRIFTPILOT_LLM_API_KEY`（または画面から保管庫へ）。ファイルに `api_key` を書くこともできますが、安全ではありません

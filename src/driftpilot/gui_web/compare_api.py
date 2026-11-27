@@ -213,10 +213,10 @@ from driftpilot.llm_analyzer import (
     ThinkingBuffer,
     for_display,
 )
+from driftpilot.llm_analyzer.api_error import looks_like_context_limit
 from driftpilot.llm_analyzer.client import LLMConnectionError, LLMResponseError, StreamStopped, ask_with_deltas
 from driftpilot.llm_analyzer.follow_up import (
     ANSWER,
-    MAX_PROMPT_CHARS,
     MAX_QUESTION_CHARS,
     MAX_TURNS,
     QUESTION,
@@ -234,6 +234,7 @@ from driftpilot.llm_analyzer.payload import AfterText, source_of
 from driftpilot.llm_analyzer.prompt import with_after_text
 from driftpilot.llm_analyzer.prompt_parts import DIFF, FULL, INSTRUCTION
 from driftpilot.llm_analyzer.types import LlmAnalysis
+from driftpilot.llm_constants import DEFAULT_MAX_PROMPT_CHARS, MAX_MAX_PROMPT_CHARS, full_text_limit
 from driftpilot.llm_settings import (
     WORKDIR_CONFIG,
     LlmSettings,
@@ -329,6 +330,7 @@ from driftpilot.messages import (
     FOLLOW_UP_ANSWER_LABEL,
     FOLLOW_UP_QUESTION_LABEL,
     HANDOFF_NOT_STARTED,
+    CONTEXT_LENGTH_HINT,
     LIMITS_SCREEN_HINT,
     LLM_PREVIEW_DIFF,
     LLM_PREVIEW_DONT_SEND,
@@ -369,7 +371,9 @@ from driftpilot.messages import (
     llm_screen_lines,
     multi_unpaired_not_saved,
     saved_notice,
+    prompt_refused_text,
     user_prompt_template_ignored,
+    with_prompt_limit_hint,
     workdir_api_key_ignored,
     workdir_limits_ignored,
 )
@@ -472,6 +476,7 @@ from driftpilot.screen_model.model import (
     SendBasis,
     basis_change,
     current_send_basis,
+    prompt_limit_lowered,
     send_basis,
     device_notice,
     device_split_reason,
@@ -2217,9 +2222,13 @@ class CompareApi(Api):
         error = self._api_error
         if error is None or not error["text"]:
             return None
+        text = error["text"]
+        if looks_like_context_limit(text):
+            # AI が「送る文が長すぎる」と断ったとき、誤りの文の後ろに 1 行足す(ADR-0259 決定6。欄は改行を残して出す)
+            text = f"{text}\n{CONTEXT_LENGTH_HINT}"
         return {
             "title": COMPARE_API_ERROR_TITLE,
-            "text": error["text"],
+            "text": text,
             "note": COMPARE_API_ERROR_NOTE,
             "revision": self._api_error_revision,
         }
@@ -4150,7 +4159,7 @@ class CompareApi(Api):
                         assert plan is not None and outcome.llm is not None and destination is not None
                         if self._instruction_too_long(plan, [outcome.llm]):
                             # 打った文と合わせた文が上限を超えた。確認を出さずに知らせる(送らない。REQ-206 §6)
-                            body = instruction_too_long(MAX_PROMPT_CHARS)
+                            body = with_prompt_limit_hint(instruction_too_long(plan.first.max_prompt_chars))
                             self._late_notice = self._ai_late_notice(body, COMPARE_FOLLOW_UP_NOTICE_TITLE)
                         else:
                             self._preview = (
@@ -4264,10 +4273,16 @@ class CompareApi(Api):
 
     @staticmethod
     def _instruction_too_long(plan: LlmPlan, analyses: list[LlmAnalysis | None]) -> bool:
-        """解析の前に打った文を足した送る文が、上限(追加の質問と同じ prompt_too_long)を超えたか。文を足していなければ偽。"""
+        """解析の前に打った文を足した送る文が、上限(追加の質問と同じ prompt_too_long。設定の値は plan から取る)を超えたか。
+
+        文を足していなければ偽。
+        """
         if plan.first.extra_instruction is None and plan.first.question is None:
             return False
-        return any(llm is not None and isinstance(llm.payload, str) and prompt_too_long(llm.payload) for llm in analyses)
+        limit = plan.first.max_prompt_chars
+        return any(
+            llm is not None and isinstance(llm.payload, str) and prompt_too_long(llm.payload, limit) for llm in analyses
+        )
 
     def _done_multi(
         self,
@@ -4300,7 +4315,8 @@ class CompareApi(Api):
                 if self._instruction_too_long(plan, [llm]):
                     # 打った文と合わせた文が上限を超えた。確認を出さずに知らせる(送らない。REQ-206 §6)
                     self._late_notice = self._ai_late_notice(
-                        instruction_too_long(MAX_PROMPT_CHARS), COMPARE_FOLLOW_UP_NOTICE_TITLE
+                        with_prompt_limit_hint(instruction_too_long(plan.first.max_prompt_chars)),
+                        COMPARE_FOLLOW_UP_NOTICE_TITLE,
                     )
                 else:
                     pending = True
@@ -4424,6 +4440,12 @@ class CompareApi(Api):
         if reply is not None:
             return reply, False
         assert confirmed is not None and now is not None
+        held_parts = kept_parts[1] if kept_parts is not None and kept_parts[0] == number else None
+        edited_now = instructions is not None and held_parts is not None and instructions != held_parts.instructions
+        if not edited_now and prompt_limit_lowered(confirmed, now, len(llm.payload or "")):
+            # 上限が確認のときより下がり、承認した文がその値を超える。送らない(ADR-0259 決定7。上げただけなら承認した文のまま送る)。
+            # 指示を直したときは、直す前の文ではなく直した後の文の長さを _check_edited_instructions が見る
+            return self._prompt_limit_changed_reply(BATCH_NOT_SENT_TITLE), False
         words_changed = basis_change(confirmed, now) == "secret_words"
         now_words = normalize_words(now.secret_words)
         if words_changed:
@@ -4438,7 +4460,7 @@ class CompareApi(Api):
                 return self._ok(), False  # 直せない確認で指示を渡された。送らない
             if instructions != parts.instructions:
                 # 直した指示(直していなければ今の道を 1 字も変えずに通る)
-                edited = self._check_edited_instructions(plan, parts, instructions, now_words)
+                edited = self._check_edited_instructions(plan, parts, instructions, now_words, confirmed, now)
                 if isinstance(edited, dict):
                     return edited, False  # 断った(中身は出さない)。確認は答えた時点で消える
                 edit = InstructionEdit(shown=llm.payload, parts=instructions, text=edited)
@@ -4540,25 +4562,39 @@ class CompareApi(Api):
             return self._ok(notice=self._notice(REREAD_NOT_SENT["secret_words"], BATCH_NOT_SENT_TITLE))
         return None
 
+    def _prompt_limit_changed_reply(self, title: str) -> dict[str, Any]:
+        """ロックの中で呼ぶ。送る文全体の上限が確認の後に下がり、承認した文が収まらないときの返す値(ADR-0259 決定7)。"""
+        return self._ok(notice=self._notice(REREAD_NOT_SENT["prompt_chars"], title))
+
     def _check_edited_instructions(
-        self, plan: LlmPlan, parts: PromptParts, instructions: tuple[str, ...], words: tuple[str, ...]
+        self,
+        plan: LlmPlan,
+        parts: PromptParts,
+        instructions: tuple[str, ...],
+        words: tuple[str, ...],
+        confirmed: SendBasis,
+        now: SendBasis,
     ) -> str | dict[str, Any]:
         """ロックの中で呼ぶ。直した指示を確かめる(REQ-266 §3)。送ってよければ直した後の送る文、送れないなら返す値(知らせ)。
 
-        数が合わない・文字列でないときは何も知らせず送らない。直した後の文が上限(MAX_PROMPT_CHARS)を超えれば、打った文が長すぎるときと
-        同じ知らせ。指示の欄の全体(直した部分だけでなく)を、追加の質問と同じ check_question で設定の秘密の語を使って確かめる。
-        ★ 長さの上限だけは追加の質問の 1 つの上限(4,000 字)ではなく、送る文全体の上限(MAX_PROMPT_CHARS)で見る(最初から入っている
+        数が合わない・文字列でないときは何も知らせず送らない。直した後の文が今の設定の上限(now.max_prompt_chars)を超えれば、
+        打った文が長すぎるときと同じ知らせ(上限が確認の後に下がったためなら、決まった文。ADR-0259 決定7)。
+        指示の欄の全体(直した部分だけでなく)を、追加の質問と同じ check_question で設定の秘密の語を使って確かめる。
+        ★ 長さの上限だけは追加の質問の 1 つの上限(4,000 字)ではなく、送る文全体の上限で見る(最初から入っている
         指示文だけで 4,000 字に近く、前提と追加の指示を足すと必ず超えるため。判断の記録 1)。断ったときは理由の種類だけを出す(中身は出さない)。
         """
         try:
             text = parts.compose(instructions)
         except ValueError:
             return self._ok()
-        if prompt_too_long(text):
-            return self._follow_up_notice(instruction_too_long(MAX_PROMPT_CHARS))
-        refused = check_question("\n".join(instructions), words, max_chars=MAX_PROMPT_CHARS)
+        if prompt_limit_lowered(confirmed, now, len(text)):
+            return self._prompt_limit_changed_reply(BATCH_NOT_SENT_TITLE)
+        limit = now.max_prompt_chars
+        if prompt_too_long(text, limit):
+            return self._follow_up_notice(with_prompt_limit_hint(instruction_too_long(limit)))
+        refused = check_question("\n".join(instructions), words, max_chars=limit)
         if refused is not None:
-            return self._follow_up_notice(follow_up_refused(refused, MAX_PROMPT_CHARS))
+            return self._follow_up_notice(prompt_refused_text(refused, limit))
         return text
 
     def _answer_follow_up_preview(self, yes: bool) -> tuple[dict[str, Any], bool]:
@@ -4582,9 +4618,13 @@ class CompareApi(Api):
         if reply is not None:
             return reply, False
         assert confirmed is not None and now is not None
+        if prompt_limit_lowered(confirmed, now, len(prompt)):
+            # 上限が確認のときより下がり、承認した文がその値を超える。送らない(ADR-0259 決定7)
+            return self._prompt_limit_changed_reply(COMPARE_FOLLOW_UP_NOTICE_TITLE), False
         if basis_change(confirmed, now) == "secret_words":
             # 今の秘密の語で、送る文を追加の質問と同じ道で作り直す。1 字でも違えば送らない
-            rebuilt_words = self._check_rebuilt_follow_up(prompt, question, now.secret_words)
+            # 作り直しは、確認の文と同じになるかを見るだけ(上限では断らない)。長さは上の prompt_limit_lowered が見る
+            rebuilt_words = self._check_rebuilt_follow_up(prompt, question, now.secret_words, MAX_MAX_PROMPT_CHARS)
             if isinstance(rebuilt_words, dict):
                 return rebuilt_words, False
             words = rebuilt_words
@@ -4594,7 +4634,7 @@ class CompareApi(Api):
         return self._ok(), True
 
     def _check_rebuilt_follow_up(
-        self, prompt: str, question: str, secret_words: tuple[str, ...]
+        self, prompt: str, question: str, secret_words: tuple[str, ...], max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
     ) -> tuple[str, ...] | dict[str, Any]:
         """ロックの中で呼ぶ。秘密の語が変わったとき、追加の質問で全文を送る文を今の語で作り直して確認の文と比べる(REQ-371 §3)。
 
@@ -4611,7 +4651,7 @@ class CompareApi(Api):
             refused = check_question(question, words)
             if refused is not None:
                 return self._follow_up_notice(follow_up_refused(refused, MAX_QUESTION_CHARS))
-            built = self._rebuild_after_text(first, secret_words)
+            built = self._rebuild_after_text(first, secret_words, max_prompt_chars)
             if not isinstance(built, AfterText):
                 return refused_reply
             base = with_after_text(first.payload, built)
@@ -5073,11 +5113,12 @@ class CompareApi(Api):
                 else:
                     section = self._after_sections.get(pair)
                     if section is None:
-                        built = self._rebuild_after_text(first, plan.send.extra_secret_words)
+                        limit = plan.send.max_prompt_chars  # 質問のたびに読んだ設定の値(ADR-0259 決定3)
+                        built = self._rebuild_after_text(first, plan.send.extra_secret_words, limit)
                         if built == REBUILD_MISMATCH:
                             return self._follow_up_notice(COMPARE_FULL_TEXT_MISMATCH)
                         if built == REBUILD_TOO_LONG:
-                            return self._follow_up_notice(full_text_too_long())
+                            return self._follow_up_notice(with_prompt_limit_hint(full_text_too_long(full_text_limit(limit))))
                         assert isinstance(built, AfterText)
                         section = self._after_sections[pair] = built
                     base = with_after_text(first.payload, section)  # 全文の節は最初に送った文の直後
@@ -5085,8 +5126,9 @@ class CompareApi(Api):
                 prompt = build_follow_up(base, self._follow_up_turns(first), question, full_text=True)
             else:
                 prompt = build_follow_up(first.payload, self._follow_up_turns(first), question)
-            if prompt_too_long(prompt):
-                return self._follow_up_notice(follow_up_too_long(MAX_PROMPT_CHARS))  # 古いやり取りは落とさない
+            if prompt_too_long(prompt, plan.send.max_prompt_chars):
+                # 古いやり取りは落とさない
+                return self._follow_up_notice(with_prompt_limit_hint(follow_up_too_long(plan.send.max_prompt_chars)))
             # 保存に送ったときの伏せる語が無い開いた結果は、送る前に1回だけ確かめる(ADR-0179 決定3)。
             # 確かめに答えた番号は、送り先の確かめには使わない(confirm を None に戻す)
             words_confirm, confirm = self._saved_words_check(first, confirm)
@@ -5135,8 +5177,12 @@ class CompareApi(Api):
         self._asking.start()
         return True
 
-    def _rebuild_after_text(self, first: LlmAnalysis, extra_words: tuple[str, ...]) -> AfterText | str:
+    def _rebuild_after_text(
+        self, first: LlmAnalysis, extra_words: tuple[str, ...], max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
+    ) -> AfterText | str:
         """ロックの中で呼ぶ。選んでいる組の変更後の全文を、最初の送信と同じ入力・同じ順で作り直す(ADR-0158 決定7)。
+
+        全文の上限は、そのとき読んだ設定の送る文全体の上限 max_prompt_chars から決める(ADR-0259 決定3)。
 
         まとめて比べたときは、全部の組をまとめた本文を新しい Masker で同じ順に作り直してから、選んでいる組の全文を作る
         (記号の番号を最初の送信とそろえる。ADR-0152 決定10)。
@@ -5155,6 +5201,7 @@ class CompareApi(Api):
                 selected=positions.index(self._pair),
                 first=first,
                 extra_words=extra_words,
+                max_full_text_chars=full_text_limit(max_prompt_chars),
             )
         return rebuild_after_text(
             structured=outcome.structured,
@@ -5163,6 +5210,7 @@ class CompareApi(Api):
             inputs=llm_inputs(request, outcome),
             first=first,
             extra_words=extra_words,
+            max_full_text_chars=full_text_limit(max_prompt_chars),
         )
 
     def _where_user(self) -> dict[str, Any]:
@@ -6161,7 +6209,9 @@ class CompareApi(Api):
                     elif not self._same_destination(correction.destination, destination_of(settings), correction.name_only):
                         error = "cancelled"  # stop を書いた後に使用中のプロファイルが変わった
                     else:
-                        prompt = self._voice_prompt(correction, messages, plan.send.extra_secret_words)
+                        prompt = self._voice_prompt(
+                            correction, messages, plan.send.extra_secret_words, plan.send.max_prompt_chars
+                        )
                         if prompt is None:
                             error = "refused"
                         else:
@@ -6177,11 +6227,16 @@ class CompareApi(Api):
         self._voice_corrector.start(client, prompt, respond, still_valid)
 
     @staticmethod
-    def _voice_prompt(correction: _Correction, messages: list[Any], extra_words: tuple[str, ...]) -> str | None:
+    def _voice_prompt(
+        correction: _Correction,
+        messages: list[Any],
+        extra_words: tuple[str, ...],
+        max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
+    ) -> str | None:
         """送る文(messages の content を空行でつないだもの)。断るとき(None)の条件は次のどれか(中身は文に出さない)。
 
         messages が空・content が文字でない・どれかの content が質問と同じ確かめ(check_question。秘密の語は送ったときの語と今の設定の語の
-        両方。長さの上限は送る文全体の上限)で断られる・つないだ文が上限を超える。
+        両方。長さの上限は送る文全体の上限 max_prompt_chars。ADR-0259)で断られる・つないだ文が上限を超える。
         """
         if not messages:
             return None
@@ -6193,10 +6248,10 @@ class CompareApi(Api):
             contents.append(content)
         words = normalize_words([*correction.words, *extra_words])
         for content in contents:
-            if check_question(content, words, max_chars=MAX_PROMPT_CHARS) is not None:
+            if check_question(content, words, max_chars=max_prompt_chars) is not None:
                 return None
         prompt = "\n\n".join(contents)
-        return None if prompt_too_long(prompt) else prompt
+        return None if prompt_too_long(prompt, max_prompt_chars) else prompt
 
     def _voice_cancel(self) -> dict[str, Any]:
         hub = self._voice

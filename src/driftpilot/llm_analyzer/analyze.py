@@ -18,7 +18,6 @@ from driftpilot.llm_analyzer.mask_patterns import masking_fingerprint
 from driftpilot.llm_analyzer.masking import Masker, normalize_words
 from driftpilot.llm_analyzer.follow_up import check_question, prompt_too_long
 from driftpilot.llm_analyzer.payload import (
-    MAX_FULL_TEXT_CHARS,
     WHOLE_NAME_OMITTED,
     WholeSection,
     build_payload,
@@ -44,6 +43,7 @@ from driftpilot.llm_analyzer.prompt import (
 )
 from driftpilot.llm_analyzer.prompt_parts import DIFF, FULL, InstructionEdit, PromptParts
 from driftpilot.llm_analyzer.types import LlmAnalysis, LlmReason, LlmRequest
+from driftpilot.llm_constants import full_text_limit
 
 
 # 利用者に見える誤りの文(日本語・英語。REQ-258)。{value!r} は値の repr
@@ -180,17 +180,25 @@ def _analyze(
     after_text = payload.after_text  # show の比較でも足す(ADR-0182 決定2)
     if after_text is not None:
         # 変更後の全文(ADR-0158 決定4・5)。上限を超えたら全文も差分も送らない(切り詰めない。送信前の確認にも進まない)
-        if len(after_text.body) > MAX_FULL_TEXT_CHARS:
-            return LlmAnalysis(status="skipped", reason="full_text_too_long", **built)
+        # 上限は設定の送る文全体の上限から決まる(ADR-0259)。使った全文の上限は detail に残す(画面の文が使った数を出すため。版は上げない)
+        full_limit = full_text_limit(request.max_prompt_chars)
+        too_long = {"max_full_text_chars": full_limit}
+        if len(after_text.body) > full_limit:
+            return LlmAnalysis(status="skipped", reason="full_text_too_long", detail=too_long, **built)
         prompt = with_after_text(prompt, after_text)
-        if prompt_too_long(prompt):
-            return LlmAnalysis(status="skipped", reason="full_text_too_long", **built)
+        if prompt_too_long(prompt, request.max_prompt_chars):
+            return LlmAnalysis(status="skipped", reason="full_text_too_long", detail=too_long, **built)
         spans.append((len(prompt) - len(after_text_section(after_text)), len(prompt), FULL))
     # 毎回付ける前提の文(ADR-0172 決定2)。全文の節の後ろ、打った文の前。送らない1回目にも入る(確認の全文と照合に同じ文が出る)
     prompt = with_premise(prompt, request.premise)
-    if after_text is not None and request.premise is not None and prompt_too_long(prompt):
+    if after_text is not None and request.premise is not None and prompt_too_long(prompt, request.max_prompt_chars):
         # 全文を付けたときは、前提を足した後の全体ももう一度見る(超えれば全文も差分も送らない)
-        return LlmAnalysis(status="skipped", reason="full_text_too_long", **built)
+        return LlmAnalysis(
+            status="skipped",
+            reason="full_text_too_long",
+            detail={"max_full_text_chars": full_text_limit(request.max_prompt_chars)},
+            **built,
+        )
     # 利用者が解析の前に打った文(REQ-206)。前提の後ろに置く。送らない1回目にも入るので、送信前の確認の全文と送る直前の照合に同じ文が出る
     prompt = with_extra_instruction(prompt, request.extra_instruction)
     # 表示中の差分への質問の節(REQ-312)。前提の後ろ。extra_instruction とは同時に持たない。後ろに足すだけなので直せる指示の部分に入る

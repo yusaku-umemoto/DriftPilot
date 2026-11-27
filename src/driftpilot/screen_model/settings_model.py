@@ -98,6 +98,7 @@ from driftpilot.llm_profiles import (
     update_profile,
     write_custom_file,
 )
+from driftpilot.llm_constants import DEFAULT_MAX_PROMPT_CHARS, is_prompt_chars
 from driftpilot.llm_settings import (
     ANTHROPIC_MESSAGES,
     AUTO_UPDATE_CHECK_KEY,
@@ -218,6 +219,7 @@ from driftpilot.messages import (
     key_store_note,
     key_summary,
     key_target_unknown,
+    PROMPT_CHARS_INVALID_SAVE,
     limit_invalid,
     limit_now_line,
     llm_check_confirm_lines,
@@ -251,6 +253,7 @@ from driftpilot.messages import (
     profile_row_title,
     profile_saved,
     profile_unreadable,
+    prompt_chars_now_line,
     PROMPT_BUILTIN_READ_ONLY,
     PROMPT_ROW_DETAIL,
     PROMPT_ROW_USER,
@@ -747,6 +750,9 @@ class ConfigFields:
     voice_press: str = "toggle"
     voice_llm_correct: bool = False  # [voice] llm_correct(REQ-342)
     partspilot_cli: str = ""
+    # AI に送る文全体の上限(ADR-0259。「比較と自動の動き」のタブの欄。今の値と、欄の下の薄い 2 行)
+    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
+    prompt_chars_note: str = ""
 
     @property
     def words_text(self) -> str:
@@ -1232,6 +1238,8 @@ def _config_fields(
         voice_press=voice_press,
         voice_llm_correct=voice_llm_correct,
         partspilot_cli=partspilot_cli,
+        max_prompt_chars=settings.max_prompt_chars,
+        prompt_chars_note=prompt_chars_now_line(settings.max_prompt_chars, settings.max_prompt_chars_source),
     )
 
 
@@ -1903,6 +1911,15 @@ def _parse_limit(text: str) -> int | None:
     return number if number >= 1 else None
 
 
+def _parse_prompt_chars(text: str) -> int | None:
+    """「AI に送る文の上限」の欄の文字を数にする(ADR-0259 決定4)。前後の空白を外し、10 進の数字だけで範囲の中のときだけ数。ほかは None。"""
+    value = text.strip()
+    if not (value.isascii() and value.isdecimal()):
+        return None
+    number = int(value)
+    return number if is_prompt_chars(number) else None
+
+
 def parse_words(text: str) -> tuple[list[str], list[int]]:
     """伏せる語の欄(1行1語)。前後の空白と空の行は除く。返すのは (語, 空白を含む行の番号)。決まりは読み込みと同じ。"""
     words: list[str] = []
@@ -1927,8 +1944,12 @@ def config_fields_changed(
     auto_compare: bool | None = None,
     auto_send_llm: bool | None = None,
     character: bool | None = None,
+    max_prompt_chars: str | None = None,
 ) -> bool:
     """枠に保存していない入力があるか(前面に来たときに読み直してよいかを見る)。
+
+    max_prompt_chars は「AI に送る文の上限」の欄の文字(pywebview の画面だけ。None なら比べない。ADR-0259 決定4)。
+    前後の空白を除いて、今の値の文字と違えば保存していない入力がある(範囲の外・数でない文字も「変えた」と数える)。
 
     prompt_template は使わない(REQ-116 で指示文はこの枠から出した。今の呼び方を変えないために位置だけ残す)。
     auto_compare は「自動で比較を始める」のチェック(pywebview の画面だけ)。None なら比べない(wx の画面には欄が無い)。
@@ -1939,6 +1960,8 @@ def config_fields_changed(
         return False
     typed = (max_diffs.strip(), max_total_diffs.strip(), [w.strip() for w in words.splitlines() if w.strip()])
     if typed != (str(fields.max_diffs), str(fields.max_total_diffs), list(fields.words)):
+        return True
+    if max_prompt_chars is not None and max_prompt_chars.strip() != str(fields.max_prompt_chars):
         return True
     if auto_send_llm is not None and auto_send_llm != fields.auto_send_llm:
         return True
@@ -1990,11 +2013,15 @@ def save_config(
     auto_send_llm: bool | None = None,
     *,
     character: bool | None = None,
+    max_prompt_chars: str | None = None,
     env: Mapping[str, str] | None = None,
     platform: str | None = None,
     home: Path | None = None,
 ) -> ConfigAction:
     """「保存」(設定ファイルの枠)。読み込んだときと違う項目だけを書く。
+
+    max_prompt_chars は「AI に送る文の上限」の欄の文字(pywebview の画面だけ。None なら触らない。ADR-0259 決定4)。
+    前後の空白を外し、100,000 以上 2,000,000 以下の整数でなければ何も書かずに PROMPT_CHARS_INVALID_SAVE を返す。
 
     入力が正しくなければ何も書かずに理由を返す(入力は画面に残す)。既定と同じ値でも、変えた項目は書いて残す。
     画面が読んだ後に設定ファイルがほかで変わっていたら書かず、reload を立てる(ADR-0071 決定4)。
@@ -2017,6 +2044,12 @@ def save_config(
             return ConfigAction(False, limit_invalid(label))
         if number != before:
             values[key] = number
+    if max_prompt_chars is not None:
+        chars = _parse_prompt_chars(max_prompt_chars)
+        if chars is None:
+            return ConfigAction(False, PROMPT_CHARS_INVALID_SAVE)
+        if chars != fields.max_prompt_chars:
+            values["max_prompt_chars"] = chars
     typed_words, bad = parse_words(words)
     if bad:
         return ConfigAction(False, secret_word_has_space(bad))

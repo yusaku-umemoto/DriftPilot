@@ -115,7 +115,7 @@ from driftpilot.llm_analyzer import (
     pair_prompt_parts,
     read_pair_answer,
 )
-from driftpilot.llm_analyzer.follow_up import MAX_PROMPT_CHARS, check_question, prompt_too_long
+from driftpilot.llm_analyzer.follow_up import check_question, prompt_too_long
 from driftpilot.llm_analyzer.masking import normalize_words
 from driftpilot.llm_analyzer.payload import source_of
 from driftpilot.llm_settings import (
@@ -232,8 +232,10 @@ from driftpilot.messages import (
     follow_up_refused,
     gui_web_call_failed,
     llm_column,
+    prompt_refused_text,
     unpaired_side_line,
     user_prompt_template_ignored,
+    with_prompt_limit_hint,
     workdir_api_key_ignored,
     workdir_limits_ignored,
 )
@@ -280,6 +282,7 @@ from driftpilot.screen_model.model import (
     SendBasis,
     basis_change,
     current_send_basis,
+    prompt_limit_lowered,
     send_basis,
     raw_defaults,
     EXPORT_FILE_TYPES,
@@ -2074,6 +2077,10 @@ class BatchApi(Api):
         kind = basis_change(confirmed, now)
         if kind in ("profile", "limits"):
             return None, (REREAD_NOT_SENT[kind], BATCH_NOT_SENT_TITLE)
+        longest = max((len(text) for text in approved.values()), default=0)
+        if prompt_limit_lowered(confirmed, now, longest):
+            # 上限が確認のときより下がり、承認した組のいちばん長い文がその値を超える。どの組も送らない(ADR-0259 決定7)
+            return None, (REREAD_NOT_SENT["prompt_chars"], BATCH_NOT_SENT_TITLE)
         if kind != "secret_words":
             return now, None
         try:
@@ -2619,8 +2626,9 @@ class BatchApi(Api):
                 return self._pair_ai_notice(batch_pair_ai_too_many(total, MAX_PAIR_NAMES))  # 一部だけ送ることはしない
             parts = pair_prompt_parts(list(targets.before), list(targets.after))
             prompt = parts.text
-            if prompt_too_long(prompt):
-                return self._pair_ai_notice(batch_pair_ai_too_long(MAX_PROMPT_CHARS))
+            limit = settings.max_prompt_chars  # 押すたびに読んだ設定の値(ADR-0259 決定3)
+            if prompt_too_long(prompt, limit):
+                return self._pair_ai_notice(with_prompt_limit_hint(batch_pair_ai_too_long(limit)))
             # 確認の間は門を持つ(比較の画面は走らせない。欄・切り替え・組を直す操作も止まる)
             if not self._session.acquire(self):
                 return self._ok()
@@ -2692,14 +2700,22 @@ class BatchApi(Api):
                     else:
                         assert confirmed is not None and now is not None
                         words = normalize_words(now.secret_words)
-                        if isinstance(instruction, str) and instruction != parts.instructions[0]:
-                            kind = check_question(instruction, words, max_chars=MAX_PROMPT_CHARS)
+                        edited = isinstance(instruction, str) and instruction != parts.instructions[0]
+                        if not edited and prompt_limit_lowered(confirmed, now, len(prompt)):
+                            # 上限が確認のときより下がり、承認した文がその値を超える。送らない(ADR-0259 決定7)。
+                            # 指示を直したときは、直す前の文ではなく直した後の文の長さを下で見る
+                            refusal = REREAD_NOT_SENT["prompt_chars"]
+                        elif edited:
+                            limit = now.max_prompt_chars  # 送る直前に読み直した値
+                            kind = check_question(instruction, words, max_chars=limit)
                             if kind is not None:
-                                refusal = follow_up_refused(kind, MAX_PROMPT_CHARS)
+                                refusal = prompt_refused_text(kind, limit)
                             else:
                                 prompt = parts.compose([instruction])
-                                if prompt_too_long(prompt):
-                                    refusal = batch_pair_ai_too_long(MAX_PROMPT_CHARS)
+                                if prompt_limit_lowered(confirmed, now, len(prompt)):
+                                    refusal = REREAD_NOT_SENT["prompt_chars"]
+                                elif prompt_too_long(prompt, limit):
+                                    refusal = with_prompt_limit_hint(batch_pair_ai_too_long(limit))
                         if refusal is None and basis_change(confirmed, now) == "secret_words":
                             # 今の秘密の語で、送る文を確認のときと同じ道で作り直す。1 字でも違えば送らない
                             instruction_text = instruction if isinstance(instruction, str) else None

@@ -274,6 +274,9 @@ CONFIG_FIELDS = (*CONFIG_TEXT_FIELDS, "auto_compare")
 # 「キャラクター（Mirarin）を表示する」のチェック(ADR-0174 決定1)。省いてよい欄(無ければ今の値のまま)。
 # 画面へは view の "character" で返す(config の values の形は変えない)
 CHARACTER_FIELD = "character"
+# 「AI に送る文の上限」の欄(ADR-0259 決定4)。省いてよい欄(無ければ今の値のまま)。文字で受け取り、変換と範囲の確かめは
+# settings_model.save_config。view の config の values に入れて返す(欄の値)
+PROMPT_CHARS_FIELD = "max_prompt_chars"
 # 文字で受け取る欄(真偽値の auto_compare・character は _take で別に確かめる)
 FORM_FIELDS = PROFILE_FIELDS + WIRE_FIELDS + CONFIG_TEXT_FIELDS
 # 「AI への指示文」の枠の欄(名前・本文。REQ-116 §3)。無ければ今の値のまま、文字列でなければ _BadRequest
@@ -289,7 +292,7 @@ CHOICE_VALUES = {
     "custom_auth": tuple(value for value, _ in CUSTOM_AUTH_CHOICES),
 }
 _EMPTY_TYPED = ("", FORMAT_VALUES[0], "", "", ProfileWireText())
-_EMPTY_CONFIG = ("", "", "", False, False)  # 設定ファイルが読めないとき
+_EMPTY_CONFIG = ("", "", "", False, False, "")  # 設定ファイルが読めないとき(最後は「AI に送る文の上限」の欄)
 # Python から画面への知らせの種類(送っている最中の状態)。static/js/settings.js が受ける
 VIEW_EVENT = "settings.view"
 # 窓のファイルのダイアログの種類(webview.FileDialog の OPEN・SAVE の値。webview は読まない)と、選べるファイルの種類
@@ -411,7 +414,7 @@ class SettingsApi(Api):
         # プロファイルの欄: (名前, 形式, モデル, 接続先, 送り方の欄の文字)
         self._typed: tuple[str, str, str, str, ProfileWireText] = _EMPTY_TYPED
         # 設定ファイルの枠の欄: (上限1組, 上限全体, 伏せる語, 自動で比較を始める, キャラクターを表示する)
-        self._config_typed: tuple[str, str, str, bool, bool] = _EMPTY_CONFIG
+        self._config_typed: tuple[str, str, str, bool, bool, str] = _EMPTY_CONFIG
         # 設定ファイルの枠の「比較の後に自動で AI に送る」(ADR-0080 決定2)
         self._auto_send_typed = False
         # 「AI への指示文」の枠(REQ-116 §3): 読んだ状態・選んでいる指示文・欄の値(名前, 本文)
@@ -711,13 +714,17 @@ class SettingsApi(Api):
 
     def _config_args(self) -> tuple[str, str, str, None, bool]:
         """設定ファイルの枠の欄を、save_config・config_fields_changed の引数の並びにする(指示文の位置は None)。"""
-        max_diffs, max_total_diffs, words, auto_compare, _character = self._config_typed
+        max_diffs, max_total_diffs, words, auto_compare, _character, _prompt_chars = self._config_typed
         return max_diffs, max_total_diffs, words, None, auto_compare
 
     def _config_changed_now(self, fields: Any) -> bool:
-        """設定ファイルの枠に保存していない入力があるか(自動送信とキャラクターのチェックも見る)。"""
+        """設定ファイルの枠に保存していない入力があるか(自動送信・キャラクターのチェックと、AI に送る文の上限の欄も見る)。"""
         return config_fields_changed(
-            fields, *self._config_args(), auto_send_llm=self._auto_send_typed, character=self._config_typed[4]
+            fields,
+            *self._config_args(),
+            auto_send_llm=self._auto_send_typed,
+            character=self._config_typed[4],
+            max_prompt_chars=self._config_typed[5],
         )
 
     def _call(self, func: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]:
@@ -792,12 +799,16 @@ class SettingsApi(Api):
         # キャラクターのチェックは省いてよい(無ければ今の値のまま。ADR-0174 決定1)
         if CHARACTER_FIELD in form and not isinstance(form[CHARACTER_FIELD], bool):
             raise _BadRequest
+        # 「AI に送る文の上限」の欄も省いてよい(無ければ今の値のまま。ADR-0259 決定4)。文字列でなければ _BadRequest
+        if PROMPT_CHARS_FIELD in form and not isinstance(form[PROMPT_CHARS_FIELD], str):
+            raise _BadRequest
         self._take_premise(form)
         wire =ProfileWireText(**{name: form[name] for name in WIRE_FIELDS})
         self._auto_send_typed = form.get("auto_send_llm", self._auto_send_typed)
         self._typed = (*(form[name] for name in PROFILE_FIELDS), wire)  # type: ignore[assignment]
         character = form.get(CHARACTER_FIELD, self._config_typed[4])
-        self._config_typed = (*(form[name] for name in CONFIG_FIELDS), character)  # type: ignore[assignment]
+        prompt_chars = form.get(PROMPT_CHARS_FIELD, self._config_typed[5])
+        self._config_typed = (*(form[name] for name in CONFIG_FIELDS), character, prompt_chars)  # type: ignore[assignment]
         self._prompt_typed = tuple(  # type: ignore[assignment]
             form.get(name, current) for name, current in zip(PROMPT_FIELDS, self._prompt_typed, strict=True)
         )
@@ -889,6 +900,7 @@ class SettingsApi(Api):
                     fields.words_text,
                     fields.auto_compare,
                     fields.character,
+                    str(fields.max_prompt_chars),
                 )
                 self._auto_send_typed = fields.auto_send_llm
             else:
@@ -1079,8 +1091,12 @@ class SettingsApi(Api):
                 "profile_note": view.key_profile_note,
             },
             "config": {
-                "values": dict(zip(CONFIG_FIELDS, self._config_typed[: len(CONFIG_FIELDS)], strict=True)),
+                "values": {
+                    **dict(zip(CONFIG_FIELDS, self._config_typed[: len(CONFIG_FIELDS)], strict=True)),
+                    PROMPT_CHARS_FIELD: self._config_typed[5],
+                },
                 "limits_note": fields.limits_note if fields else view.secret_words,
+                "prompt_chars_note": fields.prompt_chars_note if fields else "",
                 "words_note": f"{view.secret_words_note}\n{view.read_only_note}\n{CONFIG_SAVE_NOTE}",
                 "words_in_effect": f"{words}\n{fields.workdir_words}" if fields else words,
             },
@@ -1473,9 +1489,9 @@ class SettingsApi(Api):
             self._refresh_raw()
             return self._ok(notice=self._notice(saved.notice or "", RAW_DEFAULTS_TITLE))
 
-    def _write_config(self, fields: Any, typed: tuple[str, str, str, bool, bool], auto_send_llm: bool) -> dict[str, Any]:
+    def _write_config(self, fields: Any, typed: tuple[str, str, str, bool, bool, str], auto_send_llm: bool) -> dict[str, Any]:
         """ロックの中で呼ぶ。設定ファイルの枠の値を書く(読んだときと違う項目だけ)。"""
-        max_diffs, max_total_diffs, words, auto_compare, character = typed
+        max_diffs, max_total_diffs, words, auto_compare, character, prompt_chars = typed
         action = save_config(
             fields,
             max_diffs,
@@ -1485,6 +1501,7 @@ class SettingsApi(Api):
             auto_compare,
             auto_send_llm,
             character=character,
+            max_prompt_chars=prompt_chars,
             **self._kw("env", "platform", "home"),
         )
         self._mark_saved(action.ok)
@@ -1494,7 +1511,7 @@ class SettingsApi(Api):
             self._refresh(keep_edits=True)
         return self._ok(notice=notice)
 
-    def _auto_send_confirmed(self, typed: tuple[str, str, str, bool, bool], confirmed: str) -> dict[str, Any]:
+    def _auto_send_confirmed(self, typed: tuple[str, str, str, bool, bool, str], confirmed: str) -> dict[str, Any]:
         """自動送信の確かめで「はい」。接続をもう一度確かめ、確かめを出したときの値で書く。文が変わっていれば確かめ直す。"""
         fields = self._current().config_fields
         if fields is None:

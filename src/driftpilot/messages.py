@@ -14,7 +14,16 @@ from typing import TYPE_CHECKING, Any
 from driftpilot import i18n as _i18n
 
 # 上限の既定値と印の名前(ほかのモジュールを読み込まない小さなモジュール。比較の部品は読まない。ADR-0167)
-from driftpilot.llm_constants import DEFAULT_MAX_DIFFS, DEFAULT_MAX_TOTAL_DIFFS, PROMPT_MARKS
+from driftpilot.llm_constants import (
+    DEFAULT_MAX_DIFFS,
+    DEFAULT_MAX_PROMPT_CHARS,
+    DEFAULT_MAX_TOTAL_DIFFS,
+    FULL_TEXT_MARGIN_CHARS,
+    LEGACY_MAX_FULL_TEXT_CHARS,
+    MAX_MAX_PROMPT_CHARS,
+    MIN_MAX_PROMPT_CHARS,
+    PROMPT_MARKS,
+)
 
 if TYPE_CHECKING:
     from driftpilot.batch_io import Pairing
@@ -749,7 +758,9 @@ def llm_reason(llm: LlmAnalysis) -> str:
     if llm.reason == "gave_up":
         text = text.format(give_up_after=_llm_give_up_after())
     if llm.reason == "full_text_too_long":
-        text = full_text_too_long()
+        # 送ろうとしたときの全文の上限は補足の欄にある。無い古い保存は、そのころの固定の上限(150,000)で断っていた(ADR-0259)
+        used = llm.detail.get("max_full_text_chars")
+        text = full_text_too_long(used if type(used) is int else LEGACY_MAX_FULL_TEXT_CHARS)
     if _rate_limited(llm):
         # 保存した結果・一括比較の列・CLI の text の欄(秒は保存しないので出さない。ADR-0168 決定4)
         text = f"{LLM_RATE_LIMITED}。しばらく待ってから、もう一度試してください"
@@ -776,11 +787,12 @@ LLM_NO_PREMISE_HELP = "毎回付ける前提（設定の窓の「プロンプト
 LLM_NO_PREMISE_ALONE = "--llm-no-premise は --llm か --llm-dry-run と一緒に指定してください"
 
 
-def full_text_too_long() -> str:
-    """変更後の全文か全体が上限を超えたので送らなかったとき(ADR-0158 決定5)。最初の解析と追加の質問で同じ文。"""
-    from driftpilot.llm_analyzer.payload import MAX_FULL_TEXT_CHARS
+def full_text_too_long(max_full_text_chars: int) -> str:
+    """変更後の全文か全体が上限を超えたので送らなかったとき(ADR-0158 決定5)。最初の解析と追加の質問で同じ文。
 
-    return _LLM_REASON["full_text_too_long"].format(max_full_text_chars=f"{MAX_FULL_TEXT_CHARS:,}")
+    数は使った全文の上限(設定の送る文の上限 − 余白。ADR-0259)。
+    """
+    return _LLM_REASON["full_text_too_long"].format(max_full_text_chars=f"{max_full_text_chars:,}")
 
 
 def llm_truncated_lines(llm: LlmAnalysis) -> list[str]:
@@ -871,6 +883,9 @@ def llm_screen_lines(llm: LlmAnalysis, *, retry_after: int | None = None) -> lis
         lines.append(f"AI 解析: 未実施({llm_rate_limited(retry_after)}(HTTP {RATE_LIMIT_STATUS}))")
     elif llm.status != "done":
         lines.append(f"AI 解析: 未実施({llm_reason(llm)})")
+        if llm.reason == "full_text_too_long":
+            # 送る文の長さで送らなかったときも、上限を変えられる場所を 1 行添える(ADR-0259 決定5。CLI・wx・保存には足さない)
+            lines.append(PROMPT_LIMIT_SCREEN_HINT)
     if llm.truncated:
         # 打ち切りの知らせの後ろに、上限を変えられる場所を1行添える(ADR-0167 決定6。CLI・wx・保存には足さない)
         lines += [*llm_truncated_lines(llm), LIMITS_SCREEN_HINT]
@@ -989,6 +1004,26 @@ LIMIT_SOURCE_LABEL = {"default": "既定", "user_config": "設定ファイル", 
 LIMITS_CHANGE_HINT = "設定画面か設定ファイルで変えられます"
 # pywebview の比較の窓で、1組の上限で打ち切ったことを出すときに添える文(ADR-0167 決定6)。CLI・wx・一括比較の窓は使わない
 LIMITS_SCREEN_HINT = "上限は設定画面の「比較と自動の動き」のタブで変えられます"
+# 送る文の長さで送らなかったときの知らせに添える 1 文(ADR-0259 決定5)。画面だけ。CLI の文・保存する結果には足さない
+PROMPT_LIMIT_SCREEN_HINT = "上限は設定画面の「比較と自動の動き」のタブで変えられます"
+# AI が長すぎると断ったとき、画面に出す誤りの文の後ろに足す 1 行(ADR-0259 決定6)
+CONTEXT_LENGTH_HINT = (
+    "送る文が AI の扱える長さを超えたようです。設定画面の「AI に送る文の上限」を下げるか、送る範囲を減らしてください"
+)
+
+
+def with_prompt_limit_hint(text: str) -> str:
+    """送る文の長さで送らなかったときの知らせの後ろに、上限を変えられる場所の 1 文を足す(ADR-0259 決定5)。"""
+    return f"{text.rstrip('。')}。{PROMPT_LIMIT_SCREEN_HINT}"
+
+
+def prompt_refused_text(kind: str, max_chars: int) -> str:
+    """送る前の確認で直した指示を断った理由の文(follow_up_refused)。長さで断ったときだけ、上限を変えられる場所の 1 文を足す。
+
+    max_chars は送る文全体の上限(長さ以外の理由では使わない)。
+    """
+    text = follow_up_refused(kind, max_chars)
+    return with_prompt_limit_hint(text) if kind == "too_long" else text
 # wx の設定ファイルの枠の見出し(pywebview の設定画面は CONFIG_PANE_WEB。ADR-0167 決定5)
 CONFIG_PANE = "設定ファイル（config.toml）: AI 解析の上限・伏せる語の追加"
 # pywebview の設定画面の「設定ファイル」のタブの見出しと、上限の欄を移したことの案内(ADR-0167 決定5)
@@ -1091,6 +1126,23 @@ def workdir_limits_ignored(path: Path, names: "list[str] | tuple[str, ...]") -> 
 
 def limit_invalid(label: str) -> str:
     return f"AI 解析の上限（{label}）は 1 以上の整数にしてください。保存していません"
+
+
+# 「AI に送る文の上限」の欄(ADR-0259 決定4)。数は既定・範囲・余白の定数から作る
+PROMPT_CHARS_LABEL_WEB = f"AI に送る文の上限（既定 {DEFAULT_MAX_PROMPT_CHARS:,} 文字）"
+PROMPT_CHARS_NOTE_WEB = (
+    "長いほど 1 回の料金と待ち時間が増えます。AI が長すぎると断るときは下げてください"
+    f"（全文はこの値から {FULL_TEXT_MARGIN_CHARS:,} 文字を引いた長さまで）"
+)
+PROMPT_CHARS_NOW_LABEL = "AI に送る文の上限"
+PROMPT_CHARS_INVALID_SAVE = (
+    f"AI に送る文の上限は {MIN_MAX_PROMPT_CHARS:,} 以上 {MAX_MAX_PROMPT_CHARS:,} 以下の整数にしてください。保存していません"
+)
+
+
+def prompt_chars_now_line(value: int, source: str) -> str:
+    """設定画面の「AI に送る文の上限」の欄の下に薄く出す、今の値と出どころ(limit_now_line と同じ形。単位は文字)。"""
+    return f"{PROMPT_CHARS_NOW_LABEL}: 今は {value:,} 文字（{LIMIT_SOURCE_LABEL[source]}）"
 
 
 def secret_word_has_space(lines: "list[int]") -> str:
@@ -2781,6 +2833,7 @@ REREAD_NOT_SENT = {
     "secret_words": "確認の後に秘密の語が変わったため、送っていません。もう一度確認してください",
     "profile": "確認の後に AI プロファイルが変わったため、送っていません。もう一度確認してください",
     "limits": "確認の後に AI に送る上限が変わったため、送っていません。もう一度確認してください",
+    "prompt_chars": "確認の後に AI に送る文の上限が変わったため、送っていません。もう一度確認してください",
 }
 BATCH_FAILED_TITLE = "一括比較に失敗しました"
 BATCH_SELECT_TITLE = "組を選んでください"
@@ -3252,6 +3305,8 @@ GUI_WEB_TEXTS.update(
         "settings.config.limits": LIMITS_TITLE_WEB,
         "settings.config.per_job": LIMIT_PER_JOB_WEB,
         "settings.config.total": LIMIT_TOTAL_WEB,
+        "settings.config.prompt_chars": PROMPT_CHARS_LABEL_WEB,
+        "settings.config.prompt_chars_hint": PROMPT_CHARS_NOTE_WEB,
         "settings.note.limits_moved": SETTINGS_NOTE_LIMITS_MOVED,
         "settings.config.words": SECRET_WORDS_TITLE,
         "settings.config.auto_compare": SETTINGS_AUTO_COMPARE,
@@ -4973,6 +5028,10 @@ LLMSET_ERRORS = {
     "non_empty_string": "{path}: {section}.{key} は空でない文字列にしてください",
     "extra_secret_words": "{path}: {section}.extra_secret_words は、空白を含まない語のリストにしてください",
     "positive_int": "{path}: {section}.{key} は 1 以上の整数にしてください",
+    # 値は文に入れない(ADR-0259 決定1)
+    "prompt_chars": (
+        f"{{path}}: AI に送る文の上限（max_prompt_chars）は {MIN_MAX_PROMPT_CHARS:,} 以上 {MAX_MAX_PROMPT_CHARS:,} 以下の整数にしてください"
+    ),
     "api_key_string": "{path}: {section}.api_key は空でない文字列にしてください",
 }
 
@@ -5085,6 +5144,9 @@ UCW_TEXTS = {
     "not_removable_item": "設定画面から消せない項目です: {key}",
     "extra_secret_words": "{path}: {section}.extra_secret_words は、空白を含まない語のリストにしてください",
     "positive_integer": "{path}: {section}.{key} は 1 以上の整数にしてください",
+    "prompt_chars": (
+        f"{{path}}: AI に送る文の上限（max_prompt_chars）は {MIN_MAX_PROMPT_CHARS:,} 以上 {MAX_MAX_PROMPT_CHARS:,} 以下の整数にしてください"
+    ),
     "toml_unreadable": "{path}: TOML として読めません",
     "not_table": "{path}: [{name}] は表にしてください",
     "cannot_write": "{path}: 書けません ({reason})",

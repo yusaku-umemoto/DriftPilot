@@ -23,7 +23,6 @@ from driftpilot.llm_analyzer.masking import (
     wrapped_secret_groups,
 )
 from driftpilot.llm_analyzer.payload import (
-    MAX_FULL_TEXT_CHARS,
     AfterText,
     LlmInputs,
     WholeSection,
@@ -32,11 +31,13 @@ from driftpilot.llm_analyzer.payload import (
     whole_body,
 )
 from driftpilot.llm_analyzer.types import LlmAnalysis
+from driftpilot.llm_constants import DEFAULT_MAX_FULL_TEXT_CHARS, DEFAULT_MAX_PROMPT_CHARS
 
 # 追加の質問の回数・1つの質問の文字数・合わせた文の文字数の上限(どれも str の文字数)
 MAX_TURNS = 20
 MAX_QUESTION_CHARS = 4000
-MAX_PROMPT_CHARS = 200_000
+# 合わせた文の上限の既定の値(設定の max_prompt_chars で変わる。ADR-0259)。呼ぶ側が今の設定の値を渡す
+MAX_PROMPT_CHARS = DEFAULT_MAX_PROMPT_CHARS
 # やり取りの種類
 ANSWER = "answer"
 QUESTION = "question"
@@ -125,8 +126,11 @@ def rebuild_after_text(
     inputs: LlmInputs | None,
     first: LlmAnalysis,
     extra_words: Sequence[str],
+    max_full_text_chars: int = DEFAULT_MAX_FULL_TEXT_CHARS,
 ) -> AfterText | str:
     """追加の質問で送る変更後の全文(ADR-0158 決定7)。作れなければ理由(REBUILD_MISMATCH・REBUILD_TOO_LONG)。
+
+    max_full_text_chars は全文の上限(設定の送る文の上限 − 余白。省けば既定。ADR-0259)。
 
     記号の対応表は残さないので、新しい Masker で最初の送信と同じ入力・同じ順に build_payload をやり直し、続けて全文を判定する
     (順番が同じなので、同じ値は最初の送信と同じ <secret:N> になる)。語は最初に送ったときの語と今の設定の語を合わせる。
@@ -157,7 +161,7 @@ def rebuild_after_text(
     first_unsent = first.unsent.lines if first.unsent is not None else 0
     if payload.sent_diffs != first.sent_diffs or payload.unsent.lines != first_unsent:
         return REBUILD_MISMATCH
-    if len(payload.after_text.body) > MAX_FULL_TEXT_CHARS:
+    if len(payload.after_text.body) > max_full_text_chars:
         return REBUILD_TOO_LONG
     return payload.after_text
 
@@ -252,6 +256,7 @@ def rebuild_whole_after_text(
     selected: int,
     first: LlmAnalysis,
     extra_words: Sequence[str],
+    max_full_text_chars: int = DEFAULT_MAX_FULL_TEXT_CHARS,
 ) -> AfterText | str:
     """全部の組をまとめて送った答えへの追加の質問で送る、選んでいる組の変更後の全文(ADR-0152 決定10・ADR-0158 決定7)。
 
@@ -283,14 +288,14 @@ def rebuild_whole_after_text(
         ),
         masker=masker,
     )
-    if len(after_text.body) > MAX_FULL_TEXT_CHARS:
+    if len(after_text.body) > max_full_text_chars:
         return REBUILD_TOO_LONG
     return after_text
 
 
-def prompt_too_long(text: str) -> bool:
-    """合わせた文が上限を超えるか(超えれば送らない)。"""
-    return len(text) > MAX_PROMPT_CHARS
+def prompt_too_long(text: str, max_chars: int = DEFAULT_MAX_PROMPT_CHARS) -> bool:
+    """合わせた文が上限(設定の max_prompt_chars。省けば既定。ADR-0259)を超えるか(超えれば送らない)。"""
+    return len(text) > max_chars
 
 
 def check_question(question: str, secret_words: Sequence[str], *, max_chars: int = MAX_QUESTION_CHARS) -> str | None:

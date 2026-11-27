@@ -82,6 +82,7 @@ function form() {
     env_suffix: $("env-suffix").value,
     max_diffs: $("max-diffs").value,
     max_total_diffs: $("max-total-diffs").value,
+    max_prompt_chars: $("max-prompt-chars").value,
     words: $("words").value,
     auto_compare: $("auto-compare").checked,
     auto_send_llm: $("auto-send-llm").checked,
@@ -363,12 +364,14 @@ function render(next) {
     shown.fillConfig = next.fill_config;
     $("max-diffs").value = next.config.values.max_diffs;
     $("max-total-diffs").value = next.config.values.max_total_diffs;
+    $("max-prompt-chars").value = next.config.values.max_prompt_chars;
     $("words").value = next.config.values.words;
     $("auto-compare").checked = next.config.values.auto_compare;
     $("auto-send-llm").checked = next.auto_send.checked;
     $("character").checked = next.character.checked;
   }
   text($("limits-note"), next.config.limits_note);
+  text($("prompt-chars-note"), next.config.prompt_chars_note);
   text($("words-note"), next.config.words_note);
   text($("words-in-effect"), next.config.words_in_effect);
   renderPrompt(next);

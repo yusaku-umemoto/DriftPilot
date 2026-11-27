@@ -1,6 +1,6 @@
 """利用者ごとの設定ファイル(config.toml)を設定画面から書く(REQ-93 / ADR-0071 決定2〜4)。
 
-書けるのは [llm] の max_diffs・max_total_diffs・extra_secret_words(WRITABLE)と、
+書けるのは [llm] の max_diffs・max_total_diffs・max_prompt_chars(ADR-0259)・extra_secret_words(WRITABLE)と、
 [gui] の auto_compare・character・auto_update_check(GUI_WRITABLE。update_gui_items。ADR-0076 決定3・ADR-0174 決定1・ADR-0188 決定2)と、
 [gui] の auto_send_llm(update_gui_auto_send。ADR-0080 決定2。設定画面がオンにする前に確かめを出す)と、
 [gui] の theme(update_gui_theme。ADR-0189。"system"・"light"・"dark" だけ。真偽値とは別の口)だけ。
@@ -33,6 +33,7 @@ import tomlkit
 from tomlkit.container import OutOfOrderTableProxy
 from tomlkit.items import Array, InlineTable, Table, Whitespace
 
+from driftpilot.llm_constants import is_prompt_chars
 from driftpilot.llm_settings import (
     AUTO_COMPARE_KEY,
     AUTO_SEND_LLM_KEY,
@@ -41,6 +42,7 @@ from driftpilot.llm_settings import (
     GUI_SECTION,
     PRESS_MODES,
     PRESS_TOGGLE,
+    PROMPT_CHARS_KEY,
     PROMPT_TEMPLATE_KEY,
     SECTION,
     SERIES_CLI_KEY,
@@ -63,6 +65,7 @@ from driftpilot.llm_settings import (
     is_secret_word,
     limit_of,
     parse_section,
+    prompt_chars_of,
     read_bytes,
     theme_of,
     voice_settings_of,
@@ -72,7 +75,7 @@ from driftpilot.messages import CONFIG_CHANGED_ELSEWHERE, gui_language_invalid
 from driftpilot.messages import UCW_TEXTS as _T
 
 # 画面から書ける項目(ADR-0071 決定1)。これ以外の名前は update_llm_items が断る(prompt_template は ADR-0079 決定5 で外した)
-WRITABLE = ("max_diffs", "max_total_diffs", "extra_secret_words")
+WRITABLE = ("max_diffs", "max_total_diffs", PROMPT_CHARS_KEY, "extra_secret_words")
 # 消す関数だけを残す項目(ADR-0075 決定3。REQ-116 §2 で関数は残す)。api_key は remove_api_key だけで消す
 REMOVABLE = (PROMPT_TEMPLATE_KEY,)
 # 画面から書ける [gui] の項目(ADR-0076 決定3。character は ADR-0174 決定1、auto_update_check は ADR-0188 決定2)。[llm] の WRITABLE とは混ぜない。これ以外の名前は update_gui_items が断る
@@ -100,6 +103,7 @@ class UserConfigSnapshot:
     digest: str | None
     max_diffs: int | None = None
     max_total_diffs: int | None = None
+    max_prompt_chars: int | None = None  # AI に送る文全体の上限(ADR-0259。書いてあるときだけ値)
     extra_secret_words: tuple[str, ...] = ()
     has_api_key: bool = False
     auto_compare: bool = True
@@ -149,6 +153,7 @@ def read_user_config(path: Path) -> UserConfigSnapshot:
         digest=digest_of(data),
         max_diffs=limit_of(section, "max_diffs", path),
         max_total_diffs=limit_of(section, "max_total_diffs", path),
+        max_prompt_chars=prompt_chars_of(section, path),
         extra_secret_words=words_of(section, path),
         has_api_key=_file_key(section) is not None,
         auto_compare=auto_compare_of(data),
@@ -182,6 +187,11 @@ def _check(values: Mapping[str, object], path: Path) -> dict[str, object]:
             if not isinstance(words, list) or not all(is_secret_word(w) for w in words):
                 raise SettingsError(_T["extra_secret_words"].format(path=path, section=SECTION))
             checked[key] = words
+        elif key == PROMPT_CHARS_KEY:
+            # AI に送る文全体の上限は、100,000〜2,000,000 の整数(読み込みと同じ決まり。ADR-0259 決定1)
+            if not is_prompt_chars(value):
+                raise SettingsError(_T["prompt_chars"].format(path=path))
+            checked[key] = value
         else:
             if not is_limit(value):
                 raise SettingsError(_T["positive_integer"].format(path=path, section=SECTION, key=key))

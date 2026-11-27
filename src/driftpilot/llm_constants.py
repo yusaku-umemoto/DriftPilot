@@ -10,6 +10,27 @@ DEFAULT_MAX_DIFFS = 100
 # 送る差分の合計の上限の既定値(ADR-0031 決定4)。1組の上限(既定 100)の10組分
 DEFAULT_MAX_TOTAL_DIFFS = 1000
 
+# AI に送る文全体の上限の既定値・範囲・全文の余白(ADR-0259 決定1・2)。全文の上限 = 送る文全体の上限 − 余白
+DEFAULT_MAX_PROMPT_CHARS = 600_000
+MIN_MAX_PROMPT_CHARS = 100_000
+MAX_MAX_PROMPT_CHARS = 2_000_000
+FULL_TEXT_MARGIN_CHARS = 50_000
+# 既定の全文の上限(既定 − 余白)
+DEFAULT_MAX_FULL_TEXT_CHARS = DEFAULT_MAX_PROMPT_CHARS - FULL_TEXT_MARGIN_CHARS
+# 全文の上限が設定で変わる前の保存(補足の欄に使った上限が無い保存)が断ったときの固定の上限。古い保存の画面の文に使う
+LEGACY_MAX_FULL_TEXT_CHARS = 150_000
+
+
+def full_text_limit(max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS) -> int:
+    """全文の上限(送る文全体の上限 − 余白)。"""
+    return max_prompt_chars - FULL_TEXT_MARGIN_CHARS
+
+
+def is_prompt_chars(value: object) -> bool:
+    """送る文全体の上限にできる値か(真偽値でない整数で、範囲の中。ADR-0259 決定1)。"""
+    return type(value) is int and MIN_MAX_PROMPT_CHARS <= value <= MAX_MAX_PROMPT_CHARS
+
+
 # ひな形の印(ADR-0075 決定1)。{{diff}} だけが必須で、ちょうど1回
 MARK_DIFF = "diff"
 MARK_DIFF_FORMAT = "diff_format"

@@ -15,6 +15,8 @@ core はこのモジュールを読まない(ADR-0015 決定5)。入口(CLI / GU
 AI 解析の送る件数の上限(max_diffs・max_total_diffs)は、コマンドの指定 ＞ 利用者ごとの設定ファイル ＞ 既定 の順(ADR-0071 決定5)。
 設定ファイルの値は load_settings が読み、コマンドの指定は入口が with_cli_limits で重ねる。作業フォルダの上限は読まない
 (書いてあれば ignored_workdir_limits に項目名を持ち、入口が注意を1行出す)。
+AI に送る文全体の上限(max_prompt_chars。100,000〜2,000,000 の整数、既定 600,000。ADR-0259)も同じ道で、利用者ごとの設定ファイルだけから
+読む(prompt_chars_of。コマンドの指定は足さない)。全文の上限はここから 50,000 を引いた値(llm_constants.full_text_limit)。
 
 AI への指示文のひな形(prompt_template。ADR-0075・ADR-0079)は、指示文のプロファイル(prompt-profiles.json。
 prompt_profiles.py)から読む。使うのは使用中のプロファイル(prompt_profile の名前があればそれ。無い名前なら
@@ -104,6 +106,13 @@ from driftpilot.llm_analyzer.custom_http import CUSTOM_AUTH_NONE, CustomHttpJson
 from driftpilot.llm_analyzer.look_rules import LookRulesClient
 from driftpilot.llm_analyzer.openai_client import DEFAULT_BASE_URL  # noqa: F401 - 設定画面の「接続先(既定)」。openai は読まない
 from driftpilot.llm_analyzer.wire import AUTH_API_KEY, AUTH_BEARER, DEFAULT_WIRE, WireOptions
+from driftpilot.llm_constants import (
+    DEFAULT_MAX_PROMPT_CHARS,
+    FULL_TEXT_MARGIN_CHARS,
+    MAX_MAX_PROMPT_CHARS,
+    MIN_MAX_PROMPT_CHARS,
+    is_prompt_chars,
+)
 from driftpilot.messages import (
     CONFIG_TEMPLATE_NOTE,
     LLMP_ERRORS,
@@ -128,10 +137,12 @@ WORKDIR_CONFIG = "driftpilot.toml"
 SECTION = "llm"
 # AI 解析の送る件数の上限の項目(ADR-0071 決定5)
 LIMIT_KEYS = ("max_diffs", "max_total_diffs")
+# AI に送る文全体の上限の項目(ADR-0259 決定1。範囲は 100,000〜2,000,000 の整数。LIMIT_KEYS の「1 以上」とは判定が違うので別にする)
+PROMPT_CHARS_KEY = "max_prompt_chars"
 # AI への指示文のひな形の項目(ADR-0075 決定3)。今は読まない(ADR-0079 決定5。書いてあれば注意を出すために名前を持つ)
 PROMPT_TEMPLATE_KEY = "prompt_template"
 # 作業フォルダの設定ファイルから読まない項目(書いてあれば ignored_workdir_limits に名前を持つ)
-USER_ONLY_KEYS = (*LIMIT_KEYS, PROMPT_TEMPLATE_KEY)
+USER_ONLY_KEYS = (*LIMIT_KEYS, PROMPT_CHARS_KEY, PROMPT_TEMPLATE_KEY)
 # 画面の動きの表と、比較の画面の自動の比較の項目(ADR-0076 決定3。真偽値。書かれていなければ真)
 GUI_SECTION = "gui"
 AUTO_COMPARE_KEY = "auto_compare"
@@ -183,6 +194,8 @@ CONFIG_TEMPLATE = f"""\
 # AI に送る差分の件数の上限（1組あたり・全体。1 以上の整数。書かなければ既定の値を使います）
 # max_diffs = {DEFAULT_MAX_DIFFS}
 # max_total_diffs = {DEFAULT_MAX_TOTAL_DIFFS}
+# AI に送る文の上限（文字。{MIN_MAX_PROMPT_CHARS:,}〜{MAX_MAX_PROMPT_CHARS:,}。全文はこの値から {FULL_TEXT_MARGIN_CHARS:,} を引いた長さまで。書かなければ {DEFAULT_MAX_PROMPT_CHARS:,}）
+# max_prompt_chars = {DEFAULT_MAX_PROMPT_CHARS}
 
 # プロンプトは、設定画面の「プロンプト」の枠でプロファイルとして編集できます。差分を入れる印 {{{{diff}}}} が要ります
 # 比較の画面で、ファイルが2つそろったら自動で比較を始めるか（[gui] の auto_compare。書かなければ始めます）は、設定画面の「設定ファイル」の枠で変えられます
@@ -266,6 +279,9 @@ class LlmSettings:
     max_diffs_source: str = "default"
     max_total_diffs: int = DEFAULT_MAX_TOTAL_DIFFS
     max_total_diffs_source: str = "default"
+    # AI に送る文全体の上限と出どころ("default" / "user_config")。ADR-0259 決定1。全文の上限はここから余白を引いた値
+    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
+    max_prompt_chars_source: str = "default"
     # 作業フォルダの設定ファイルに書いてあった上限・指示文のひな形の項目名(読んでいない)
     ignored_workdir_limits: tuple[str, ...] = ()
     # AI への指示文のひな形(使う指示文のプロファイルの本文。「既定」なら None で既定の文。ADR-0075・ADR-0079)
@@ -480,6 +496,18 @@ def limit_of(section: Mapping[str, Any], key: str, path: Path) -> int | None:
         return None
     if not is_limit(value):
         raise SettingsError(LLMSET_ERRORS["positive_int"].format(path=path, section=SECTION, key=key))
+    return value
+
+
+def prompt_chars_of(section: Mapping[str, Any], path: Path) -> int | None:
+    """[llm] の max_prompt_chars(AI に送る文全体の上限。ADR-0259 決定1)。無ければ None。
+    範囲外(100,000〜2,000,000 の外)・整数でない・真偽値なら SettingsError(値は入れない)。
+    """
+    value = section.get(PROMPT_CHARS_KEY)
+    if value is None:
+        return None
+    if not is_prompt_chars(value):
+        raise SettingsError(LLMSET_ERRORS["prompt_chars"].format(path=path))
     return value
 
 
@@ -760,6 +788,7 @@ def load_settings(
     work_words = words_of(work, work_path)  # 設定画面で別に見せる(workdir_secret_words)
     # 上限は利用者ごとの設定ファイルからだけ読む(作業フォルダの値は読まず、検査もしない。ADR-0071 決定5)
     limits = {key: limit_of(user, key, user_path) for key in LIMIT_KEYS}
+    prompt_chars = prompt_chars_of(user, user_path)  # 送る文全体の上限も同じ道(ADR-0259 決定1)
     # 指示文は指示文のプロファイルから読む。config.toml と作業フォルダの prompt_template は読まず、検査もしない(ADR-0079)
     prompt_template: str | None = None
     prompt_chosen = None
@@ -837,6 +866,8 @@ def load_settings(
         max_diffs_source="default" if limits["max_diffs"] is None else "user_config",
         max_total_diffs=DEFAULT_MAX_TOTAL_DIFFS if limits["max_total_diffs"] is None else limits["max_total_diffs"],
         max_total_diffs_source="default" if limits["max_total_diffs"] is None else "user_config",
+        max_prompt_chars=DEFAULT_MAX_PROMPT_CHARS if prompt_chars is None else prompt_chars,
+        max_prompt_chars_source="default" if prompt_chars is None else "user_config",
         ignored_workdir_limits=tuple(key for key in USER_ONLY_KEYS if key in work),
         workdir_secret_words=work_words,
         prompt_template=prompt_template,
@@ -1017,6 +1048,7 @@ def build_request(
     """
     common = {
         "max_diffs": settings.max_diffs if max_diffs is None else max_diffs,
+        "max_prompt_chars": settings.max_prompt_chars,
         "extra_secret_words": settings.extra_secret_words,
         "prompt_template": settings.prompt_template,
         "premise": settings.premise,

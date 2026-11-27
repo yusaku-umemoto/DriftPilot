@@ -16,7 +16,7 @@ if TYPE_CHECKING:  # api_error は redact → payload → types を読む(循環
     from driftpilot.llm_analyzer.api_error import ApiErrorText
 
 # 値の元は driftpilot.llm_constants(画面のラベル「1 組あたり（既定 100 件）」も同じ値から作る。ADR-0167)
-from driftpilot.llm_constants import DEFAULT_MAX_DIFFS
+from driftpilot.llm_constants import DEFAULT_MAX_DIFFS, DEFAULT_MAX_PROMPT_CHARS, is_prompt_chars
 
 LlmStatus = Literal["done", "skipped"]
 # 未実施の理由。分岐には status を使い、reason は表示用(docs/notes/req-13-core.md の列挙の区分)
@@ -78,6 +78,7 @@ _QUESTION_TARGETS = ("structured", "show", "raw", "whole")
 # 利用者に見える誤りの文(日本語・英語。REQ-258)。鍵の組と差し込みの名前は両方で同じ。{value!r} は値の repr
 _TEXTS_JA = {
     "max_diffs_invalid": "max_diffs は 1 以上の整数にしてください: {value!r}",
+    "max_prompt_chars_invalid": "max_prompt_chars は 100,000 以上 2,000,000 以下の整数にしてください",
     "prompt_template_invalid": "prompt_template が使えません: {problem}",
     "extra_instruction_invalid": "extra_instruction は空でない文字列にしてください",
     "premise_invalid": "premise は空でない {max_chars} 文字以下の文字列にしてください",
@@ -94,6 +95,7 @@ _TEXTS_JA = {
 }
 _TEXTS_EN = {
     "max_diffs_invalid": "max_diffs must be an integer of 1 or more: {value!r}",
+    "max_prompt_chars_invalid": "max_prompt_chars must be an integer from 100,000 to 2,000,000",
     "prompt_template_invalid": "prompt_template cannot be used: {problem}",
     "extra_instruction_invalid": "extra_instruction must be a non-empty string",
     "premise_invalid": "premise must be a non-empty string of at most {max_chars} characters",
@@ -123,6 +125,8 @@ class LlmRequest:
     client: LLMClient | None = None
     unavailable: UnavailableReason | None = None
     max_diffs: int = DEFAULT_MAX_DIFFS
+    # 送る文全体の上限(設定の [llm].max_prompt_chars。ADR-0259)。全文の上限は、ここから余白を引いた値。範囲は llm_constants
+    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
     dry_run: bool = False
     extra_secret_words: tuple[str, ...] = ()
     # 比較の結果が失敗(status=error)なら送らない(compare_failed)。一括比較の送る段で使う(REQ-27 §A-8b)
@@ -224,6 +228,8 @@ class LlmRequest:
         # 無制限の経路を作らない(0 や負の数を受け付けない)
         if type(self.max_diffs) is not int or self.max_diffs < 1:
             raise ValueError(_T["max_diffs_invalid"].format(value=self.max_diffs))
+        if not is_prompt_chars(self.max_prompt_chars):
+            raise ValueError(_T["max_prompt_chars_invalid"])  # 文に値を入れない
         if self.prompt_template is not None:
             from driftpilot.llm_analyzer.prompt import check_prompt_template  # prompt がこのモジュールを読むため
 

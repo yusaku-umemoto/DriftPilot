@@ -12,7 +12,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 # Default limits and mark names (a small module that imports nothing else and none of the comparison parts. ADR-0167)
-from driftpilot.llm_constants import DEFAULT_MAX_DIFFS, DEFAULT_MAX_TOTAL_DIFFS, PROMPT_MARKS
+from driftpilot.llm_constants import (
+    DEFAULT_MAX_DIFFS,
+    DEFAULT_MAX_PROMPT_CHARS,
+    DEFAULT_MAX_TOTAL_DIFFS,
+    FULL_TEXT_MARGIN_CHARS,
+    LEGACY_MAX_FULL_TEXT_CHARS,
+    MAX_MAX_PROMPT_CHARS,
+    MIN_MAX_PROMPT_CHARS,
+    PROMPT_MARKS,
+)
 
 if TYPE_CHECKING:
     from driftpilot.batch_io import Pairing
@@ -762,7 +771,9 @@ def llm_reason(llm: LlmAnalysis) -> str:
     if llm.reason == "gave_up":
         text = text.format(give_up_after=_llm_give_up_after())
     if llm.reason == "full_text_too_long":
-        text = full_text_too_long()
+        # The full-text limit used is in the detail field. An older save without it was refused by the fixed limit of that time (150,000) (ADR-0259)
+        used = llm.detail.get("max_full_text_chars")
+        text = full_text_too_long(used if type(used) is int else LEGACY_MAX_FULL_TEXT_CHARS)
     if _rate_limited(llm):
         # Saved result, Batch compare column, CLI text field (seconds are not saved, so not shown; ADR-0168 decision 4)
         text = f"{LLM_RATE_LIMITED}. Wait a while, then try again"
@@ -789,11 +800,12 @@ LLM_NO_PREMISE_HELP = "Send to the AI without the always-attached premise ('Prom
 LLM_NO_PREMISE_ALONE = "Specify --llm-no-premise together with --llm or --llm-dry-run"
 
 
-def full_text_too_long() -> str:
-    """Text for when nothing was sent because the After full text or the whole exceeds the limit (ADR-0158 decision 5)."""
-    from driftpilot.llm_analyzer.payload import MAX_FULL_TEXT_CHARS
+def full_text_too_long(max_full_text_chars: int) -> str:
+    """Text for when nothing was sent because the After full text or the whole exceeds the limit (ADR-0158 decision 5).
 
-    return _LLM_REASON["full_text_too_long"].format(max_full_text_chars=f"{MAX_FULL_TEXT_CHARS:,}")
+    The number is the full-text limit that was used (the setting's limit on the text sent minus the margin; ADR-0259).
+    """
+    return _LLM_REASON["full_text_too_long"].format(max_full_text_chars=f"{max_full_text_chars:,}")
 
 
 def llm_truncated_lines(llm: LlmAnalysis) -> list[str]:
@@ -893,6 +905,9 @@ def llm_screen_lines(llm: LlmAnalysis, *, retry_after: int | None = None) -> lis
         lines.append(f"AI analysis: not run ({llm_rate_limited(retry_after)} (HTTP {RATE_LIMIT_STATUS}))")
     elif llm.status != "done":
         lines.append(f"AI analysis: not run ({llm_reason(llm)})")
+        if llm.reason == "full_text_too_long":
+            # Also when nothing was sent because of the text length, add one line pointing to where the limit can be changed (ADR-0259 decision 5; not added to CLI, wx, or saved output)
+            lines.append(PROMPT_LIMIT_SCREEN_HINT)
     if llm.truncated:
         # After the truncation notice, add one line pointing to where the limit can be changed (ADR-0167 decision 6; not added to CLI, wx, or saved output)
         lines += [*llm_truncated_lines(llm), LIMITS_SCREEN_HINT]
@@ -1011,6 +1026,26 @@ LIMIT_SOURCE_LABEL = {"default": "default", "user_config": "settings file", "cli
 LIMITS_CHANGE_HINT = "You can change them in the settings window or the settings file."
 # Added when the compare window (pywebview) shows that a pair was cut off at the limit (ADR-0167 decision 6). Not used by the CLI, wx, or the batch compare window
 LIMITS_SCREEN_HINT = "You can change the limits on the 'Compare and automation' tab of the settings window."
+# One sentence added to the notice when nothing was sent because of the text length (ADR-0259 decision 5). Screens only; not added to CLI text or saved results
+PROMPT_LIMIT_SCREEN_HINT = "You can change the limit on the 'Compare and automation' tab of the settings window."
+# One line added after the error text on screen when the AI refused because the text was too long (ADR-0259 decision 6)
+CONTEXT_LENGTH_HINT = (
+    'The text seems to be longer than the AI can handle. Lower "Maximum characters sent to the AI" in Settings, or send less.'
+)
+
+
+def with_prompt_limit_hint(text: str) -> str:
+    """Add the one sentence saying where the limit can be changed after a notice that nothing was sent because of the text length (ADR-0259 decision 5)."""
+    return f"{text.rstrip('.')}. {PROMPT_LIMIT_SCREEN_HINT}"
+
+
+def prompt_refused_text(kind: str, max_chars: int) -> str:
+    """Why an instruction edited in the confirmation was refused (follow_up_refused). Only for the length, one sentence saying where the limit can be changed is added.
+
+    max_chars is the limit on the whole text sent (not used for reasons other than the length).
+    """
+    text = follow_up_refused(kind, max_chars)
+    return with_prompt_limit_hint(text) if kind == "too_long" else text
 # Heading of the settings file box in wx (the pywebview settings window uses CONFIG_PANE_WEB. ADR-0167 decision 5)
 CONFIG_PANE = "Settings file (config.toml): AI analysis limits and extra masked words"
 # Heading of the "Settings file" tab in the pywebview settings window, and the note that the limit fields moved (ADR-0167 decision 5)
@@ -1113,6 +1148,23 @@ def workdir_limits_ignored(path: Path, names: "list[str] | tuple[str, ...]") -> 
 
 def limit_invalid(label: str) -> str:
     return f"The AI analysis limit ({label}) must be an integer of 1 or more. Not saved."
+
+
+# The "Maximum characters sent to the AI" field (ADR-0259 decision 4). The numbers come from the default, range and margin constants
+PROMPT_CHARS_LABEL_WEB = f"Maximum characters sent to the AI (default {DEFAULT_MAX_PROMPT_CHARS:,})"
+PROMPT_CHARS_NOTE_WEB = (
+    "Longer text costs more and takes longer per request. Lower this if the AI refuses because the text is too long "
+    f"(the full text can be up to this value minus {FULL_TEXT_MARGIN_CHARS:,})."
+)
+PROMPT_CHARS_NOW_LABEL = "Maximum characters sent to the AI"
+PROMPT_CHARS_INVALID_SAVE = (
+    f"The maximum characters sent to the AI must be an integer from {MIN_MAX_PROMPT_CHARS:,} to {MAX_MAX_PROMPT_CHARS:,}. Not saved."
+)
+
+
+def prompt_chars_now_line(value: int, source: str) -> str:
+    """Current value and its source, shown faintly under the "Maximum characters sent to the AI" field in the settings window (same form as limit_now_line)."""
+    return f"{PROMPT_CHARS_NOW_LABEL}: currently {value:,} ({LIMIT_SOURCE_LABEL[source]})"
 
 
 def secret_word_has_space(lines: "list[int]") -> str:
@@ -2810,6 +2862,7 @@ REREAD_NOT_SENT = {
     "secret_words": "Nothing was sent, because the secret words changed after the confirmation. Please confirm again.",
     "profile": "Nothing was sent, because the AI profile changed after the confirmation. Please confirm again.",
     "limits": "Nothing was sent, because the limits on what is sent to the AI changed after the confirmation. Please confirm again.",
+    "prompt_chars": "Nothing was sent, because the limit on the text sent to the AI changed after the confirmation. Please confirm again.",
 }
 BATCH_FAILED_TITLE = "Batch compare failed"
 BATCH_SELECT_TITLE = "Select a pair"
@@ -3280,6 +3333,8 @@ GUI_WEB_TEXTS.update(
         "settings.config.limits": LIMITS_TITLE_WEB,
         "settings.config.per_job": LIMIT_PER_JOB_WEB,
         "settings.config.total": LIMIT_TOTAL_WEB,
+        "settings.config.prompt_chars": PROMPT_CHARS_LABEL_WEB,
+        "settings.config.prompt_chars_hint": PROMPT_CHARS_NOTE_WEB,
         "settings.note.limits_moved": SETTINGS_NOTE_LIMITS_MOVED,
         "settings.config.words": SECRET_WORDS_TITLE,
         "settings.config.auto_compare": SETTINGS_AUTO_COMPARE,
@@ -5052,6 +5107,10 @@ LLMSET_ERRORS = {
     "non_empty_string": "{path}: {section}.{key} must be a non-empty string",
     "extra_secret_words": "{path}: {section}.extra_secret_words must be a list of words without spaces",
     "positive_int": "{path}: {section}.{key} must be an integer of 1 or more",
+    # The value is not put into the text (ADR-0259 decision 1)
+    "prompt_chars": (
+        f"{{path}}: The limit on the text sent to the AI (max_prompt_chars) must be an integer from {MIN_MAX_PROMPT_CHARS:,} to {MAX_MAX_PROMPT_CHARS:,}"
+    ),
     "api_key_string": "{path}: {section}.api_key must be a non-empty string",
 }
 
@@ -5164,6 +5223,9 @@ UCW_TEXTS = {
     "not_removable_item": "This item cannot be removed from the settings window: {key}",
     "extra_secret_words": "{path}: {section}.extra_secret_words must be a list of words without whitespace",
     "positive_integer": "{path}: {section}.{key} must be an integer of 1 or more",
+    "prompt_chars": (
+        f"{{path}}: The limit on the text sent to the AI (max_prompt_chars) must be an integer from {MIN_MAX_PROMPT_CHARS:,} to {MAX_MAX_PROMPT_CHARS:,}"
+    ),
     "toml_unreadable": "{path}: cannot be read as TOML",
     "not_table": "{path}: [{name}] must be a table",
     "cannot_write": "{path}: cannot write ({reason})",

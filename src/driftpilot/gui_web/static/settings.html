@@ -377,6 +377,13 @@
         <input id="max-total-diffs" class="pilot-input" type="text" autocomplete="off">
       </div>
       <p class="pilot-note pilot-lines" id="limits-note"></p>
+      <!-- AI に送る文の上限（ADR-0259 決定4。[llm] の max_prompt_chars。範囲は 100,000〜2,000,000。保存は上の欄と同じ「保存」） -->
+      <div class="pilot-field">
+        <label for="max-prompt-chars" data-text="settings.config.prompt_chars"></label>
+        <input id="max-prompt-chars" class="pilot-input" type="text" autocomplete="off">
+      </div>
+      <p class="pilot-note pilot-lines" id="prompt-chars-note"></p>
+      <p class="pilot-note pilot-lines" data-text="settings.config.prompt_chars_hint"></p>
       <p class="pilot-note pilot-lines" data-text="settings.note.save_both"></p>
       <div class="pilot-row">
         <span class="pilot-spacer"></span>

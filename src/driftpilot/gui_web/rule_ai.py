@@ -25,10 +25,11 @@ from typing import Any
 
 from driftpilot.gui_web.bridge import _failure
 from driftpilot.llm_analyzer import LLMClient, LLMConnectionError, LLMResponseError, normalize_newlines
-from driftpilot.llm_analyzer.follow_up import MAX_PROMPT_CHARS, check_question, prompt_too_long
+from driftpilot.llm_analyzer.follow_up import check_question, prompt_too_long
 from driftpilot.llm_analyzer.masking import Masker, has_unseen_char, normalize_words
 from driftpilot.llm_analyzer.payload import FULL_TEXT_OMITTED, build_after_text
 from driftpilot.llm_analyzer.rule_suggestion import KINDS, build_rule_prompt, check_rule, read_rule_answer
+from driftpilot.llm_constants import DEFAULT_MAX_PROMPT_CHARS
 from driftpilot.llm_settings import SettingsError, display_model, load_settings
 from driftpilot.messages import (
     RULE_AI_ASKING,
@@ -55,10 +56,18 @@ from driftpilot.messages import (
     rule_ai_too_many_lines,
     rule_ai_unavailable,
     rule_ai_unreadable,
+    with_prompt_limit_hint,
 )
 from driftpilot.raw_keys import MAX_PATTERN_CHARS
 from driftpilot.screen_model.batch_model import effective_base_url
-from driftpilot.screen_model.model import SendBasis, basis_change, current_send_basis, plan_llm, send_basis
+from driftpilot.screen_model.model import (
+    SendBasis,
+    basis_change,
+    current_send_basis,
+    plan_llm,
+    prompt_limit_lowered,
+    send_basis,
+)
 from driftpilot.screen_model.settings_model import destination_of
 
 # Python から画面への知らせの種類(static/js/raw_options.js が受ける)
@@ -250,10 +259,18 @@ class RuleAi:
         kind = basis_change(pending.basis, now)
         if kind in ("profile", "limits"):
             return REREAD_NOT_SENT[kind]
+        if prompt_limit_lowered(pending.basis, now, len(pending.prompt)):
+            # 上限が確認のときより下がり、承認した文がその値を超える。送らない(ADR-0259 決定7)
+            return REREAD_NOT_SENT["prompt_chars"]
         if kind == "secret_words":
             try:
                 composed = self._compose(
-                    normalize_words(now.secret_words), pending.lines, pending.description, pending.kind, pending.selection
+                    normalize_words(now.secret_words),
+                    pending.lines,
+                    pending.description,
+                    pending.kind,
+                    pending.selection,
+                    now.max_prompt_chars,
                 )
             except Exception:  # noqa: BLE001 - 作り直せないときも、送らない
                 return REREAD_NOT_SENT["secret_words"]
@@ -262,11 +279,18 @@ class RuleAi:
         return None
 
     def _compose(
-        self, words: Sequence[str], lines: tuple[str, ...], description: str, kind: str, selection: str | None
+        self,
+        words: Sequence[str],
+        lines: tuple[str, ...],
+        description: str,
+        kind: str,
+        selection: str | None,
+        max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
     ) -> str | tuple[str, Any]:
         """今の確かめと組み立て(秘密の語 words を受ける)。断るときは理由の文、送れるときは (送る文, 伏せた後の全文の節)。ロックの中で呼ぶ。
 
         _prepare(確認を作る)と _reread(承認の直前に作り直す)が同じ道を通る(REQ-371)。
+        max_prompt_chars は送る文全体の上限(_prepare は読んだ設定の値、_reread は読み直した値。ADR-0259 決定3)。
         """
         refusal = check_question(description, words, max_chars=MAX_DESCRIPTION_CHARS)
         if refusal is not None:
@@ -284,8 +308,8 @@ class RuleAi:
             if not any(selection in line for line in sent_lines):
                 return RULE_AI_SELECTION_REFUSED["selection_masked"]
         prompt = build_rule_prompt(kind, description, after.body, after.omitted, selection)
-        if prompt_too_long(prompt):
-            return rule_ai_prompt_too_long(MAX_PROMPT_CHARS)
+        if prompt_too_long(prompt, max_prompt_chars):
+            return with_prompt_limit_hint(rule_ai_prompt_too_long(max_prompt_chars))
         return prompt, after
 
     def _prepare(
@@ -310,7 +334,7 @@ class RuleAi:
         if has_unseen_char(text):
             return RULE_AI_UNSEEN, None, None
         words = normalize_words(plan.send.extra_secret_words)
-        composed = self._compose(words, lines, description, kind, selection)
+        composed = self._compose(words, lines, description, kind, selection, settings.max_prompt_chars)
         if isinstance(composed, str):
             return composed, None, None
         prompt, after = composed

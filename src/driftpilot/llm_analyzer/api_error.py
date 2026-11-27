@@ -199,6 +199,28 @@ def from_body(raw: bytes, headers: Any, *, api_key: str | None) -> ApiErrorText 
     return from_json(data, headers, api_key=api_key)
 
 
+# AI が「送る文が長すぎる」と断ったときの文に出る語(小文字で比べる。ADR-0259 決定6)。頭のコードは context_length_exceeded
+CONTEXT_LIMIT_CODE = "context_length_exceeded"
+CONTEXT_LIMIT_PHRASES = ("context length", "context_length", "maximum context", "prompt is too long", "too many tokens")
+
+
+def looks_like_context_limit(message: str | None) -> bool:
+    """掃除した後の誤りの文(ApiErrorText.message)が、「送る文が AI の扱える長さを超えた」断りか(ADR-0259 決定6)。
+
+    頭のコードが context_length_exceeded か、文に(大文字小文字を区別せず)CONTEXT_LIMIT_PHRASES のどれかがあれば真。
+    None・空・文字でない・とても長い文でも例外を出さず、見分けられなければ偽。
+    """
+    try:
+        if not isinstance(message, str) or not message:
+            return False
+        if message.startswith(f"[{CONTEXT_LIMIT_CODE}]"):
+            return True
+        lowered = message.lower()
+        return any(phrase in lowered for phrase in CONTEXT_LIMIT_PHRASES)
+    except Exception:  # noqa: BLE001 - 見分けの失敗で誤りの表示を止めない
+        return False
+
+
 def for_display(error: "ApiErrorText | None", secret_words: Sequence[str]) -> ApiErrorText | None:
     """画面と CLI に出す前に、利用者の秘密の語を足した語でもう一度掃除する。秒はそのまま。文も秒も無ければ None。"""
     if error is None:
